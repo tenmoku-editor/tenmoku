@@ -1,6 +1,6 @@
 # Tenmoku design system
 
-Written 2026-11-07 by Daryl Robbins (revision 19, direction B3). This is the
+Written 2026-11-07 by Daryl Robbins (revision 20, direction B3). This is the
 **should** for Tenmoku's look and feel; `docs/design-language.md` records what
 the code does today, and the cards that implement this file bring the two
 together.
@@ -152,15 +152,15 @@ framed by a status bar. Each region has one job and one place for its controls.
 
 | Region | What it holds | Rules |
 | --- | --- | --- |
-| Title bar | Back/forward, project ▾, branch ▾ (side by side, no slash), agent chip, the run widget (a task or debug configuration ▾, run or stop, debug; while debugging, the session's controls: continue or pause, the three steps, restart, stop), search, settings gear | The agent chip is the global "agents working" indicator; without a title bar the session's controls float (see Debugger) |
-| Rail | Top: Project, Search, Changes, Agents. Bottom: Problems, Runs, Debug, Git log, Terminal | Left or right (`workbench.rail`); panels open on the rail's side. Debug joins once the root has a debug configuration or a session starts |
+| Title bar | Back/forward, the remote pill (remote windows: host and connection state, see Remote development), project ▾, branch ▾ (side by side, no slash), agent chip, the run widget (a task or debug configuration ▾, run or stop, debug; while debugging, the session's controls: continue or pause, the three steps, restart, stop), search, settings gear | The agent chip is the global "agents working" indicator; without a title bar the session's controls float (see Debugger) and the remote pill is the status bar's first item. The pill doesn't move with the rail |
+| Rail | Top: Project, Search, Changes, Agents. Bottom: Problems, Runs, Debug, Git log, Terminal, Ports | Left or right (`workbench.rail`); panels open on the rail's side. Debug joins once the root has a debug configuration or a session starts. A remote window has Ports and no Agents or Chat |
 | Rail selection | A tinted tab behind the icon that runs to the rail's panel-facing edge, with a 2 px rust bar on that edge | Flips with the rail side |
 | Rail badges | Bottom-right corner, 2 px cut-out ring; colour = meaning (blue changes, silver-blue agents, red dot errors) | Never on top of the glyph |
 | Sidebar | Project tree with Structure collapsed at its foot; or Changes; or Review | Structure, collapsed, still shows the symbol under the caret |
 | Editor tab strip | Tabs (rust top line on the active tab, unsaved dot, pinned tab as an icon), then tab list ▾, split right, ⋯ | |
 | Breadcrumbs | `fe-display › src › minimap.rs › MinimapTile › render` | Symbols in their syntax colours; clicking opens the outline |
-| Bottom panel | Problems, Runs, Debug (Variables, Breakpoints, Console), Terminal, Git log | Own header, own tabs where it has them |
-| Status bar | Left: Vim mode pill, the operation in progress (spinner, label, bar, count, +N more), error and warning counts. Right: language server, position, indent, encoding, language, notification bell | No branch here: it is in the title bar |
+| Bottom panel | Problems, Runs, Debug (Variables, Breakpoints, Console), Terminal, Git log, Ports (remote windows: forwarded and detected ports) | Own header, own tabs where it has them. A remote terminal shows the Reconnecting… overlay while the link is down |
+| Status bar | Left: the remote pill (remote windows without a title bar), Vim mode pill, the operation in progress (spinner, label, bar, count, +N more), error and warning counts. Right: language server, position, indent, encoding, language, notification bell | No branch here: it is in the title bar |
 
 **Pane controls**, the same on every pane. Right-aligned in this order: the
 pane's own actions, then ⋯ (pane actions), then — (hide). The ⋯ menu offers
@@ -243,6 +243,18 @@ side, Vim mode), so any combination can be shown.
 | Debugger: breakpoints | B3 · Debug tool window: Breakpoints, in Yohen and Hakuji | Exception filters, a disabled and an unverified breakpoint, the empty state |
 | Debugger: console | B3 · Debug Console, in Yohen and Hakuji | Mixed output, an expanded result, an error |
 | Debugger: hover value | B3 · Hover value, in Yohen and Hakuji | A value with children above the language server's hover |
+| Remote: pill | B3 · Remote pill in the title bar, in Yohen and Hakuji | All seven states, each at rest and hovered; the forward count; the install underline at 60%; each state's menu; the title bar with the rail on the left and on the right; the pill as the status bar's first item without a title bar |
+| Remote: host | B3 · Open Remote: Host, in Yohen and Hakuji | The completion list with recent, ssh config and typed rows; "Not an ssh host"; Connect off on an empty field |
+| Remote: connecting | B3 · Open Remote: Connecting, in Yohen and Hakuji | The seven status lines, the bar at Downloading and Uploading, the Reinstalling… line, the first connect's footnote |
+| Remote: folder | B3 · Open Remote: Folder, in Yohen and Hakuji | The path field completing, the row spinner, folders over dimmed files, hidden entries after a `.` |
+| Remote: errors | B3 · Open Remote: errors, in Yohen and Hakuji | The nine causes with their actions, the changed host key's `shield-alert`, the second refused handshake |
+| Remote: sign-in | B3 · Sign-in prompt, in Yohen and Hakuji | A secret, an unknown host with its fingerprint selected, a touch notice; a git credential on the host |
+| Remote: pending | B3 · Remote pending states, in Yohen and Hakuji | Tabs loading, saving, save pending and not loaded, with the loading and not-loaded editor areas; tree rows expanding, renaming, moving, deleting and creating; Quick Open's Indexing… footer; the status bar's remote operations |
+| Remote: terminal | B3 · Terminal reconnecting, in Yohen and Hakuji | The scrim and Reconnecting… card; the lost-output line after resume |
+| Remote: ports | B3 · Ports tab, in Yohen and Hakuji | Forwarded, detected (dimmed) and starting rows; "5173 was in use"; row actions on hover; the Forward a Port input with its error; the empty state; the rail item |
+| Remote: toasts | B3 · Remote toasts, in Yohen and Hakuji | Lost, reconnected, disconnected, port detected and AI unavailable |
+| Remote: close prompt | B3 · Closing with pending saves, in Yohen and Hakuji | The prompt over a window with two save-pending tabs |
+| Remote: recents | B3 · Open Recent and Welcome with remote folders, in Yohen and Hakuji | Local and remote rows, the same folder on two hosts; Welcome's Open Remote… beside Open Folder |
 
 ### Problems
 
@@ -548,6 +560,405 @@ breakpoint, F10 and F11 step over and into and ⇧F11 step out while stopped
 preset: ␣db breakpoint, ␣dc continue, ␣dO over, ␣di into, ␣do out, ␣dP pause,
 ␣dt stop, ␣du the Debug tool window, ␣dr the Console, ␣dk ␣dj up and down the
 stack, ␣td debug the nearest test.
+
+### Remote development
+
+A remote window (`docs/designs/remote-development.md`, the record
+`docs/decisions/j8wvgszah0-remote-development.md`) is a normal window whose
+root lives on an ssh host. It adds one title-bar part, one sheet, one tool
+window and a handful of pending states to parts that are already here; nothing
+else changes shape. The calls behind this section, where it parts from the
+design file, and the script that checks its colours are in
+`docs/decisions/y0xkvvewjh-remote-design.md`. The examples use the host `neon`.
+
+Every text this section draws is ink or muted, never faint, so it clears the
+code floor too: 6:1 in Yohen and 4.5:1 in Hakuji, wherever it sits. The one
+exception is a primary button's label, `text.on_accent` on hare's fur, which
+clears the same floors (Buttons, below). Every
+spinner is the status bar's (Lucide `loader-circle`, a turn a second, 12 px),
+and none shows before 150 ms, so a fast reply never flickers one.
+
+**The remote pill.** A 20 px pill in the title bar, first in the left group:
+back and forward, 6 px, the pill, 2 px, then project ▾ and branch ▾ as today.
+It holds a 12 px glyph and the host's name, 6 px of padding each side and 4 px
+between, fully rounded (10 px radius). The name is UI label in ink and ends in
+an ellipsis past 200 px; the pill gives way last as the bar narrows (branch,
+then project, then the pill's name), and never below its glyph. Local windows
+have no pill.
+
+| State | Glyph | Tone | Tooltip | Click menu |
+| --- | --- | --- | --- | --- |
+| Connecting | Spinner | Neutral | "Connecting to neon…" | Cancel, Show Log |
+| Installing | Spinner, and a progress underline | Neutral | "Installing tenmoku-server… 60%" | Cancel, Show Log |
+| Connected | `server` | Neutral | "Connected to neon (me@neon.tailnet.ts.net) · 34 ms" | Disconnect, Forwarded Ports (2), Show Log, Close Remote Window |
+| Connected with ports | `server`, then `· 2` | Neutral | "Connected to neon (me@neon.tailnet.ts.net) · 34 ms · 2 forwarded ports" | As Connected |
+| Reconnecting | Spinner | Warning | "Lost connection to neon. Reconnecting (attempt 3, next in 8 s)." | Reconnect Now, Disconnect, Show Log |
+| Disconnected | `unplug` | Error | "Disconnected from neon. Your edits are kept." | Reconnect, Show Log, Close Remote Window |
+| Needs sign-in | `key-round` | Warning | "neon is waiting for you to sign in." | Sign In, Disconnect |
+
+- **Tones.** Neutral: no fill, a 1 px control-border edge, the glyph in muted;
+  hovered, the hover fill. Warning: the kiseto-soft fill, a 1 px kiseto edge,
+  the glyph in kiseto; hovered, the warning pill hover. Error: the same in
+  shinsha. The name stays ink in every tone, so the tone is the fill, the edge
+  and the glyph, never the text. The edge tells neutral from a signal by
+  lightness (control border against kiseto or shinsha, 0.31 OKLab L or more
+  apart in both themes); the two signal tones are told apart by their glyphs
+  (a spinner or a key against `unplug`) and their words.
+- **The progress underline** (Installing): a 2 px line across the pill's
+  content, inset 6 px each side and 2 px above its bottom edge, its track in
+  the control border and its fill in hare's fur, at the install's fraction.
+  It is the Runs progress line at pill size.
+- **The forward count:** while ports are forwarded, a `·` and the count follow
+  the name, 4 px apart, both UI label in muted (`neon · 2`). The count shows
+  only in Connected. Reconnecting and Needs sign-in keep the forwards' local
+  listeners (new connections wait or are refused) without counting them, and
+  they resume on reconnect. Disconnected has none: a disconnect, or the grace
+  running out, removes every forward, and the fresh session of a Reconnect
+  brings back only the ports `remote.ports` declares.
+- **The click menu** opens under the pill, left-aligned to it: the overlay
+  surface, `radius::MENU`, the floating shadow, 28 px rows. Its first row is a
+  header that isn't a choice: the host's ssh name and the latency, UI small in
+  muted (`me@neon.tailnet.ts.net · 34 ms`), then a hairline, then the state's
+  items as in the table. Sign In brings the waiting prompt forward;
+  Forwarded Ports (n) shows the Ports tab; Show Log opens the connection log
+  (ssh's stderr and the bootstrap's transcript) as a read-only editor tab,
+  "Remote log — neon". Every item is also a palette command, so the pill is
+  never the only way: Remote: Disconnect, Remote: Reconnect, Remote: Show Log,
+  Remote: Show Ports, Remote: Forward a Port…, Remote: Close Remote Window.
+- **Both rail sides.** The title bar doesn't flip with the rail
+  (`workbench.rail`): the pill stays first in the left group with the rail on
+  either side, as project and branch do, and the artboard shows it with both.
+- **Without a title bar** (Linux, and macOS without the unified title bar), the
+  pill is the status bar's first item, before the Vim mode pill, with the same
+  states, menu and name, as the agents chip becomes the `agents` status item.
+  A window never shows two pills.
+
+**The Open Remote sheet.** File › Open Remote… (`remote.open`) and the Welcome
+action open a modal sheet over the current window: 520 px wide, the overlay
+surface, `radius::FLOAT`, the floating shadow, 16 px padding, over the modal
+scrim. Its heading (UI heading, ink) names the step; under it the step's body;
+then the footnote; then the buttons, 26 px, 8 px apart, right-aligned with the
+default last, and Back or Show Log on the left. Esc cancels what is in flight
+and closes the sheet; Back returns a step.
+
+- **Buttons.** The default (Connect, Open, Retry, Open Settings when it leads,
+  OK) is kiln-ui's primary button: `accent.base` filled and edged, its label
+  `text.on_accent`; hovered and pressed, `accent.hover`, which the bundled
+  themes now set to an opaque value (Colour roles) instead of kiln's fallback,
+  the accent at 85% alpha, which drops the label to 5.24:1 in Yohen and 4.30:1
+  in Hakuji. The others (Cancel, Back, Show Log, and every empty-state button
+  in this section) are secondary: no fill, the control-border edge, an ink
+  label; hovered `state.hover`, pressed `state.pressed`. A disabled button
+  (Connect on an empty field) keeps its colours at kiln-ui's disabled opacity,
+  and isn't held to a floor, as WCAG exempts inactive controls. The prompts'
+  default buttons are the same primary button.
+
+- **Host** ("Open Remote"). One field, labelled Host, 26 px, small code, with
+  the placeholder `ssh alias, user@host or user@host:port`. Typing opens a
+  completion list under the field: the overlay surface, `radius::MENU`, 24 px
+  rows, at most eight before it scrolls. A row is the `server` glyph (16 px,
+  muted), the host as typed (small code, ink), its config `HostName` when it
+  has one (small code, muted, 12 px after), and at the right its source in UI
+  small muted: "recent", "ssh config" or "typed". Recent hosts come first.
+  ↑ ↓ move, Tab or Enter takes a row, and Enter again connects. Buttons:
+  Cancel, Connect (off until the field has text). Connect with a malformed
+  value (a space, a scheme other than `ssh://`) draws the field's edge in
+  shinsha and, under it, a 12 px `circle-x` in shinsha and "Not an ssh host"
+  in muted UI small, until the field changes. A pasted `ssh://host/path`
+  fills Host and keeps the path for Folder.
+- **Connecting** ("Connecting to neon"). A 16 px spinner and one status line
+  in UI body, ink, at the body's left; under the line, while there is a
+  fraction, the 72 × 4 px bar of the operation in progress, track in the
+  control border and fill in hare's fur, with the percentage in the line.
+  Buttons: Show Log on the left, Cancel. The lines, in order:
+
+  | State | Line | Bar |
+  | --- | --- | --- |
+  | ssh starting | "Connecting to neon…" | None |
+  | Waiting on the user | "Waiting for you to sign in to neon" | None; the sign-in prompt is up |
+  | Probing | "Checking neon…" | None |
+  | Downloading | "Downloading tenmoku-server 0.3.0 for linux-x86_64… 43%" | Yes |
+  | Verifying | "Verifying…" | None |
+  | Uploading | "Installing on neon… 60%" | Yes |
+  | Starting | "Starting tenmoku-server…" | None |
+
+  A first refused handshake is one more line in the same place, "tenmoku-server
+  on neon is a different build (0.2.9+ab12cd3). Reinstalling…", and the steps
+  from Uploading run again. On a first connect the footnote reads "Tenmoku
+  installs its server in ~/.cache/tenmoku-server on neon. It runs only while
+  you're connected." and ends in a Learn more link, both UI small in muted;
+  later connects have no footnote.
+- **Folder** ("Open Folder on neon"). A path field (26 px, small code)
+  prefilled with the remembered path or the remote `$HOME`, which completes
+  directory names inline after 150 ms or on Tab; its right end holds the row
+  spinner while a listing is out. Under it, a list 10 rows tall (240 px,
+  scrolling): folders first (the folder glyph in its role's tint, the name in
+  ink), then files (the file glyph and name in muted, dimmed and not
+  choosable). → or a double click enters a folder, ← or Backspace on an empty
+  segment goes up, and a `.` shows hidden entries. Buttons: Back on the left,
+  Cancel, Open. A listing that fails shows its error in the list's place as an
+  error line (below).
+- **Errors.** An error replaces the status line: a 16 px `circle-x` in
+  shinsha (`shield-alert` for a changed host key), then the message in UI body,
+  ink, wrapping; ssh's own words in it are small code. The heading stays the
+  step's. The first action in each row is the default; Show Log sits on the
+  left. Nine causes are errors:
+
+  | Cause | Message | Actions |
+  | --- | --- | --- |
+  | ssh failed (DNS, refused, timeout) | "Couldn't connect to neon: ‹ssh's last stderr line›" | Retry, Back; Show Log |
+  | Authentication failed or cancelled | "neon didn't accept the sign-in." | Retry, Back; Show Log |
+  | Host key changed | "The host key for neon has changed. This could mean someone is intercepting the connection. Tenmoku won't connect until the key in ~/.ssh/known_hosts is fixed." | Back; Show Log. No override |
+  | Unsupported host | "tenmoku-server isn't built for FreeBSD amd64." | Back |
+  | No matching release (dev build) | "This development build has no matching tenmoku-server release. Set remote.dev_server to a server built for linux-x86_64." | Open Settings, Back |
+  | Offline, no cache | "Couldn't download tenmoku-server 0.3.0: ‹error›" | Retry, Open Settings, Back |
+  | Verification failed | "The downloaded tenmoku-server failed its signature check and was deleted." | Retry, Back; Show Log |
+  | Host can't install | "Couldn't install on neon: ~/.cache isn't writable (mkdir: Permission denied)", or "…: no space left on device" | Back; Show Log |
+  | Dev server is another build | "remote.dev_server is build 0.3.0+9f8e7d6, this client is 0.3.0+ab12cd3-dirty. Build it from the same checkout." | Open Settings, Back; Show Log |
+
+  A second refused handshake, after the reinstall, is the error "tenmoku-server
+  on neon still refused the connection after reinstalling." with Back and Show
+  Log.
+- **The sign-in prompt.** ssh's prompts use the git credential prompt's frame
+  (`git_askpass.rs`: the palette frame at the top of the window, 600 px), one at
+  a time across windows, each titled with the host. It gains OK and Cancel at
+  the status line's right for the mouse; Enter and Esc stay. Three kinds:
+  - **A secret** (passphrase, password, OTP, keyboard-interactive): titled
+    "Sign in to neon". ssh's prompt verbatim as the field's label, a masked
+    field, and the status "neon asks for this. Enter sends it to ssh, Escape
+    cancels; it isn't saved." Buttons OK, Cancel.
+  - **An unknown host:** titled "Unknown host: neon". ssh's whole text in small
+    code, selectable so the fingerprint can be compared, and no field. Buttons
+    Connect (answers `yes`) and Cancel; Connect isn't the default, so Enter
+    alone never accepts a key.
+  - **A notice** (FIDO touch): titled "Touch your security key for neon".
+    ssh's text, a 16 px `key-round` in muted, no field, and Cancel only. It
+    closes by itself when ssh goes on.
+
+  A git credential on the host uses the secret kind, titled "Sign in to origin
+  on neon".
+
+**Pending states.** Typing never waits; each remote operation shows one of
+these until the host answers.
+
+- **Loading tab.** A file opens as a tab at once, read-only and empty. After
+  150 ms its tab draws a spinner in the close button's place (the 16 px box)
+  and its label in muted; the editor area shows "Loading main.rs from neon…"
+  centred in UI body, muted, with no gutter. The content replaces both when it
+  lands. A large file streams through the large-file path, with its operation
+  in the status bar.
+- **Saving ring.** While a save is in flight the unsaved dot becomes a 12 px
+  ring (Lucide `circle`) in the unsaved dot's colour (`state.dirty`), in the
+  same box, and the tab turns clean when the host confirms. It shows hover's
+  close button as the dot does.
+- **Save pending.** A save made while reconnecting turns the dot into a 12 px
+  `clock` (the ring with hands) in the same colour, with the tooltip "Will save
+  when neon is back". On resume it becomes the ring, then clean; a changed
+  file asks its usual Overwrite / Cancel.
+- **Not loaded — reconnecting.** A file opened while reconnecting opens as a
+  tab whose label is muted and whose close box holds the spinner; the editor
+  area shows the empty state "Not loaded — reconnecting to neon. It opens when
+  neon is back." centred in muted UI body, with one button, Reconnect Now. It
+  loads on resume.
+- **Tree.** Expanding a folder draws the spinner in the row's chevron place
+  after 150 ms, and the children replace it. A create, rename, move or delete
+  is never shown as done: the row stays as it was, its glyph and name in muted,
+  with the spinner at its right end where the git status letter sits, and a
+  muted suffix saying what is pending ("renaming to lib.rs", "moving to lib/",
+  "deleting"); a new file or folder is a row of its typed name in the same
+  style. The host's reply settles it, and a refusal is a toast. While
+  reconnecting a folder keeps its old children, in muted.
+- **Quick Open.** Results fill in as the host walks the tree; until the walk
+  ends the list ends in a 24 px footer row, not a choice: the spinner and
+  "Indexing… 12,480 files" in UI small, muted.
+- **Terminal.** While reconnecting a terminal tab draws the modal scrim over
+  its content and, centred on it, a card: the overlay surface with the 1 px
+  hairline and the floating shadow, `radius::MENU`, 8 px by 12 px of padding,
+  the spinner and "Reconnecting…" in UI body, ink. It takes no input. On
+  resume the scrim and card go; if output was lost, the terminal shows one
+  line, "Output was lost while disconnected", in muted small code, where the
+  gap is.
+- **Operation in progress.** The status bar's existing slot lists the remote
+  work, with nothing new: "Connecting to neon" (spinner), "Installing
+  tenmoku-server on neon" (bar and percentage), "Opening big.log from neon"
+  (bar, for streamed files), "Indexing neon" (spinner and file count) and, on
+  resume, "Saving 2 files to neon" (count). Clicking an entry opens the list as
+  today; a connect's entry offers Show Log.
+
+**The Ports tab.** A tool window in the bottom panel, in remote windows only.
+Its rail item (Lucide `ethernet-port`) is in the bottom group after Terminal,
+on whichever side the rail is, with no badge: the pill carries the count. Its
+header is the 34 px panel strip: "Ports", then Forward a Port…, then the pane
+controls.
+
+- **Rows**, 24 px, one per forwarded or detected port, in four columns sized
+  to their content 24 px apart, Process taking the rest:
+
+  | Column | Content |
+  | --- | --- |
+  | Port | A 12 px glyph, `arrow-left-right` (forwarded), `circle-dashed` (detected, not forwarded) or the spinner (starting), then `5173` in small code |
+  | Local address | `localhost:5174` in small code; "5173 was in use" after it in UI small, muted; "Starting…" while it starts; "Not forwarded" on a detected row |
+  | Process | `node (vite)` and `· 48213` (pid) in small code, muted; empty when the host doesn't know |
+  | Source | Detected, Task "dev", Settings or Added, in UI label, muted |
+
+  A forwarded row is ink; a detected row that isn't forwarded is dimmed: every
+  cell in muted, with the dashed glyph, so it differs in lightness and shape,
+  not only in tint. While reconnecting, rows stay as they are.
+- **Row actions:** icon buttons (22 px, 2 px apart) at the row's right on hover
+  or selection, ghost buttons with muted icons. Which are on follows the row,
+  since only a forwarded row has a local address:
+
+  | Row | Open in Browser (`external-link`) | Copy Address (`copy`) | Last button |
+  | --- | --- | --- | --- |
+  | Forwarded | Opens `http://localhost:5174` | Copies `localhost:5174` | Stop Forwarding (`x`) |
+  | Starting | Off until the address exists | Off until the address exists | Stop Forwarding (`x`): cancels the forward |
+  | Detected, not forwarded | Forwards the port, then opens the local address it gets; if the forward fails, its error is a toast and nothing opens | Off: there's no address | Forward (`arrow-left-right`) |
+
+  An off button is drawn at kiln-ui's disabled opacity and stays in its place,
+  so the buttons don't shift between states. The row's context menu has the
+  same items in the same states. Keys follow the table: Enter is Open in
+  Browser (on a starting row it does nothing), ⌘C copies only when there's an
+  address, Delete stops a forwarded or starting row's forward, and ⌘↵ forwards
+  a detected row.
+- **Forward a Port…** opens an input row at the top of the list (26 px, small
+  code, the placeholder `3000 or 3000:13000 (host:local)`), as Watch's Add
+  watch row does. Enter forwards and closes it, Esc closes it. Enter on a
+  malformed value keeps the row open and marks the input invalid: its edge in
+  shinsha and, under it, a 12 px `circle-x` in shinsha and "Not a port: use
+  3000 or 3000:13000" in muted UI small. The message is the input's
+  description while it shows, and it's announced once per failed Enter; it
+  goes when the value changes. A port the host or the client refuses (in use
+  on both, say) is the same kind of message: "Couldn't forward 3000: ‹error›".
+- **Empty state**, centred, muted UI body: "No ports yet. Ports your programs
+  listen on appear here." and one button, Forward a Port….
+
+**Toasts.** The five are B3 toasts, each at its level's icon and colour
+(`toast.rs`); identical ones count up (×3) rather than stack while a link flaps.
+
+| Toast | Level | Title, line | Actions | Goes |
+| --- | --- | --- | --- | --- |
+| Lost | Warning | "Lost connection to neon", "Your edits are kept, and saves will finish when it's back." | None | After the usual lifetime; the pill stays amber |
+| Reconnected | Success | "Reconnected to neon" | None | After the usual lifetime |
+| Disconnected | Error | "Disconnected from neon", "Terminals and language servers there were stopped. Your edits are kept." | Reconnect | Stays until dismissed or reconnected |
+| Port detected | Info | "Port 5173 is listening on neon" | Open in Browser, Forward | After the usual lifetime; the row stays in Ports |
+| AI unavailable | Info | "AI chat and agents aren't available in remote windows yet" | None | After the usual lifetime |
+
+**Closing with pending saves.** The app prompt (the platform's alert, or
+kiln-ui's 420 px prompt where there is none), at the warning level: "2 files
+have changes that weren't saved to neon.", the detail "Tenmoku keeps them in
+its backups and offers them the next time you connect to app on neon.", and
+Keep for Next Time (the default), Discard and Cancel.
+
+**Recents and Welcome.** Open Recent lists a remote folder as `app — neon`
+with the `server` glyph in the icon slot where a local row has its folder, its
+location (`ssh://neon/home/me/src/app`) in muted small code as a local row's
+path is, so the same folder on two hosts is two rows. The Welcome page (still
+to design) gets Open Remote… beside Open Folder, and lists its recent remote
+folders as these same rows.
+
+**Colour roles.** Two new roles, theme keys in a new `[remote]` table, and a
+value for the existing `accent.hover` in both bundled themes; every other
+colour is an existing token. The check and its output are in the
+decision file.
+
+| Role | Key | Yohen | Hakuji | Falls back to | Used for |
+| --- | --- | --- | --- | --- | --- |
+| Warning pill hover | `remote.pill_warning_hover` | `#3f3216` | `#e5e2ca` | `status.warning_soft` | A hovered Reconnecting or Needs sign-in pill: kiseto-soft a tenth of the way to kiseto |
+| Error pill hover | `remote.pill_error_hover` | `#482524` | `#f6d2cd` | `status.error_soft` | A hovered Disconnected pill: shinsha-soft a tenth of the way to shinsha |
+| Primary button hovered | `accent.hover` (an existing key, now set in both bundled themes) | `#e39a68` | `#863b12` | kiln's `accent.base` at 85% alpha | A hovered or pressed primary button: hare's fur a fifth of the way to ink (Yohen) or black (Hakuji) |
+
+| Reuse | Token | Yohen | Hakuji |
+| --- | --- | --- | --- |
+| Neutral pill edge | `border.control` | `#4a3a2e` | `#c6cad0` |
+| Neutral pill hover | `state.hover` | `#2b221d` | `#ebecef` |
+| Neutral glyph, count, every muted text | `text.muted` | `#b8a99a` | `#4b525b` |
+| Warning pill fill; its edge and glyph | `status.warning_soft`; `status.warning` (kiseto) | `#2c2311`; `#e8b440` | `#f1efe0`; `#776a00` |
+| Error pill fill; its edge and glyph; error icons and field edges | `status.error_soft`; `status.error` (shinsha) | `#351d1c`; `#f2716f` | `#ffe7e2`; `#a1100e` |
+| Install underline and sheet bar | `accent.base` (hare's fur) on `border.control` | `#e0874c` | `#a84a16` |
+| Primary button and its label | `accent.base`; `text.on_accent` | `#e0874c`; `#1c1613` | `#a84a16`; `#ffffff` |
+| Secondary button: edge; label; hovered; pressed | `border.control`; `text.primary`; `state.hover`; `state.pressed` | `#4a3a2e`; `#ede4d6`; `#2b221d`; `#2f2621` | `#c6cad0`; `#1f2328`; `#ebecef`; `#e8eaee` |
+| Saving ring, save-pending clock | `state.dirty` (the unsaved dot's, kiseto in both themes) | `#e8b440` | `#776a00` |
+| Terminal scrim | `surface.overlay` | `#00000080` | `#0000004d` |
+
+- Every text clears its floor: the lowest is muted on a focused row, 6.09:1 in
+  Yohen, and muted on a selected row, 6.56:1 in Hakuji. The pill's name is
+  9.93:1 or better on every pill ground. A primary button's label is 6.59:1
+  (Yohen) and 5.74:1 (Hakuji) at rest, 7.74:1 and 7.93:1 hovered or pressed.
+- Every glyph and edge is 3:1 or better on its ground: the lowest is the
+  install underline on its track, 4.00:1 and 3.49:1, and Hakuji's kiseto on
+  the warning pill hover, 4.18:1.
+- Hakuji's soft grounds are only 2.6 and 3.2 ΔE from the chrome, so the 1 px
+  signal edge, not the fill, marks the pill there; hovered they are 6.3 and
+  8.1.
+
+**Accessibility.** Every string is in a new `remote.ftl` in fe-workbench; the
+tab states are kiln-ui's (`kiln-ui.ftl`). Every control has a name.
+
+| Control | Accessible name |
+| --- | --- |
+| Pill (a button with a menu) | "Remote: neon, connecting"; "Remote: neon, installing tenmoku-server, 60 percent"; "Remote: neon, connected, 34 milliseconds"; "…, 2 forwarded ports"; "Remote: neon, reconnecting, attempt 3, next in 8 seconds"; "Remote: neon, disconnected, your edits are kept"; "Remote: neon, waiting for you to sign in" |
+| Pill menu | A menu named "neon"; its items by their labels; the header row as its description |
+| Sheet | A dialog named by its heading; the field "Host", its list "Hosts" with options "neon, neon.tailnet.ts.net, recent"; the field invalid while "Not an ssh host" shows, with it as the field's description; the status line a status; the bar a progress bar named by its line; the field "Folder on neon"; the list "Folders in /home/me/src", rows "src, folder" and "README.md, file, not selectable"; the error a status; the footnote's link "Learn more about the remote server" |
+| Sign-in prompt | A dialog named by its title; the field named by ssh's prompt; the unknown host's text a read-only text named "ssh's message"; the notice a status |
+| Tabs | "main.rs, loading"; "main.rs, saving"; "main.rs, save pending, will save when neon is back"; "main.rs, not loaded, reconnecting" |
+| Tree rows | "src, loading"; "main.rs, renaming to lib.rs"; "lib/, moving to src/"; "old.rs, deleting"; "new.rs, creating" |
+| Quick Open footer | "Indexing, 12,480 files so far" |
+| Terminal | Its tab's name gains ", reconnecting"; the card is a status |
+| Ports | The rail item "Ports" ("Ports, 2 forwarded"); a table "Ports" with its four column headers; rows "Port 5173, forwarded to localhost:5174, node (vite), process 48213, detected", "Port 8080, starting" and "Port 3000, detected, not forwarded"; on a forwarded row the buttons "Open localhost:5174 in browser", "Copy address localhost:5174", "Stop forwarding port 5173"; on a starting row "Open in browser" and "Copy address", both unavailable, and "Cancel forwarding port 8080"; on a detected row "Forward port 3000 and open in browser", "Copy address" (unavailable) and "Forward port 3000"; the header's "Forward a Port…"; the input "Forward a port, as 3000 or 3000:13000", invalid while its error shows, with the error as its description |
+| Close prompt | An alert named by its message |
+| Recent row | "app on neon, remote folder, ssh://neon/home/me/src/app" |
+
+Announcements, polite, one per change (progress isn't announced: the bar has
+its value):
+
+- the pill's state on each change: "Connecting to neon", "Installing
+  tenmoku-server on neon", "Connected to neon", "Lost connection to neon.
+  Reconnecting.", "Reconnected to neon", "Disconnected from neon. Your edits
+  are kept.", "neon is waiting for you to sign in";
+- in the sheet, each step's heading, each status line, and an error's message;
+- "Port 5173 forwarded to localhost:5174", "Stopped forwarding port 5173";
+- a refused submission's message, once each time: "Not an ssh host" (Connect
+  in Host), "Not a port: use 3000 or 3000:13000" and "Couldn't forward 3000:
+  ‹error›" (Forward a Port);
+- "main.rs will save when neon is back" on a queued save, and "Saved 2 files
+  to neon" when the queue is done;
+- "Terminal reconnecting" and "Terminal reconnected", or "Output was lost while
+  disconnected";
+- "Indexing finished: 50,000 files" when Quick Open's walk ends while it is
+  open;
+- toasts, as every toast is.
+
+**Sizes.** Every size above is a kiln-ui role (`roles.rs`) or one to add:
+
+| Size | Role |
+| --- | --- |
+| Pill | New `height::PILL` (20); `radius::FLOAT` (10, half its height); `space::S6` padding, `space::S4` between glyph and name and before the count; the name's width `width::TITLE_LABEL_MAX` (200) |
+| Pill's place | `space::S6` after forward, `space::S2` before project (`title_bar.rs`'s `NAV_GAP` and `GAP`) |
+| Pill edge, card and field hairlines | New `glyph::HAIRLINE` (1) |
+| Progress underline | `glyph::STROKE` (2) tall, inset `space::S6`, `space::S2` above the bottom |
+| Pill and row glyphs, spinners, ring, clock, field-error icon | New `glyph::ICON_SMALL` (12), today `operations_status.rs`'s `SPINNER` and the tab's close icon |
+| Sheet and empty-state icons, the sign-in notice's key | `glyph::ICON` (16) |
+| Close box the ring and clock sit in | The tab's 16 px close box (`tab_bar.rs`'s `CLOSE_BOX_SIZE`), moving to new `glyph::CLOSE_BOX` (16) |
+| Recents icon slot | The picker's 14 px icon (`recent_picker.rs`), moving to new `glyph::ROW_ICON` (14) |
+| Pill menu rows | `height::MENU_ROW` (28); `radius::MENU`, `SHADOW_FLOAT` |
+| Sheet | New `width::SHEET` (520); `space::S16` padding, `space::S12` between field, body and buttons; `radius::FLOAT`, `SHADOW_FLOAT` |
+| Fields and buttons | `height::CONTROL` (26), buttons `space::S8` apart |
+| Completion and folder rows, Ports rows, Quick Open footer | `height::ROW` (24); the completion list at most 8 rows, the folder list 10 (240) |
+| Completion rows' HostName and source | `space::S12` after the host; the source right-aligned |
+| Connecting bar | New `width::PROGRESS_BAR` (72) and `height::PROGRESS_BAR` (4), today `operations_status.rs`'s `BAR_WIDTH` and `BAR_HEIGHT` |
+| Sign-in prompt | The palette frame, new `width::PALETTE` (600), today `palette.rs`'s `PALETTE_WIDTH` |
+| Close prompt | New `width::PROMPT` (420), today `prompt.rs`'s `PROMPT_WIDTH` |
+| Toasts | New `width::TOAST` (340), today `toast.rs`'s `WIDTH` |
+| Terminal card | `space::S8` by `space::S12` padding, `radius::MENU`, `SHADOW_FLOAT` |
+| Ports header | `height::TAB_STRIP` (34) |
+| Ports columns | Sized to content, `space::S24` apart |
+| Row action buttons | `height::CONTROL_SMALL` (22), `space::S2` apart |
+| Type | `UI_LABEL` for the pill's name and count, the Source column; `UI_BODY` for status lines, messages, empty states and the terminal card; `UI_HEADING` for the sheet's heading; `UI_SMALL` for the footnote, field errors, the menu header and the Quick Open footer; `CODE_SMALL` for hosts, paths, ports, addresses, processes and ssh's words |
+
+New Lucide icons: `unplug`, `clock`, `circle`, `circle-dashed`,
+`shield-alert`, `external-link`, `ethernet-port` and `arrow-left-right`;
+`server`, `key-round`, `loader-circle`, `circle-x`, `copy` and `x` are in
+kiln-ui.
 
 ## Notifications and agents
 
