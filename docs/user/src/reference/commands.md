@@ -769,6 +769,7 @@ Every command by ID, the name a keymap, a menu or a plugin runs it by, with its 
 | `terminal.move_to_left` | Move Terminal to Left | — | — |
 | `terminal.move_to_right` | Move Terminal to Right | — | — |
 | `terminal.new` | New Terminal | <kbd>⌃⇧&#96;</kbd> | <kbd>Ctrl+&#126;</kbd> |
+| `terminal.new_with_profile` | New Terminal with Profile… | — | — |
 | `terminal.next` | Next Terminal | <kbd>⇧⌘&#93;</kbd> | <kbd>Ctrl+PageDown</kbd> |
 | `terminal.next_prompt` | Terminal: Next Prompt | — | — |
 | `terminal.previous` | Previous Terminal | <kbd>⇧⌘&#91;</kbd> | <kbd>Ctrl+PageUp</kbd> |

@@ -613,6 +613,12 @@ settings-terminal-command_blocks =
     green if it exited 0 and red if not, and its exit code and how long
     it ran at the right of its prompt row.
 
+settings-terminal-default_profile =
+    The profile a new terminal starts, by name: one found on this
+    machine ("PowerShell 7", "Command Prompt", "Git Bash", a WSL distro's
+    name, "zsh") or one of `profiles`. Empty runs `shell`, else your login
+    shell.
+
 settings-terminal-font_fallbacks =
     Fonts to take a character from when the terminal's font lacks it, in
     order: "Symbols Nerd Font Mono" gives Nerd Font icons with any font.
@@ -628,6 +634,10 @@ settings-terminal-history_suggestions =
     the newest command you ran in any terminal that starts with it. Right
     or End at the end of the line accepts it. Kept in memory only, never
     written to disk.
+
+settings-terminal-profiles =
+    Your own terminal profiles, which the `+` button's menu lists with
+    the ones found on this machine. One named as a found one replaces it.
 
 settings-terminal-scrollback =
     How many lines the terminal keeps above the screen. Applies to

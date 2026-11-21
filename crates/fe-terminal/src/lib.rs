@@ -7,6 +7,7 @@
 pub mod history;
 pub mod keys;
 mod links;
+pub mod profiles;
 mod pty_loop;
 mod search;
 mod session;

@@ -421,6 +421,19 @@ settings-template-terminal-history_suggestions =
     newest command you ran in any terminal that starts with it. Right or End at
     the end of the line accepts it. Kept in memory only, never written to disk.
 
+settings-template-terminal-default_profile =
+    The profile a new terminal starts, by name: one found on this machine
+    ("PowerShell 7", "Command Prompt", "Git Bash", a WSL distro's name, "zsh") or
+    one of profiles. Empty runs shell, else your login shell. A project file
+    can't set it.
+
+settings-template-terminal-profiles =
+    Your own terminal profiles, which the + button's menu lists with the ones
+    found on this machine: each a table of name, command, args, cwd, env and
+    icon (a name from the app's icons, such as "terminal"), each in a
+    {"["}[terminal.profiles]] table. One named as a found one replaces it. A project
+    file can't set them.
+
 settings-template-chat-model =
     The Claude model new chats start with. A
     project file can't set any [chat] key.
