@@ -464,8 +464,8 @@ impl Trashed {
             Err(err) if is_missing(&err) => return Ok(false),
             Err(err) => return Err(err),
         };
-        match listing::stat_at(&dir, name) {
-            Ok(stat) => Ok(stat.id == self.id),
+        match listing::entry_at(&dir, name) {
+            Ok(entry) => Ok(entry == self.entry),
             Err(err) if is_missing(&err) => Ok(false),
             Err(err) => Err(err),
         }
@@ -611,7 +611,7 @@ pub fn restore(root: &Path, trashed: &mut Trashed) -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
     let (dir, name) = open_parent(&at)?;
     let gone = || io::Error::from(io::ErrorKind::NotFound);
-    if listing::stat_at(&dir, name)?.id != trashed.id {
+    if listing::entry_at(&dir, name)? != trashed.entry {
         return Err(gone());
     }
     let root = Root::open(root)?;
@@ -635,8 +635,8 @@ pub fn restore(root: &Path, trashed: &mut Trashed) -> io::Result<PathBuf> {
             drop_private();
         }
     };
-    let checked = listing::stat_at(&private, name);
-    if checked.as_ref().map(|stat| stat.id).ok() != Some(trashed.id) {
+    let checked = listing::entry_at(&private, name);
+    if checked.as_ref().ok() != Some(&trashed.entry) {
         // Something else staged: it goes back where it was found. Unsure,
         // the entry stays staged, where the record says.
         if checked.is_ok() {
@@ -655,8 +655,8 @@ pub fn restore(root: &Path, trashed: &mut Trashed) -> io::Result<PathBuf> {
     // the one checked, or isn't known to be. Whatever is there is left
     // where it is, never moved back into the Trash, and the record follows
     // nothing any more: where the entry checked went isn't known.
-    let published = listing::stat_at(&target.parent, target.name);
-    if published.as_ref().ok().map(|stat| stat.id) != Some(trashed.id) {
+    let published = listing::entry_at(&target.parent, target.name);
+    if published.as_ref().ok() != Some(&trashed.entry) {
         trashed.at = None;
         drop_private();
         return Err(match published {

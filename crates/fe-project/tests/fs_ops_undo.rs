@@ -10,10 +10,24 @@ use std::{
 use fe_project::fs_ops::{self, testing};
 
 /// A temporary project, by its canonical path.
+///
+/// Projects, and the test trash with them, live under the target folder,
+/// not the temporary one: tmpfs (`/tmp` on many Linux machines) numbers
+/// inodes incrementally and never reuses one, so a test of a re-created
+/// file with a reused inode can't happen there. The trash is per process,
+/// so every test of this binary is rooted there, or one in a tmpfs folder
+/// would cross devices.
 fn project() -> (tempfile::TempDir, PathBuf) {
+    static UNDER: std::sync::Once = std::sync::Once::new();
+    UNDER.call_once(|| {
+        // SAFETY: this runs before anything is trashed, and every test of
+        // this binary goes through here first (each in a process of its own
+        // under nextest; under `cargo test` the others wait on the `Once`).
+        unsafe { std::env::set_var("FE_TEST_TRASH_ROOT", env!("CARGO_TARGET_TMPDIR")) };
+    });
     let dir = tempfile::Builder::new()
         .prefix("fe-project-undo-")
-        .tempdir()
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
     let root = dunce::canonicalize(dir.path()).unwrap();
     (dir, root)
@@ -115,11 +129,63 @@ fn another_entry_in_its_place_in_the_trash_is_not_taken() {
     let at = trashed.location().unwrap().to_owned();
     fs::remove_file(&at).unwrap();
     fs::write(&at, "another\n").unwrap();
+    #[cfg(unix)]
+    assert_ne!(
+        identity(&at),
+        trashed.id(),
+        "the replacement is another entry, whatever inode it got"
+    );
 
-    let err = fs_ops::restore(&root, &mut trashed).unwrap_err();
+    let result = fs_ops::restore(&root, &mut trashed);
+    assert!(result.is_err(), "restored over another entry: {result:?}");
+    let err = result.unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
     assert!(!file.exists());
     assert_eq!(fs::read_to_string(&at).unwrap(), "another\n");
+}
+
+/// `trashed` as if its entry had been born at another time than it was, with
+/// the same device and inode: what a file re-created with a reused inode
+/// looks like to the checks, on any file system.
+fn born_at_another_time(trashed: &fs_ops::Trashed) -> fs_ops::Trashed {
+    let mut record = fe_host::TrashRecord::from(trashed.clone());
+    record.id.born = Some(match record.id.born {
+        Some((secs, nanos)) => (secs + 1, nanos),
+        None => (1, 0),
+    });
+    assert_ne!(record.id, trashed.id());
+    fs_ops::Trashed::from(record)
+}
+
+#[test]
+fn an_entry_with_the_same_inode_born_at_another_time_is_not_restored() {
+    let (_dir, root) = project();
+    let file = root.join("a.txt");
+    fs::write(&file, "trashed\n").unwrap();
+    let trashed = trash_one(&root, &file);
+    let at = trashed.location().unwrap().to_owned();
+    let mut other = born_at_another_time(&trashed);
+
+    let result = fs_ops::restore(&root, &mut other);
+    assert!(result.is_err(), "restored the wrong entry: {result:?}");
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+    assert!(!file.exists());
+    assert_eq!(fs::read_to_string(&at).unwrap(), "trashed\n");
+    assert_eq!(other.location(), Some(at.as_path()), "not moved");
+}
+
+#[test]
+fn an_entry_with_the_same_inode_born_at_another_time_is_not_in_the_trash() {
+    let (_dir, root) = project();
+    let file = root.join("a.txt");
+    fs::write(&file, "trashed\n").unwrap();
+    let trashed = trash_one(&root, &file);
+    assert!(trashed.in_trash().unwrap());
+    let other = born_at_another_time(&trashed);
+    assert!(
+        !other.in_trash().unwrap(),
+        "the entry there isn't the one recorded"
+    );
 }
 
 #[test]

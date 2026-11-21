@@ -144,6 +144,13 @@ struct TestTrash {
 
 static TRASH: OnceLock<TestTrash> = OnceLock::new();
 
+/// The environment variable a test binary sets, before anything is
+/// trashed, to put its test trash under a folder instead of
+/// [`std::env::temp_dir`]: a tmpfs temporary folder never reuses an inode,
+/// so a test of that needs its projects, and the trash with them, on
+/// another volume.
+const ROOT_VAR: &str = "FE_TEST_TRASH_ROOT";
+
 fn opened() -> io::Result<&'static TestTrash> {
     static MAKING: Mutex<()> = Mutex::new(());
     if let Some(trash) = TRASH.get() {
@@ -161,7 +168,10 @@ fn opened() -> io::Result<&'static TestTrash> {
 }
 
 fn make() -> io::Result<TestTrash> {
-    let base = dunce::canonicalize(std::env::temp_dir())?;
+    let base = match std::env::var_os(ROOT_VAR) {
+        Some(root) => dunce::canonicalize(root)?,
+        None => dunce::canonicalize(std::env::temp_dir())?,
+    };
     remove_stale(&base);
     let pid = std::process::id();
     let path = base.join(format!("{PREFIX}{pid}"));
