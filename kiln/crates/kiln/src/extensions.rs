@@ -117,6 +117,8 @@ enum EntryKind {
     File {
         len: u64,
         modified: Option<std::time::SystemTime>,
+        /// Its execute bits, 0 off Unix; write bits are left out.
+        execute_bits: u32,
     },
     /// Whether it can be listed (a `read_dir` opens).
     Dir {
@@ -164,6 +166,7 @@ fn entry_of(dir: &Path, root: Option<&Path>, path: PathBuf) -> Entry {
         Ok(m) if m.is_file() => EntryKind::File {
             len: m.len(),
             modified: m.modified().ok(),
+            execute_bits: kiln_core::platform::execute_bits(&m),
         },
         Ok(_) => EntryKind::Other,
     };

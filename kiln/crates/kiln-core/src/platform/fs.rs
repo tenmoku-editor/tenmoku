@@ -310,6 +310,21 @@ pub fn modified_parts(metadata: &fs::Metadata) -> (i64, i64) {
     }
 }
 
+/// The execute bits (user, group, other) of `metadata`'s mode: 0 off Unix,
+/// and write bits are left out.
+pub fn execute_bits(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode() & 0o111
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
 /// Whether a regular file with `metadata` at `path` can be run as a program:
 /// on Unix, it has an execute bit; on Windows, its extension is one of
 /// `PATHEXT`'s (`.exe`, `.cmd` and the like).
