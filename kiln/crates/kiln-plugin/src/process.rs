@@ -13,6 +13,9 @@
 //! share that limit. Everything before a launch comes out of that share and stops at its end: the
 //! check of the program, the waiting for a suspension to reach the store (the writing goes on
 //! elsewhere, until it is written), and the setup, after which no child starts.
+//!
+//! A background job may also start a program without waiting for it, under the same grants and
+//! checks, and stream its stdio: `process.start`, in [`crate::process_stream`].
 
 use std::ffi::OsString;
 use std::io;
@@ -28,13 +31,16 @@ use kiln_command::capability::{Capability, Target};
 use kiln_core::platform::{OutputDrain, ProcessTree, StdinFeed};
 use kiln_l10n::{tr, verbatim};
 
-use crate::bindings::kiln::extension::process::{Host, Output};
+use wasmtime::component::Resource;
+
+use crate::bindings::kiln::extension::process::{Child, Host, Output};
 use crate::bindings::{Error, HostState};
 use crate::grants::{
     self, GrantRecord, GrantStore, ProgramIdentity, Suspended, SuspensionWrite, SuspensionWriter,
 };
 use crate::jobs::{self, JobControl};
 use crate::limits::{Limits, PROGRAM_DEADLINE};
+use crate::process_stream::{self, Streams};
 
 /// What the program runs of the call now running have used of its share, and what is left.
 ///
@@ -131,6 +137,8 @@ pub struct State {
     max_output: usize,
     deadline: Duration,
     environment: Vec<(OsString, OsString)>,
+    /// The programs a job started with `process.start`, and the roots their `cwd` may name.
+    pub(crate) streams: Streams,
 }
 
 impl Default for State {
@@ -150,7 +158,16 @@ impl State {
             max_output: limits.max_read_bytes,
             deadline: PROGRAM_DEADLINE,
             environment: minimal_environment(std::env::vars_os()),
+            streams: Streams::default(),
         }
+    }
+
+    /// The roots preopened for the store, as host paths: a `process.start`'s `cwd` must lie in
+    /// one. Without this, none does, and every `cwd` is refused. See
+    /// [`process_stream::preopened`] for the roots a store's grants preopen.
+    pub fn with_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.streams.set_roots(roots);
+        self
     }
 
     /// Records a suspension in `store` too, under `plugin`, so the next load asks again.
@@ -223,6 +240,42 @@ impl State {
         entered: Instant,
         stop: Option<&JobControl>,
     ) -> Result<Output, SpawnError> {
+        let Prepared {
+            command,
+            path,
+            ends,
+        } = self.prepare(program, args, left, entered, stop)?;
+        // No console window for a program run from a GUI app (`CREATE_NO_WINDOW`): set by
+        // `ProcessTree::spawn` with the rest of the creation flags, in `run`.
+        // The check took its time from the share too: what is left is the run's.
+        let now = Instant::now();
+        let own_end = now + self.deadline;
+        let ends_at = ends.map_or(own_end, |ends| ends.min(own_end));
+        let deadline = ends_at.saturating_duration_since(now);
+        run(command, stdin, self.max_output, ends_at, stop).map_err(|failure| match failure {
+            Failure::Io(source) => SpawnError::Io { path, source },
+            Failure::TimedOut => SpawnError::TimedOut {
+                program: program.to_owned(),
+                deadline,
+            },
+            Failure::Cancelled => SpawnError::Cancelled {
+                program: program.to_owned(),
+            },
+        })
+    }
+
+    /// Everything [`Self::spawn_watching`] does before a launch, which `process.start` shares:
+    /// the grant, the check of the program the grant was bound to (a changed one is suspended),
+    /// and its command, with `args` and the minimal environment. The check stops at the end of
+    /// the share `left` (from `entered`), and in a job once the job is being stopped.
+    pub(crate) fn prepare(
+        &mut self,
+        program: &str,
+        args: &[String],
+        left: Option<Duration>,
+        entered: Instant,
+        stop: Option<&JobControl>,
+    ) -> Result<Prepared, SpawnError> {
         if stop.is_some_and(JobControl::is_cancelled) {
             return Err(SpawnError::Cancelled {
                 program: program.to_owned(),
@@ -278,25 +331,10 @@ impl State {
             .args(args)
             .env_clear()
             .envs(self.environment.iter().map(|(name, value)| (name, value)));
-        // No console window for a program run from a GUI app (`CREATE_NO_WINDOW`): set by
-        // `ProcessTree::spawn` with the rest of the creation flags, in `run`.
-        // The check took its time from the share too: what is left is the run's.
-        let now = Instant::now();
-        let own_end = now + self.deadline;
-        let ends_at = ends.map_or(own_end, |ends| ends.min(own_end));
-        let deadline = ends_at.saturating_duration_since(now);
-        run(command, stdin, self.max_output, ends_at, stop).map_err(|failure| match failure {
-            Failure::Io(source) => SpawnError::Io {
-                path: identity.path.clone(),
-                source,
-            },
-            Failure::TimedOut => SpawnError::TimedOut {
-                program: program.to_owned(),
-                deadline,
-            },
-            Failure::Cancelled => SpawnError::Cancelled {
-                program: program.to_owned(),
-            },
+        Ok(Prepared {
+            command,
+            path: identity.path,
+            ends,
         })
     }
 
@@ -405,14 +443,27 @@ impl Host for HostState {
         self.deadline = self
             .deadline
             .and_then(|deadline| deadline.checked_add(charged));
-        ran.map_err(|error| match error {
-            SpawnError::NotGranted { .. } | SpawnError::Suspended { .. } => {
-                Error::Denied(error.to_string())
-            }
-            SpawnError::TimedOut { .. } | SpawnError::Io { .. } => Error::Failed(error.to_string()),
-            SpawnError::Cancelled { .. } => Error::Failed(jobs::CANCELLED.to_owned()),
-        })
+        ran.map_err(SpawnError::into_error)
     }
+
+    fn start(
+        &mut self,
+        program: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+    ) -> Result<Resource<Child>, Error> {
+        process_stream::start(self, &program, &args, cwd.as_deref())
+    }
+}
+
+/// What [`State::prepare`] readied for a launch.
+pub(crate) struct Prepared {
+    /// The program's command: its bound path, arguments and environment.
+    pub(crate) command: Command,
+    /// The bound path.
+    pub(crate) path: PathBuf,
+    /// When the call's share of program time ends, if it has one.
+    pub(crate) ends: Option<Instant>,
 }
 
 /// Why [`State::spawn`] failed.
@@ -436,6 +487,17 @@ pub enum SpawnError {
         #[source]
         source: io::Error,
     },
+}
+
+impl SpawnError {
+    /// As an import returns it: `denied` for a program not granted or suspended, else `failed`.
+    pub fn into_error(self) -> Error {
+        match self {
+            Self::NotGranted { .. } | Self::Suspended { .. } => Error::Denied(self.to_string()),
+            Self::TimedOut { .. } | Self::Io { .. } => Error::Failed(self.to_string()),
+            Self::Cancelled { .. } => Error::Failed(jobs::CANCELLED.to_owned()),
+        }
+    }
 }
 
 /// In the active locale.

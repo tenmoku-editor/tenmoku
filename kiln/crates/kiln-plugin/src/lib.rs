@@ -19,6 +19,7 @@ pub mod manifest;
 pub mod net;
 pub mod paths;
 pub mod process;
+pub mod process_stream;
 pub mod runner;
 pub mod secrets;
 #[cfg(test)]

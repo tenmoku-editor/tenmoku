@@ -59,6 +59,7 @@ use crate::jobs::{
     self, Ended, JobId, JobState, Jobs, Launch, Launcher, Reservation, Stop, WorkerHost,
 };
 use crate::limits::{Limits, PROGRAM_DEADLINE, StoreLimiter};
+use crate::process_stream;
 
 /// Why a plugin was unloaded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -585,6 +586,7 @@ fn linker(engine: &PluginEngine, runs_jobs: bool) -> wasmtime::Result<Linker<Dat
     let mut linker = Linker::<Data>::new(engine.engine());
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     bindings::add_to_linker(&mut linker, imported)?;
+    process_stream::add_to_linker(&mut linker, imported)?;
     if runs_jobs {
         bindings::add_jobs_to_linker(&mut linker, imported)?;
     }
@@ -913,8 +915,6 @@ impl Workers {
         let mut host = (self.host)();
         host.jobs = jobs::State::worker(launch.control.clone());
         host.commands = self.commands.state();
-        // A job's programs run as long as its wall time allows, not an interactive call's 10 s.
-        host.process = mem::take(&mut host.process).with_deadline(launch.wall);
         let limits = Limits {
             memory_bytes: usize::try_from(launch.memory_bytes).unwrap_or(usize::MAX),
             ..Limits::default()
@@ -922,6 +922,11 @@ impl Workers {
         let workspace = Workspace {
             roots: launch.roots.clone(),
         };
+        // A job's programs run as long as its wall time allows, not an interactive call's 10 s,
+        // and those it starts may start in the roots preopened for it.
+        host.process = mem::take(&mut host.process)
+            .with_deadline(launch.wall)
+            .with_roots(process_stream::preopened(&self.grants, &workspace));
         let mut store = Store::new(
             self.engine.engine(),
             Data {

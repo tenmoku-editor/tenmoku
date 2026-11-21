@@ -28,4 +28,77 @@ interface process {
     /// Fails with `denied` when no grant allows the program or it is suspended, and with
     /// `failed` when it can't be started, or runs past the host's deadline (10 s) and is killed.
     spawn: func(program: string, args: list<string>, stdin: option<list<u8>>) -> result<output, error>;
+
+    /// How a started program ended.
+    record exit {
+        /// The exit code; none when a signal ended it.
+        code: option<s32>,
+        /// Whether the host ended it: by `kill`, or as its job was cancelled or timed out.
+        killed: bool,
+    }
+
+    /// What `child.read` returns.
+    record chunk {
+        /// What came from each stream since the last read: at most `max-bytes`, possibly nothing.
+        stdout: list<u8>,
+        stderr: list<u8>,
+        /// Set once the program has exited and both streams are drained: then every later read
+        /// returns nothing more, and the same `exited`. A stream ends once everything holding it
+        /// has closed it: a program the program started that still holds its output keeps
+        /// `exited` unset until it exits too, or `kill` ends it.
+        exited: option<exit>,
+    }
+
+    /// A program `start` started, and everything it started: a process tree.
+    ///
+    /// The host buffers at most 1 MiB of each stream (stdout, stderr and stdin). When a buffer of
+    /// output is full the host stops reading that stream, so the program blocks on its next write
+    /// until the plugin reads: a plugin that reads slowly slows the program, and never grows the
+    /// host's memory. There is no cap on the total output. Dropping a child ends its tree, as
+    /// `kill` does. A child lives no longer than its job.
+    resource child {
+        /// Waits up to `timeout-ms` for output, then returns at most `max-bytes` (and at most
+        /// 1 MiB) of each stream: what has come so far, possibly nothing. Waits no longer than
+        /// the job may run. Fails with `failed("cancelled")` once the job is being cancelled or
+        /// is past its wall time.
+        read: func(max-bytes: u32, timeout-ms: u32) -> result<chunk, error>;
+        /// Writes to its stdin without waiting; returns how many bytes it took: fewer when the
+        /// stdin buffer is full, possibly none. Fails with `failed` once stdin is closed: by
+        /// `close-stdin`, or once writing to the program failed because it exited or closed its
+        /// stdin. Bytes taken before the host learned that never reach it.
+        write: func(bytes: list<u8>) -> result<u64, error>;
+        /// Closes its stdin once what `write` took has reached the program.
+        close-stdin: func();
+        /// Ends the program and everything it started at once (SIGKILL to its process group
+        /// on Unix, its job object terminated on Windows). Its output so far can still be read.
+        /// Once the job is being stopped the host is already ending the tree, and this adds
+        /// nothing: SIGKILL comes when the job's grace is up.
+        kill: func();
+    }
+
+    /// Starts `program` with `args` as `spawn` does (the same grant, bound path, no shell and
+    /// environment), its stdin, stdout and stderr streamed through the `child`, without waiting.
+    ///
+    /// `cwd` is the directory it starts in: a guest path inside a root the plugin's fs grant
+    /// preopened, `invalid-argument` if it isn't absolute or has a `.` or `..` part, and `denied`
+    /// outside every root, links resolved; none starts it where the app runs. Each root names
+    /// the directory it named when the job started, and one that couldn't be opened then is
+    /// none. The directory is checked again just before the launch, and one replaced since is
+    /// `denied`.
+    ///
+    /// `cwd` is a convenience checked at start, not a security boundary: the granted program
+    /// runs unsandboxed with the user's rights and can change directory anywhere itself. Two
+    /// windows are known. The host opens each root apart from the preopen, so a root retargeted
+    /// between the two opens can name a different directory here than in the fs interface, or
+    /// stay a root here when the preopen failed. And the program starts in its directory by
+    /// path, so one replaced between the last check and the launch can start it elsewhere.
+    ///
+    /// Only in a background job: in any other call it fails with
+    /// `denied("process.start runs only in a background job")`. A job has at most 8 children at
+    /// once, counted until each is dropped; past that `start` fails with
+    /// `failed("too many programs started in this job")`. When the job is cancelled or runs past
+    /// its wall time, every child tree gets SIGTERM on Unix, and SIGKILL 2 s later; on Windows
+    /// its job object is terminated at once. When the job ends, children it left are ended the
+    /// same way. Fails with `denied` as `spawn` does, and with `failed` when it can't start.
+    start: func(program: string, args: list<string>, cwd: option<string>) -> result<child, error>;
 }
