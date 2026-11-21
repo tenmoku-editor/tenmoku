@@ -244,7 +244,7 @@
 29:16-40 string.special "https://vuejs.org/guide/"
 29:40-41 string "\""
 29:41-42 punctuation.bracket ">"
-29:42-56 markup.link "Read the guide"
+29:42-56 markup.link.label "Read the guide"
 29:56-58 punctuation.bracket "</"
 29:58-59 tag "a"
 29:59-60 punctuation.bracket ">"
