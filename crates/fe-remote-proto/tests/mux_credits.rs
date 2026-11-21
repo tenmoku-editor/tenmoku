@@ -168,7 +168,8 @@ fn a_stalled_channel_does_not_block_another_and_cancel_stops_within_its_window()
     // Channel 64 still answers.
     assert_eq!(echo(&client, &server, 64, b"hi"), b"hi");
     // Everything channel 1 got, before and after the cancel, fits its
-    // window, and the window was full.
+    // window. The server saw the window full above; how much of that the
+    // client has received by now depends on scheduling, so no lower bound.
     bulk.cancel();
     let (mut bytes, mut end) = (0, None);
     while let Some(ev) = bulk.recv() {
@@ -180,10 +181,6 @@ fn a_stalled_channel_does_not_block_another_and_cancel_stops_within_its_window()
     assert_eq!(end, Some(Status::Cancelled));
     let window = INITIAL_WINDOW as usize;
     assert!(bytes <= window, "{bytes} bytes past a {window} window");
-    assert!(
-        bytes > window - chunk_body(),
-        "only {bytes} of {window} in flight"
-    );
     // The credit came back: channel 1 works again.
     assert_eq!(read(&client, b"again"), b"again");
 }
