@@ -1,0 +1,101 @@
+name: Docs
+
+# The user guide (docs/user, an mdBook). Pull requests that touch the book, the settings it
+# documents or the default keymaps check and build it. A stable v* tag attaches the built book
+# to its release and starts the tenmoku.dev Pages workflow; main keeps it as a workflow
+# artifact. See docs/release/user-docs.md for the secret and the site repo's side.
+
+on:
+  pull_request:
+    paths:
+      - 'docs/user/**'
+      - 'crates/fe-config/src/settings.rs'
+      - 'crates/fe-keymap/keymaps/**'
+  push:
+    branches: [main]
+    tags: ['v*', '!v*-preview*']
+
+permissions:
+  contents: read
+
+env:
+  MDBOOK_VERSION: v0.5.4
+  MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check the book's structure
+        run: scripts/check-user-docs.sh
+      - name: Install mdBook (pinned, checksum verified)
+        run: |
+          curl -sSfL -o mdbook.tar.gz "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_VERSION}/mdbook-${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${MDBOOK_SHA256}  mdbook.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/mdbook"
+          tar -xzf mdbook.tar.gz -C "$RUNNER_TEMP/mdbook"
+          echo "$RUNNER_TEMP/mdbook" >> "$GITHUB_PATH"
+      - name: Build the book
+        run: mdbook build docs/user
+      - name: Pack the book
+        if: github.event_name == 'push'
+        run: tar -czf tenmoku-docs.tar.gz -C docs/user/book .
+      - name: Keep the book as an artifact
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: user-docs
+          path: tenmoku-docs.tar.gz
+          if-no-files-found: error
+      - name: Keep the book for the release upload
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: tenmoku-docs
+          path: tenmoku-docs.tar.gz
+          if-no-files-found: error
+
+  release-asset:
+    # Stable tags only: the trigger's tag filter leaves out -preview tags.
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: tenmoku-docs
+      - name: Upload tenmoku-docs.tar.gz to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # release.yml creates the release when its builds finish; wait for it.
+          for _ in $(seq 1 120); do
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" tenmoku-docs.tar.gz --clobber
+              exit 0
+            fi
+            sleep 60
+          done
+          echo "release $GITHUB_REF_NAME did not appear" >&2
+          exit 1
+
+  publish-site:
+    if: github.ref_type == 'tag'
+    needs: release-asset
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Start the tenmoku.dev Pages workflow
+        env:
+          GH_TOKEN: ${{ secrets.TENMOKU_DEV_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::TENMOKU_DEV_DISPATCH_TOKEN is not set; not publishing to tenmoku.dev/docs"
+            exit 0
+          fi
+          gh workflow run pages.yml -R tenmoku-editor/tenmoku.dev
