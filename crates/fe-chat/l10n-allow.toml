@@ -21,6 +21,10 @@ text = "the scripted provider has no reply left"
 reason = "Test double's error, never shown in the app"
 
 [[file]]
+path = "src/commit_message.rs"
+reason = "Draft from diff's system prompt and request framing are sent to the model, not shown to the user"
+
+[[file]]
 path = "src/inline.rs"
 reason = "The inline editor's system prompt and request framing are sent to the model, not shown to the user"
 

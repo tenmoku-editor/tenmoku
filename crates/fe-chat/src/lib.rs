@@ -22,6 +22,8 @@
 //! - [`inline_request`], [`InlineEditSession`], [`run_inline_edit`] and
 //!   [`to_proposal`] turn a selection and an instruction into a proposed
 //!   change.
+//! - [`commit_message_request`], [`parse_commit_message`] and
+//!   [`run_commit_message`] draft a commit message from the staged diff.
 //! - [`ChatStore`] keeps a folder's chats as atomically written files,
 //!   listed newest first.
 //! - [`ScriptedProvider`] plays scripted replies and records the requests,
@@ -30,6 +32,7 @@
 //!
 //! No network here, and this crate must never depend on GPUI.
 
+mod commit_message;
 mod context;
 mod conversation;
 mod edits;
@@ -42,6 +45,10 @@ mod request;
 mod store;
 mod tools;
 
+pub use commit_message::{
+    CommitDraft, DIFF_BUDGET, DraftError, MAX_LISTED, MIN_SECTION, SUBJECT_LIMIT, StagedChange,
+    StagedDiff, StagedFile, commit_message_request, parse_commit_message, run_commit_message,
+};
 pub use context::{Budgeted, ContextItem, ContextKind, Fit, MIN_ROWS, budget};
 pub use conversation::{
     Attachment, AttachmentKind, ChatId, Conversation, ParseChatIdError, ReplyBlock, Round,

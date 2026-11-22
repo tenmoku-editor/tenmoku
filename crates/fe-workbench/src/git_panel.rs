@@ -75,7 +75,11 @@
 //! "Committing…" while a commit runs. Checking Amend into an empty box
 //! fills it with HEAD's message; unchecking it while that's untouched
 //! empties it again. `git.commit_box.commit` (a key in the box) commits as
-//! the button does.
+//! the button does. Beside Amend, "Draft from diff" has the workbench ask
+//! the chat for a message for the staged changes (`git_commit`): disabled,
+//! its tooltip saying why, while nothing is staged, the folder isn't
+//! trusted or the chat has no key, disabled while a commit runs, and
+//! "Drafting…" while it's asked for. Starting a commit drops a draft.
 //!
 //! With vim on, the box edits in vim mode, starting in insert mode when
 //! it's focused empty. The status bar's command line follows the tabs, so
@@ -121,14 +125,15 @@ use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, DragMoveEvent, ElementId,
     Entity, EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement,
     KeyContext, KeyDownEvent, Modifiers, ParentElement as _, Render, ScrollStrategy, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle,
     WeakEntity, Window, canvas, div, prelude::FluentBuilder as _, px, uniform_list,
 };
 use kiln::Cx;
-use kiln_l10n::{Text, text, tr};
+use kiln_l10n::{Text, text, tr, verbatim};
 
 use crate::{
     Workbench,
+    chat_panel::ChatPanel,
     git::{self, GitState, Sync},
     pane_toolbar,
     picker::{self, PaletteOp},
@@ -417,9 +422,22 @@ struct CommitBox {
     line_refocus: bool,
     /// The box's vim command line's input, once made.
     line: Option<Entity<TextInput>>,
+    /// The workbench's Draft from diff, while it's under way, with what
+    /// drops it on the workbench's events.
+    drafting: Option<(Task<()>, Vec<Subscription>)>,
     /// The open line's prefix (`:`, `/`, `?`), while it's open.
     line_open: Option<char>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Draft from diff's button as drawn: its label, whether it's enabled, and
+/// the tooltip saying why it isn't.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DrawnDraft {
+    pub(crate) label: SharedString,
+    pub(crate) enabled: bool,
+    pub(crate) reason: Option<SharedString>,
 }
 
 /// What the workbench commits: the box's message, in the repository
@@ -560,6 +578,9 @@ pub struct GitPanel {
     /// The counter last drawn in the box's corner, its colour and family.
     #[cfg(test)]
     drawn_counter: std::cell::RefCell<Option<(SharedString, Hsla, SharedString)>>,
+    /// Draft from diff's button as last drawn.
+    #[cfg(test)]
+    drawn_draft: std::cell::RefCell<Option<DrawnDraft>>,
     /// The lane headers' titles and Review links the last frames drew, with
     /// their colours.
     #[cfg(test)]
@@ -612,6 +633,8 @@ impl GitPanel {
             drawn_placeholder: Default::default(),
             #[cfg(test)]
             drawn_counter: Default::default(),
+            #[cfg(test)]
+            drawn_draft: Default::default(),
             #[cfg(test)]
             drawn_lane_text: Default::default(),
         }
@@ -1862,6 +1885,7 @@ impl GitPanel {
             open_pending: false,
             line_refocus: false,
             line: None,
+            drafting: None,
             line_open: None,
             _subscriptions: subscriptions,
         });
@@ -1919,12 +1943,80 @@ impl GitPanel {
         self.open_mode(window, cx);
     }
 
+    /// Redraws as `chat` changes, which may give it a key: Draft from
+    /// diff's button needs one.
+    pub(crate) fn watch_chat(&mut self, chat: &Entity<ChatPanel>, cx: &mut Context<Self>) {
+        if let Some(commit) = &mut self.commit {
+            (commit._subscriptions).push(cx.observe(chat, |_, _, cx| cx.notify()));
+        }
+    }
+
+    /// Whether the workbench's Draft from diff is being asked for.
+    pub(crate) fn drafting(&self) -> bool {
+        (self.commit.as_ref()).is_some_and(|commit| commit.drafting.is_some())
+    }
+
+    /// Whether a commit is running.
+    pub(crate) fn committing(&self) -> bool {
+        (self.commit.as_ref()).is_some_and(|commit| commit.committing.is_some())
+    }
+
+    /// Holds `task`, the workbench's Draft from diff, until it ends or is
+    /// dropped, with `watches`, which drop it on the workbench's events.
+    pub(crate) fn set_drafting(
+        &mut self,
+        task: Task<()>,
+        watches: Vec<Subscription>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(commit) = &mut self.commit {
+            commit.drafting = Some((task, watches));
+            cx.notify();
+        }
+    }
+
+    /// The draft's task has ended: what's left of it, which is running
+    /// this, may finish.
+    pub(crate) fn end_draft(&mut self, cx: &mut Context<Self>) {
+        if let Some((task, _)) = self
+            .commit
+            .as_mut()
+            .and_then(|commit| commit.drafting.take())
+        {
+            task.detach();
+            cx.notify();
+        }
+    }
+
+    /// Drops the draft under way, cancelling its request, or what its
+    /// question's answer would do.
+    pub(crate) fn cancel_draft(&mut self, cx: &mut Context<Self>) {
+        if let Some(commit) = &mut self.commit
+            && commit.drafting.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    /// Has the workbench draft a message from the staged diff: the box's
+    /// Draft from diff.
+    fn draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_workbench(window, cx, |workbench, window, cx| {
+            workbench.draft_commit_message(window, cx)
+        });
+    }
+
     /// Has the workbench commit the box's message, then push the branch if
     /// `push`: the button, its "and push" and [`COMMIT_COMMAND`].
     fn commit(&mut self, push: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.with_workbench(window, cx, move |workbench, window, cx| {
             workbench.commit_from_box(push, window, cx)
         });
+    }
+
+    /// Where the repository is: see [`Self::repo_root`].
+    pub(crate) fn repository_root(&self) -> Option<PathBuf> {
+        self.repo_root()
     }
 
     /// Where the repository is: the working tree the root's in, once
@@ -1951,6 +2043,8 @@ impl GitPanel {
         let message = box_text(editor);
         let version = editor.model().snapshot().version();
         commit.committing = Some((message.clone(), version));
+        // A draft would be of what this commits.
+        commit.drafting = None;
         cx.notify();
         Some(CommitRequest {
             root,
@@ -1977,6 +2071,7 @@ impl GitPanel {
             return false;
         };
         commit.committing = Some((request.message.clone(), request.version));
+        commit.drafting = None;
         cx.notify();
         true
     }
@@ -2389,6 +2484,7 @@ impl GitPanel {
         let (amend, committing) = (commit.amend, commit.committing.is_some());
         let (checkbox_panel, button_panel, push_panel) =
             (cx.weak_entity(), cx.weak_entity(), cx.weak_entity());
+        let draft = self.render_draft_button(commit, cx);
         let below = match (line, message) {
             (Some((prefix, input)), _) => Some(
                 div()
@@ -2514,15 +2610,23 @@ impl GitPanel {
                     .gap_x_2()
                     .gap_y_1()
                     .child(
-                        Checkbox::new("commit-amend")
-                            .checked(amend)
-                            .disabled(committing)
-                            .label(tr!("workbench-changes-amend"))
-                            .on_change(move |checked, window, cx| {
-                                (checkbox_panel
-                                    .update(cx, |panel, cx| panel.set_amend(*checked, window, cx)))
-                                .ok();
-                            }),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Checkbox::new("commit-amend")
+                                    .checked(amend)
+                                    .disabled(committing)
+                                    .label(tr!("workbench-changes-amend"))
+                                    .on_change(move |checked, window, cx| {
+                                        (checkbox_panel.update(cx, |panel, cx| {
+                                            panel.set_amend(*checked, window, cx)
+                                        }))
+                                        .ok();
+                                    }),
+                            )
+                            .child(draft),
                     )
                     // The button and its split part, "and push".
                     .child(
@@ -2551,6 +2655,46 @@ impl GitPanel {
                     ),
             );
         Some(element.into_any_element())
+    }
+}
+
+impl GitPanel {
+    /// Draft from diff's button: disabled while the workbench says why it
+    /// can't run, its tooltip saying so, or while a commit runs; and
+    /// "Drafting…" while it's asked for.
+    fn render_draft_button(&self, commit: &CommitBox, cx: &mut Context<Self>) -> Button {
+        let ui = fe_ui::ui_theme(cx);
+        let staged = self.staged_in_repository();
+        let reason = (self.workbench(cx))
+            .and_then(|workbench| workbench.read(cx).draft_unavailable(staged, cx));
+        let drafting = commit.drafting.is_some();
+        let label = match drafting {
+            true => text!("workbench-changes-drafting"),
+            false => text!("workbench-changes-draft"),
+        };
+        let enabled = reason.is_none() && !drafting && commit.committing.is_none();
+        #[cfg(test)]
+        self.drawn_draft.replace(Some(DrawnDraft {
+            label: label.resolve(),
+            enabled,
+            reason: reason.clone(),
+        }));
+        let panel = cx.weak_entity();
+        // An element id, not text.
+        Button::new(verbatim!("commit-draft"), label)
+            .debug_selector(|| "commit-draft".into())
+            .ghost()
+            .small()
+            .disabled(!enabled)
+            .when_some(reason, |button, reason| {
+                button.tooltip(move |_, cx| {
+                    cx.new(|_| Tooltip::new(reason.clone(), None::<&str>, &ui))
+                        .into()
+                })
+            })
+            .on_click(move |_, window, cx| {
+                (panel.update(cx, |panel, cx| panel.draft(window, cx))).ok();
+            })
     }
 }
 
@@ -3266,6 +3410,13 @@ impl GitPanel {
     /// and forgets it, so the next draw's is seen.
     pub(crate) fn take_drawn_counter(&self) -> Option<(SharedString, Hsla, SharedString)> {
         self.drawn_counter.take()
+    }
+
+    /// Draft from diff's button as last drawn; and forgets it, so the next
+    /// draw's is seen.
+    #[cfg(test)]
+    pub(crate) fn take_drawn_draft(&self) -> Option<DrawnDraft> {
+        self.drawn_draft.take()
     }
 
     /// The box's counter: the caret row's characters, and whether that's

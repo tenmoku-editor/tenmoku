@@ -514,6 +514,13 @@ impl Workbench {
         self.run_typed_git(GitCommand::CommitAmend, cx);
     }
 
+    /// Git: Draft Commit Message from Diff
+    #[command(id = "git.draft_commit_message")]
+    fn git_draft_commit_message(&mut self, cx: &mut Cx<Self>) {
+        self.ran(cx);
+        self.draft_commit_message(cx.window, cx.cx);
+    }
+
     /// Git: Toggle Line Blame
     #[command(id = "git.toggle_line_blame")]
     fn git_toggle_line_blame(&mut self, cx: &mut Cx<Self>) {

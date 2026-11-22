@@ -2,10 +2,10 @@
 //! hooks run and `commit.gpgsign` is honoured as in a terminal.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::cli::{Access, run_raw};
+use crate::cli::{Access, run, run_raw};
 use crate::{GitError, Repo};
 
 /// Why a commit didn't happen.
@@ -48,6 +48,58 @@ impl Repo {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             }),
         }
+    }
+
+    /// The staged change to `path`, HEAD (the empty tree while it's
+    /// unborn) to the index, as `git diff --cached` writes it: its
+    /// `diff --git` header, mode lines, hunks and `\ No newline at end of
+    /// file` markers, or `Binary files … differ`. External diff drivers,
+    /// textconv filters, colour and rename detection are off, and the
+    /// prefixes are `a/` and `b/` whatever the config says. Empty when
+    /// `path` isn't staged or is outside the working tree. Decoded as
+    /// UTF-8, lossily.
+    ///
+    /// Only `path` itself: the pathspec is literal, so `*` is a name, and
+    /// leaves out what's under a directory of that name, so a file that
+    /// became a directory (or one that was) brings in none of its files.
+    pub fn staged_patch(&self, path: &Path) -> Result<String, GitError> {
+        let Some(rela_path) = path
+            .strip_prefix(&self.workdir)
+            .ok()
+            .filter(|rela_path| !rela_path.as_os_str().is_empty())
+        else {
+            return Ok(String::new());
+        };
+        // As the index names it: with `/`, on Windows too.
+        let git_path = crate::blame::git_path(rela_path);
+        let git_path =
+            gix::path::from_bstring(git_path).map_err(|error| GitError::Io(error.to_string()))?;
+        let pathspec = |magic: &str, tail: &str| {
+            let mut pathspec = OsString::from(magic);
+            pathspec.push(git_path.as_os_str());
+            pathspec.push(tail);
+            pathspec
+        };
+        // Magic for these two pathspecs, which say `literal` themselves:
+        // after `run`'s `--literal-pathspecs`, so it wins.
+        let mut args = [
+            "--no-literal-pathspecs",
+            "diff",
+            "--cached",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        args.push(pathspec(":(top,literal)", ""));
+        args.push(pathspec(":(top,literal,exclude)", "/"));
+        let patch = run(&self.workdir, Access::Read, &args, None)?;
+        Ok(String::from_utf8_lossy(&patch).into_owned())
     }
 
     /// The prefix that marks a comment line in a commit message: the last

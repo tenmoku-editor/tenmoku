@@ -99,6 +99,7 @@ mod debug_toolbar;
 mod default_fonts;
 mod default_keymaps;
 mod dock_titles_locale;
+mod draft_commit_message;
 mod editor_menu;
 mod editor_menu_context;
 mod editorconfig_clean_open;

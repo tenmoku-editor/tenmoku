@@ -331,6 +331,7 @@ Every command by ID, the name a keymap, a menu or a plugin runs it by, with its 
 | `git.diff_head` | Git: Compare with HEAD | — | — |
 | `git.diff_index` | Git: Compare with Index | — | — |
 | `git.discard_file` | Git: Discard File Changes | — | — |
+| `git.draft_commit_message` | Git: Draft Commit Message from Diff | — | — |
 | `git.fetch` | Git: Fetch | — | — |
 | `git.file_history` | Git: File History | — | — |
 | `git.log` | Git: Log | — | — |

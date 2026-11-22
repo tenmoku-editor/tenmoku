@@ -94,6 +94,30 @@ workbench-changes-ok = OK
 workbench-changes-hook-failed = Git: { $hook } hook failed
 workbench-changes-commit-failed = Git: commit failed
 
+## Draft from diff, beside Amend (git_commit.rs, git_panel.rs): a commit
+## message for the staged changes, asked of the chat's model.
+
+command-git-draft_commit_message = Git: Draft Commit Message from Diff
+workbench-changes-draft = Draft from diff
+workbench-changes-drafting = Drafting…
+# The button's tooltip, and the command's notice, when it can't run.
+workbench-changes-draft-nothing-staged = Nothing is staged to draft a message from
+workbench-changes-draft-untrusted = Draft from diff runs only in a trusted folder
+workbench-changes-draft-no-key = Draft from diff needs the chat's Claude API key
+workbench-changes-draft-read-failed = Git: couldn't read the staged changes
+# $error is the provider's own message.
+workbench-changes-draft-failed = Draft from diff failed: { $error }
+workbench-changes-draft-empty = The reply had no commit message
+# $count is the drafted subject's length in characters, and $limit the most
+# a subject should have.
+workbench-changes-draft-long-subject = { $count ->
+    [one] The drafted subject has { $count } character, over { $limit }
+   *[other] The drafted subject has { $count } characters, over { $limit }
+}
+# Asked when the box already has a message; the draft shows under it.
+workbench-changes-draft-replace = Replace the message in the box with the draft?
+workbench-changes-draft-replace-button = Replace
+
 ## The commit box's bottom edge, which resizes it (git_panel.rs): its
 ## accessible name and its value, the box's height.
 

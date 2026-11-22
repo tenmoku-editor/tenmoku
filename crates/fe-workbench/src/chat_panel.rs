@@ -2353,6 +2353,12 @@ fn track_workbench(workbench: &Workbench, cx: &mut App) {
     Worker::of(cx).track(&target, trusted);
 }
 
+/// Whether the window's `workbench`'s chat has a key, as read so far
+/// (see [`provider`], which reads it).
+pub(crate) fn has_key(workbench: &Workbench, cx: &App) -> bool {
+    (workbench.dock().read(cx).chat()).is_some_and(|panel| panel.read(cx).key.is_some())
+}
+
 /// The chat's provider and settings for the window's `workbench`, the same
 /// Claude client and key the chat uses; `None` without a key. The key is
 /// read first if the chat never drew, which an environment key answers at
