@@ -319,13 +319,19 @@ fn stream_fast_writer_blocks_until_guest_reads() {
     let job = start(&mut plugin, "flood", "");
     let progress = programs.file("progress");
 
-    // The first 1 MiB fills the host's buffer of stdout; the second can't be written while the
-    // guest doesn't read, however long it waits.
-    assert!(wait_for(Duration::from_secs(10), || read_trimmed(
+    // The host's buffer of stdout takes 1 MiB, and what more a platform's pipe absorbs differs
+    // (a Linux run got two chunks through before the program blocked), so: the program writes,
+    // stops short of its end while the guest doesn't read, however long it waits, and stays
+    // there.
+    assert!(wait_for(Duration::from_secs(10), || !read_trimmed(
         &progress
-    ) == "1"));
+    )
+    .is_empty()));
+    thread::sleep(Duration::from_secs(2));
+    let stalled = read_trimmed(&progress);
+    assert_ne!(stalled, FLOOD_CHUNKS.to_string());
     thread::sleep(Duration::from_secs(1));
-    assert_eq!(read_trimmed(&progress), "1");
+    assert_eq!(read_trimmed(&progress), stalled);
     assert!(matches!(jobs_of(&plugin).state(job), JobStatus::Running(_)));
 
     // Once the guest reads, the program writes the rest, and nothing was lost on the way.
