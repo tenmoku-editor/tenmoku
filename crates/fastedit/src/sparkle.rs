@@ -87,6 +87,7 @@ pub(crate) enum FeedChoice {
 
 impl FeedChoice {
     /// The URL Sparkle will fetch.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn url(&self) -> &str {
         match self {
             FeedChoice::Stable(url) | FeedChoice::Preview(url) => url,
