@@ -3,7 +3,7 @@
 # (copies of /usr/bin/true, laid out as the release is) and no network, no cargo build.
 # Prints one line per check and exits non-zero on the first failure. macOS only.
 set -eu
-unset SPARKLE_FRAMEWORK SPARKLE_URL_OVERRIDE TENMOKU_FEED_URL TENMOKU_ED_PUBLIC_KEY
+unset SPARKLE_FRAMEWORK SPARKLE_URL_OVERRIDE TENMOKU_FEED_URL TENMOKU_ED_PUBLIC_KEY TENMOKU_PREVIEW_FEED_URL
 # The fixture checks an ad-hoc signature, whatever identity the caller has exported.
 SIGN_IDENTITY=-
 export SIGN_IDENTITY
@@ -74,15 +74,16 @@ refused() {
 	grep -q -F -- "$word" "$t/refused.log" || fail "$what: the message lacks '$word': $(cat "$t/refused.log")"
 	ok "$what is refused: $(tail -n 1 "$t/refused.log")"
 }
-su_keys='SUFeedURL SUPublicEDKey SUEnableAutomaticChecks SUScheduledCheckInterval SUAutomaticallyUpdate'
+su_keys='SUFeedURL SUPublicEDKey SUEnableAutomaticChecks SUScheduledCheckInterval SUAutomaticallyUpdate
+TenmokuPreviewFeedURL'
 no_su_keys() {
 	shown=$(plutil -p "$1/Contents/Info.plist")
 	for k in $su_keys; do
 		! echo "$shown" | grep -q "\"$k\"" || fail "$2: Info.plist still has $k"
 	done
-	! grep -q '@FEED_URL@\|@ED_PUBLIC_KEY@' "$1/Contents/Info.plist" || fail "$2: a placeholder is left"
+	! grep -q '@FEED_URL@\|@ED_PUBLIC_KEY@\|@PREVIEW_FEED_URL@' "$1/Contents/Info.plist" || fail "$2: a placeholder is left"
 	plutil -lint -s "$1/Contents/Info.plist" || fail "$2: plutil -lint"
-	ok "$2: none of the five SU* keys"
+	ok "$2: none of the five SU* keys, nor TenmokuPreviewFeedURL"
 }
 entitlements() {
 	codesign -d --entitlements - "$1" 2>&1 || fail "codesign -d --entitlements - $1"
@@ -130,6 +131,17 @@ for line in "\"SUFeedURL\" => \"$feed\"" "\"SUPublicEDKey\" => \"$key\"" '"SUEna
 	echo "$shown" | grep -q -F "$line" || fail "plutil -p lacks $line: $shown"
 	ok "$line"
 done
+# T1999 C1/C4: the preview feed beside SUFeedURL, https, the default when nothing sets it.
+default_preview=https://github.com/tenmoku-editor/tenmoku/releases/download/preview/appcast-preview.xml
+preview=$(/usr/libexec/PlistBuddy -c 'Print :TenmokuPreviewFeedURL' "$app/Contents/Info.plist") ||
+	fail "Info.plist has no TenmokuPreviewFeedURL: $shown"
+case "$preview" in
+https://?*) ;;
+*) fail "TenmokuPreviewFeedURL is not https: '$preview'" ;;
+esac
+[ "$preview" = "$default_preview" ] || fail "TenmokuPreviewFeedURL is not the default: '$preview'"
+ok "TenmokuPreviewFeedURL is the https default, $preview"
+! grep -q '@PREVIEW_FEED_URL@' "$app/Contents/Info.plist" || fail "the preview placeholder is left"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist" | grep -qx 1.2.3 ||
 	fail "CFBundleVersion is not the dotted version"
 ok "CFBundleVersion is the dotted version"
@@ -202,6 +214,14 @@ plutil -p "$t/env/Tenmoku.app/Contents/Info.plist" | grep -q -F "\"SUFeedURL\" =
 plutil -p "$t/env/Tenmoku.app/Contents/Info.plist" | grep -q -F "\"SUPublicEDKey\" => \"$key\"" ||
 	fail "TENMOKU_ED_PUBLIC_KEY did not fill SUPublicEDKey"
 ok "TENMOKU_FEED_URL and TENMOKU_ED_PUBLIC_KEY fill the keys"
+preview_feed='https://example.test/p/appcast-preview.xml?a=1&b=2'
+(TENMOKU_PREVIEW_FEED_URL=$preview_feed build env-preview --feed-url "$feed" --ed-public-key "$key")
+plutil -p "$t/env-preview/Tenmoku.app/Contents/Info.plist" |
+	grep -q -F "\"TenmokuPreviewFeedURL\" => \"$preview_feed\"" ||
+	fail "TENMOKU_PREVIEW_FEED_URL did not fill TenmokuPreviewFeedURL"
+ok "TENMOKU_PREVIEW_FEED_URL fills TenmokuPreviewFeedURL"
+(TENMOKU_PREVIEW_FEED_URL=$preview_feed build preview-no-feed --ed-public-key "$key")
+no_su_keys "$t/preview-no-feed/Tenmoku.app" "a preview feed and no feed"
 
 # No framework asked for: no trace of Sparkle.
 build plain
@@ -218,6 +238,11 @@ touch "$marker"
 for bad in http://example.test/appcast.xml https:// ftp://example.test/a 'https://example.test/a b'; do
 	refused "the feed URL '$bad'" 'feed URL' \
 		"$bundle" --binary "$t/tenmoku" --out "$t/plain" --feed-url "$bad" --ed-public-key "$key"
+done
+for bad in http://example.test/appcast-preview.xml https:// https:///a ftp://example.test/a 'https://example.test/a b'; do
+	refused "the preview feed URL '$bad'" 'preview feed URL' \
+		env TENMOKU_PREVIEW_FEED_URL="$bad" \
+		"$bundle" --binary "$t/tenmoku" --out "$t/plain" --feed-url "$feed" --ed-public-key "$key"
 done
 refused "an http feed URL with no key" 'must be https' \
 	"$bundle" --binary "$t/tenmoku" --out "$t/plain" --feed-url http://example.test/a
@@ -296,7 +321,8 @@ for word in fetch-sparkle.sh Autoupdate Updater.app SUFeedURL SUPublicEDKey disa
 done
 ok "macos-signing.md has a Sparkle section"
 help=$("$bundle" --help) || fail "--help exited non-zero"
-for word in --sparkle --feed-url --ed-public-key SPARKLE_FRAMEWORK TENMOKU_FEED_URL TENMOKU_ED_PUBLIC_KEY; do
+for word in --sparkle --feed-url --ed-public-key SPARKLE_FRAMEWORK TENMOKU_FEED_URL TENMOKU_ED_PUBLIC_KEY \
+	TENMOKU_PREVIEW_FEED_URL "$default_preview"; do
 	echo "$help" | grep -q -- "$word" || fail "--help does not mention $word"
 done
 ok "--help documents the Sparkle options"

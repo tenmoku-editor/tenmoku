@@ -3,9 +3,12 @@
 //! without it stay as they were. With it running, Check for Updates… is
 //! Sparkle's and `update.automatic_checks` turns its daily check on and off;
 //! otherwise Check for Updates… asks GitHub (`fe_workbench::update_check`).
+//! `update.channel` picks its feed: the Info.plist's `SUFeedURL` for stable,
+//! its `TenmokuPreviewFeedURL` for preview.
 
 use std::path::{Path, PathBuf};
 
+use fe_config::settings::ReleaseChannel;
 use gpui::App;
 
 /// Where `Sparkle.framework` is when the executable `exe` sits in a bundle's
@@ -72,6 +75,49 @@ pub(crate) fn first_check_seed(last_check: Option<f64>, now: f64) -> Option<f64>
     }
 }
 
+/// The feed Sparkle checks, as [`feed_for`] picks it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FeedChoice {
+    /// The Info.plist's `SUFeedURL`, which Sparkle reads itself: the
+    /// delegate answers nil. Holds that URL, for the log.
+    Stable(String),
+    /// The preview feed, which the delegate answers.
+    Preview(String),
+}
+
+impl FeedChoice {
+    /// The URL Sparkle will fetch.
+    pub(crate) fn url(&self) -> &str {
+        match self {
+            FeedChoice::Stable(url) | FeedChoice::Preview(url) => url,
+        }
+    }
+}
+
+/// The feed for `channel`, given the bundle's `stable` (`SUFeedURL`) and
+/// `preview` (`TenmokuPreviewFeedURL`) feeds. Preview takes the preview feed
+/// when it is an https URL, as bundle-macos.sh writes it; a missing or other
+/// one falls back to stable rather than to a feed Sparkle would fetch in the
+/// clear or not at all. Switching back to stable never downgrades: Sparkle
+/// offers only versions newer than the running one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn feed_for(channel: ReleaseChannel, stable: &str, preview: Option<&str>) -> FeedChoice {
+    match (channel, preview) {
+        (ReleaseChannel::Preview, Some(preview)) if is_https_url(preview) => {
+            FeedChoice::Preview(preview.to_owned())
+        }
+        _ => FeedChoice::Stable(stable.to_owned()),
+    }
+}
+
+/// `https://` and a host, with no whitespace: what bundle-macos.sh accepts.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_https_url(url: &str) -> bool {
+    url.strip_prefix("https://")
+        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
+        && !url.contains(char::is_whitespace)
+}
+
 /// Starts Sparkle as [`Policy::decide`] says, on the main thread. A symlink's
 /// launch counts as its bundle's: 'tenmoku' in PATH is one.
 pub(crate) fn start(
@@ -113,27 +159,99 @@ mod platform {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use std::{path::Path, ptr, sync::Arc};
+    use std::{cell::Cell, path::Path, ptr, sync::Arc};
 
-    use fe_config::Settings;
+    use fe_config::{Settings, settings::ReleaseChannel};
     use fe_workbench::update_check::{UpdaterHook, set_updater_hook};
     use gpui::{App, Global};
     use kiln::GlobalSettings;
     use objc2::{
-        ClassType, msg_send, msg_send_id,
+        ClassType, DeclaredClass, declare_class, msg_send, msg_send_id, mutability,
         rc::{Allocated, Retained},
-        runtime::AnyObject,
+        runtime::{AnyObject, NSObject, NSObjectProtocol},
     };
     use objc2_foundation::{
         MainThreadMarker, NSBundle, NSClassFromString, NSDate, NSString, NSUserDefaults,
     };
 
-    use super::first_check_seed;
+    use super::{FeedChoice, feed_for, first_check_seed};
+
+    declare_class!(
+        /// The updater's `SPUUpdaterDelegate`, which picks the feed for each
+        /// check from `update.channel`. Its one ivar is the setting, which
+        /// the settings observer in [`start`] keeps current, so the next
+        /// check follows a change or a reload without a restart.
+        struct FeedDelegate;
+
+        // SAFETY: NSObject has no subclassing requirements. The class is
+        // main-thread only, as Sparkle calls its delegate there, and has no
+        // Drop.
+        unsafe impl ClassType for FeedDelegate {
+            type Super = NSObject;
+            type Mutability = mutability::MainThreadOnly;
+            const NAME: &'static str = "TenmokuSparkleFeedDelegate";
+        }
+
+        impl DeclaredClass for FeedDelegate {
+            type Ivars = Cell<ReleaseChannel>;
+        }
+
+        unsafe impl FeedDelegate {
+            /// The preview feed, or nil for Sparkle's own `SUFeedURL`. Sparkle
+            /// asks at each check.
+            #[method_id(feedURLStringForUpdater:)]
+            fn feed_url_string(&self, _updater: &AnyObject) -> Option<Retained<NSString>> {
+                let channel = self.ivars().get();
+                let stable = info_string("SUFeedURL").unwrap_or_default();
+                let choice = feed_for(channel, &stable, info_string(PREVIEW_FEED_KEY).as_deref());
+                log::info!(
+                    target: "fastedit",
+                    "Sparkle checks the {} feed: {}",
+                    match channel {
+                        ReleaseChannel::Stable => "stable",
+                        ReleaseChannel::Preview => "preview",
+                    },
+                    choice.url()
+                );
+                match choice {
+                    FeedChoice::Stable(_) => None,
+                    FeedChoice::Preview(url) => Some(NSString::from_str(&url)),
+                }
+            }
+        }
+
+        unsafe impl NSObjectProtocol for FeedDelegate {}
+    );
+
+    impl FeedDelegate {
+        fn new(channel: ReleaseChannel, mtm: MainThreadMarker) -> Retained<Self> {
+            let this = mtm.alloc::<Self>().set_ivars(Cell::new(channel));
+            // SAFETY: NSObject's designated initializer.
+            unsafe { msg_send_id![super(this), init] }
+        }
+    }
+
+    /// The Info.plist key bundle-macos.sh writes the preview feed to.
+    const PREVIEW_FEED_KEY: &str = "TenmokuPreviewFeedURL";
+
+    /// The main bundle's Info.plist string at `key`, if it has one.
+    fn info_string(key: &str) -> Option<String> {
+        let bundle = NSBundle::mainBundle();
+        // SAFETY: a read of the main bundle's Info.plist, and a cast to the
+        // class just checked.
+        unsafe {
+            let value = bundle.objectForInfoDictionaryKey(&NSString::from_str(key))?;
+            let is_string: bool = msg_send![&*value, isKindOfClass: NSString::class()];
+            is_string.then(|| Retained::cast::<NSString>(value).to_string())
+        }
+    }
 
     /// The running updater, kept for the life of the app.
     struct Updater {
         /// An `SPUStandardUpdaterController`.
         controller: Retained<AnyObject>,
+        /// Its updater's delegate, which Sparkle holds weakly.
+        delegate: Retained<FeedDelegate>,
         /// The setting as last given to Sparkle.
         automatic_checks: bool,
     }
@@ -233,8 +351,10 @@ mod platform {
     /// yet started. If that fails, as it does for a bundle whose signature the
     /// framework's doesn't match, no hook is set and Check for Updates… asks
     /// GitHub as before.
-    fn load(framework: &Path) -> Result<Retained<AnyObject>, &'static str> {
-        MainThreadMarker::new().ok_or("not on the main thread")?;
+    fn load(
+        framework: &Path,
+        delegate: &FeedDelegate,
+    ) -> Result<Retained<AnyObject>, &'static str> {
         let path = NSString::from_str(&framework.to_string_lossy());
         // SAFETY: on the main thread, as the controller's creator must be. The
         // framework is the one signed into this bundle, and the initializer
@@ -247,13 +367,13 @@ mod platform {
             let class = NSClassFromString(&NSString::from_str("SPUStandardUpdaterController"))
                 .as_ref()
                 .ok_or("it has no SPUStandardUpdaterController")?;
-            let delegate: *const AnyObject = ptr::null();
+            let no_delegate: *const AnyObject = ptr::null();
             let controller: Allocated<AnyObject> = msg_send_id![class, alloc];
             let controller: Option<Retained<AnyObject>> = msg_send_id![
                 controller,
                 initWithStartingUpdater: false,
                 updaterDelegate: delegate,
-                userDriverDelegate: delegate
+                userDriverDelegate: no_delegate
             ];
             controller.ok_or("its updater controller did not initialize")
         }
@@ -265,7 +385,29 @@ mod platform {
         if automatic_checks {
             seed_last_check();
         }
-        let controller = match load(framework) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            log::warn!(
+                target: "fastedit",
+                "Sparkle at {}: not on the main thread; Check for Updates… will ask GitHub",
+                framework.display()
+            );
+            return;
+        };
+        // The config service may not have set its global yet, and Sparkle
+        // asks for the feed as its updater starts. The channel is user-only
+        // (a project file can't set it), so the user's file is the value
+        // until the observer below gives the service's.
+        let channel = cx
+            .try_global::<GlobalSettings<Settings>>()
+            .map(|global| global.settings().update.channel)
+            .unwrap_or_else(|| {
+                fe_config::SettingsStore::load(fe_config::user_settings_path(), None)
+                    .settings()
+                    .update
+                    .channel
+            });
+        let delegate = FeedDelegate::new(channel, mtm);
+        let controller = match load(framework, &delegate) {
             Ok(controller) => controller,
             Err(why) => {
                 log::warn!(
@@ -278,6 +420,7 @@ mod platform {
         };
         let mut updater = Updater {
             controller,
+            delegate,
             automatic_checks,
         };
         // Before the updater starts, so before its first scheduled look. A
@@ -303,8 +446,13 @@ mod platform {
             })),
         );
         cx.observe_global::<GlobalSettings<Settings>>(|cx| {
-            let now = cx.global::<GlobalSettings<Settings>>().settings();
-            let now = now.update.automatic_checks;
+            let settings = cx.global::<GlobalSettings<Settings>>().settings().clone();
+            // Read by the delegate at the next check.
+            cx.global::<Updater>()
+                .delegate
+                .ivars()
+                .set(settings.update.channel);
+            let now = settings.update.automatic_checks;
             if cx.global::<Updater>().automatic_checks != now {
                 cx.global_mut::<Updater>().set_automatic_checks(now, false);
             }

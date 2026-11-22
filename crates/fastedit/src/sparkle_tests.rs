@@ -136,3 +136,53 @@ fn a_future_last_check_is_reseeded() {
         Some(now)
     );
 }
+
+const STABLE_FEED: &str = "https://example.test/appcast.xml";
+const PREVIEW_FEED: &str = "https://example.test/appcast-preview.xml";
+
+#[test]
+fn stable_uses_the_plist_feed() {
+    use crate::sparkle::{FeedChoice, feed_for};
+    use fe_config::settings::ReleaseChannel;
+    for preview in [Some(PREVIEW_FEED), None] {
+        let choice = feed_for(ReleaseChannel::Stable, STABLE_FEED, preview);
+        assert_eq!(choice, FeedChoice::Stable(STABLE_FEED.into()));
+        assert_eq!(choice.url(), STABLE_FEED);
+    }
+    assert_eq!(
+        fe_config::Settings::default().update.channel,
+        ReleaseChannel::Stable
+    );
+}
+
+#[test]
+fn preview_uses_the_preview_feed() {
+    use crate::sparkle::{FeedChoice, feed_for};
+    use fe_config::settings::ReleaseChannel;
+    let choice = feed_for(ReleaseChannel::Preview, STABLE_FEED, Some(PREVIEW_FEED));
+    assert_eq!(choice, FeedChoice::Preview(PREVIEW_FEED.into()));
+    assert_eq!(choice.url(), PREVIEW_FEED);
+}
+
+#[test]
+fn a_missing_or_non_https_preview_feed_falls_back_to_stable() {
+    use crate::sparkle::{FeedChoice, feed_for};
+    use fe_config::settings::ReleaseChannel;
+    for preview in [
+        None,
+        Some(""),
+        Some("http://example.test/appcast-preview.xml"),
+        Some("ftp://example.test/appcast-preview.xml"),
+        Some("https://"),
+        Some("https:///appcast-preview.xml"),
+        Some("https://example.test/a b.xml"),
+        Some("HTTPS://example.test/appcast-preview.xml"),
+        Some("@PREVIEW_FEED_URL@"),
+    ] {
+        assert_eq!(
+            feed_for(ReleaseChannel::Preview, STABLE_FEED, preview),
+            FeedChoice::Stable(STABLE_FEED.into()),
+            "{preview:?}"
+        );
+    }
+}

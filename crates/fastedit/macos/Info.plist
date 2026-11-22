@@ -65,8 +65,10 @@
 	<string>Copyright 2026 Daryl Robbins</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
-	<!-- Sparkle. bundle-macos.sh fills in the feed and key, or deletes all five when either
-	     is empty, so a build without a feed never polls. Tenmoku asks before installing. -->
+	<!-- Sparkle. bundle-macos.sh fills in the feeds and key, or deletes all six when the feed or
+	     key is empty, so a build without a feed never polls. Tenmoku asks before installing.
+	     TenmokuPreviewFeedURL is Tenmoku's own: its Sparkle delegate checks that feed instead of
+	     SUFeedURL while update.channel is preview. -->
 	<key>SUAutomaticallyUpdate</key>
 	<false/>
 	<key>SUEnableAutomaticChecks</key>
@@ -77,5 +79,7 @@
 	<string>@ED_PUBLIC_KEY@</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
+	<key>TenmokuPreviewFeedURL</key>
+	<string>@PREVIEW_FEED_URL@</string>
 </dict>
 </plist>

@@ -7,6 +7,8 @@ root=$(cd "$here/.." && pwd)
 macos="$root/crates/fastedit/macos"
 icon_png="$root/crates/fastedit/assets/icon/fastedit-1024.png"
 
+default_preview_feed_url=https://github.com/tenmoku-editor/tenmoku/releases/download/preview/appcast-preview.xml
+
 usage() {
 	cat <<EOF
 Usage: scripts/bundle-macos.sh [--binary PATH] [--out DIR] [--version X.Y.Z] [--sparkle]
@@ -39,8 +41,12 @@ Font License travels with the fonts. Tenmoku's LICENSE, NOTICE, LICENSES/, THIRD
 the icon sets', tree-sitter's and every grammar's licence texts are copied, unmodified,
 to Contents/Resources/Licenses/.
 
-With a feed URL and a key, Info.plist gets the five SU* update keys; if either is empty
-it has none of them, so the build never polls.
+With a feed URL and a key, Info.plist gets the five SU* update keys and
+TenmokuPreviewFeedURL, the feed Tenmoku's Sparkle checks while update.channel is preview;
+if either is empty it has none of them, so the build never polls.
+
+  TENMOKU_PREVIEW_FEED_URL  the preview feed, https only (default
+                    $default_preview_feed_url)
 
 Signing uses the hardened runtime and crates/fastedit/macos/Tenmoku.entitlements.
 
@@ -72,6 +78,7 @@ sparkle=""
 assembly_opts=""
 feed_url=${TENMOKU_FEED_URL:-}
 ed_public_key=${TENMOKU_ED_PUBLIC_KEY:-}
+preview_feed_url=${TENMOKU_PREVIEW_FEED_URL:-$default_preview_feed_url}
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--binary) need_arg "$@"; binary=$2; shift 2 ;;
@@ -177,6 +184,13 @@ esac
 case "$feed_url" in
 *[[:space:]]*) die "the feed URL has whitespace in it: '$feed_url'" ;;
 esac
+case "$preview_feed_url" in
+https://[!/]*) ;;
+*) die "the preview feed URL (TENMOKU_PREVIEW_FEED_URL) must be https, got '$preview_feed_url'" ;;
+esac
+case "$preview_feed_url" in
+*[[:space:]]*) die "the preview feed URL has whitespace in it: '$preview_feed_url'" ;;
+esac
 if { [ -n "$feed_url" ] && [ -z "$ed_public_key" ]; } || { [ -z "$feed_url" ] && [ -n "$ed_public_key" ]; }; then
 	echo "bundle-macos: a feed URL and a public key go together; with only one, no SU* keys" >&2
 fi
@@ -208,8 +222,11 @@ if [ -n "$feed_url" ] && [ -n "$ed_public_key" ]; then
 	# Not through sed above: a URL can hold /, & and other characters special to sed and XML.
 	plutil -replace SUFeedURL -string "$feed_url" "$plist" || die "could not set SUFeedURL"
 	plutil -replace SUPublicEDKey -string "$ed_public_key" "$plist" || die "could not set SUPublicEDKey"
+	plutil -replace TenmokuPreviewFeedURL -string "$preview_feed_url" "$plist" ||
+		die "could not set TenmokuPreviewFeedURL"
 else
-	for key in SUFeedURL SUPublicEDKey SUEnableAutomaticChecks SUScheduledCheckInterval SUAutomaticallyUpdate; do
+	for key in SUFeedURL SUPublicEDKey SUEnableAutomaticChecks SUScheduledCheckInterval SUAutomaticallyUpdate \
+		TenmokuPreviewFeedURL; do
 		/usr/libexec/PlistBuddy -c "Delete :$key" "$plist" || die "could not delete $key from Info.plist"
 	done
 fi
