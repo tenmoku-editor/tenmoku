@@ -94,6 +94,18 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo nextest run --workspace --profile ci
+      # Test has passed: its test executables and incremental dirs are dead
+      # weight, and kiln's stand-alone build needs the room. Rlibs, build
+      # scripts and proc-macros (all with extensions or under build/) stay for
+      # the launch step's `cargo build` and the rust-cache save.
+      - name: Free the workspace's test binaries
+        run: |
+          df -h /
+          du -sh target/debug/incremental target/debug/deps 2>/dev/null || true
+          rm -rf target/debug/incremental
+          find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+          du -sh target/debug/deps 2>/dev/null || true
+          df -h /
       # The Test step downloads only Linux's crates; `cargo metadata` in the
       # check below needs every platform's, and runs offline.
       - name: Fetch every platform's crates
