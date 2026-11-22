@@ -73,7 +73,7 @@ fn guide_matches_the_code() {
         Capability::parse(&capability).unwrap_or_else(|e| panic!("{e}"));
         listed += 1;
     }
-    assert_eq!(listed, 9);
+    assert_eq!(listed, 15);
 
     assert!(
         root()
