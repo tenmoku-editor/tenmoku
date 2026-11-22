@@ -2636,6 +2636,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fe-remote-client"
+version = "0.2.5"
+dependencies = [
+ "fe-git",
+ "fe-remote-client",
+ "fe-remote-proto",
+ "flate2",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tenmoku-server",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "fe-remote-proto"
 version = "0.2.5"
 dependencies = [

@@ -1,0 +1,44 @@
+[package]
+name = "fe-remote-client"
+description = "The remote development client's connect: the transport seam, ssh with askpass, the bootstrap that installs and starts tenmoku-server, and the connection's states. Must not depend on GPUI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# `fe_remote_client::testing`: a child-stdio transport and test archives,
+# for this crate's and other crates' tests; and the
+# `fe-remote-client-fixture` binary, an askpass helper and a fake
+# tenmoku-server.
+test-support = ["fe-remote-proto/test-support"]
+
+[[bin]]
+# The askpass helper and the fake server the tests run. Never shipped.
+name = "fe-remote-client-fixture"
+path = "src/bin/fe-remote-client-fixture.rs"
+required-features = ["test-support"]
+test = false
+doc = false
+
+[dependencies]
+fe-git.workspace = true
+fe-remote-proto.workspace = true
+# Packing a remote.dev_server binary as the archive the bootstrap unpacks.
+flate2.workspace = true
+tar.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Turns `test-support` on for the tests, so the fixture binary is built for
+# them.
+fe-remote-client = { path = ".", features = ["test-support"] }
+sha2.workspace = true
+tempfile.workspace = true
+# The daemon's lock, as the bootstrap's pruning must see it.
+tenmoku-server.workspace = true
+
+[lints]
+workspace = true

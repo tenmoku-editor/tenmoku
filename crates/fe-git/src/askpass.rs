@@ -12,6 +12,9 @@
 //! in place of batch mode. The helper ([`helper_main`]) sends the prompt
 //! over the socket and prints what comes back, and the askpass's answer
 //! function, called on a thread of the command's, says what that is.
+//! A command that isn't git, such as the ssh a remote window runs, gets the
+//! same from a [`Session`] of its own, which it keeps until the command
+//! exits.
 //!
 //! Git and ssh run `GIT_ASKPASS` and `SSH_ASKPASS` as a bare program with
 //! the prompt as its only argument, so the script is what passes the
@@ -204,9 +207,7 @@ pub fn helper(args: impl IntoIterator<Item = OsString>, out: &mut dyn std::io::W
 }
 
 #[cfg(unix)]
-pub(crate) use unix::Session;
-#[cfg(unix)]
-pub use unix::ask;
+pub use unix::{Session, ask};
 
 #[cfg(unix)]
 mod unix {
@@ -321,8 +322,10 @@ mod unix {
     }
 
     /// One remote command's private directory, socket and scripts, and the
-    /// thread answering on the socket, for as long as it lives.
-    pub(crate) struct Session {
+    /// thread answering on the socket, for as long as it lives. Dropping it
+    /// withdraws the prompt being asked, if one is, and removes the
+    /// directory.
+    pub struct Session {
         dir: PathBuf,
         socket: PathBuf,
         script: PathBuf,
@@ -333,7 +336,7 @@ mod unix {
     impl Session {
         /// Makes the directory, socket and scripts for a command that talks
         /// to `remote`, and starts answering.
-        pub(crate) fn start(askpass: &Askpass, remote: &str) -> io::Result<Session> {
+        pub fn start(askpass: &Askpass, remote: &str) -> io::Result<Session> {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             // Git runs the scripts from the working tree, not from here.
             let parent = std::path::absolute(&askpass.dir)?;
@@ -388,7 +391,7 @@ mod unix {
         }
 
         /// What `GIT_ASKPASS` and `SSH_ASKPASS` run.
-        pub(crate) fn script(&self) -> &Path {
+        pub fn script(&self) -> &Path {
             &self.script
         }
 
@@ -405,13 +408,14 @@ mod unix {
             ]
         }
 
-        /// Git's started as its process group's leader, `group`.
-        pub(crate) fn started(&self, group: u32) {
+        /// Git, or the command, has started as its process group's leader,
+        /// `group`, which a cancelled prompt stops.
+        pub fn started(&self, group: u32) {
             self.shared.started(group);
         }
 
-        /// Whether a prompt was cancelled, and git with it.
-        pub(crate) fn cancelled(&self) -> bool {
+        /// Whether a prompt was cancelled, and git, or the command, with it.
+        pub fn cancelled(&self) -> bool {
             self.shared.cancelled.load(Ordering::SeqCst)
         }
     }
