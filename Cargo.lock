@@ -2593,6 +2593,7 @@ dependencies = [
  "kiln-command",
  "kiln-plugin",
  "tree-sitter",
+ "unicode-segmentation",
  "wasmtime",
 ]
 

@@ -26,9 +26,10 @@ use kiln_plugin::bindings::{Error, unimplemented};
 
 use crate::HostState;
 pub use crate::fastedit::editor::panels::{
-    ButtonNode, InputNode, ListNode, TextNode, ToggleNode, Tone, TreeItemNode, View,
+    ButtonNode, Cell, GridNode, InputNode, ListNode, TextNode, ToggleNode, Tone, TreeItemNode, View,
 };
 use crate::fastedit::editor::panels::{Host, Node, NodeKind};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Nodes in one view.
 pub const MAX_NODES: usize = 10_000;
@@ -41,6 +42,12 @@ pub const MAX_VIEW_TEXT_BYTES: usize = 1024 * 1024;
 /// Children of one node: a list's rows are its children, so this is the list size. A view's node
 /// cap bounds it too; this bounds one list a plugin could make of nearly all of them.
 pub const MAX_CHILDREN: usize = 5_000;
+/// Columns of a grid, and rows of one.
+pub const MAX_GRID_SIDE: usize = 64;
+/// Cells in one grid.
+pub const MAX_GRID_CELLS: usize = 4096;
+/// Grids in one view.
+pub const MAX_GRIDS: usize = 4;
 /// Panels one plugin may declare and show.
 pub const MAX_PANELS_PER_PLUGIN: usize = 8;
 /// Updates a second one panel takes.
@@ -187,6 +194,59 @@ impl PanelViews {
         Ok(accept(panel, merged, now))
     }
 
+    /// Replaces rows `first_row..` of grid node `id` in the panel's latest view with `rows`, at
+    /// time `now`; the other rows are kept. The result is validated first.
+    pub fn set_grid_rows_at(
+        &self,
+        plugin: &str,
+        load: u64,
+        panel: &str,
+        (id, first_row, rows): (&str, u8, Vec<Vec<Cell>>),
+        now: Instant,
+    ) -> Result<Update, Error> {
+        let mut shared = self.lock();
+        let panel = panel_of(&mut shared, plugin, load, panel)?;
+        let Some(base) = panel.pending.as_ref().or(panel.shown.as_ref()) else {
+            return Err(Error::NotFound(format!(
+                "panel has no view to update the grid {id:?} of"
+            )));
+        };
+        let mut merged = base.clone();
+        let Some(node) = merged.nodes.iter_mut().find(|node| node.id == id) else {
+            return Err(Error::NotFound(format!(
+                "the panel's view has no node {id:?}"
+            )));
+        };
+        let NodeKind::Grid(grid) = &mut node.kind else {
+            return Err(invalid(format!("node {id:?} is not a grid")));
+        };
+        let (cols, first) = (usize::from(grid.cols), usize::from(first_row));
+        if first + rows.len() > usize::from(grid.rows) {
+            return Err(invalid(format!(
+                "grid {:?}: {} rows from row {first} run past its {} rows",
+                abbreviated(id),
+                rows.len(),
+                grid.rows
+            )));
+        }
+        for (offset, row) in rows.into_iter().enumerate() {
+            if row.len() != cols {
+                return Err(invalid(format!(
+                    "grid {:?}: row {} has {} cells, not {cols}",
+                    abbreviated(id),
+                    first + offset,
+                    row.len()
+                )));
+            }
+            let start = (first + offset) * cols;
+            for (column, cell) in row.into_iter().enumerate() {
+                grid.cells[start + column] = cell;
+            }
+        }
+        validate(&merged)?;
+        Ok(accept(panel, merged, now))
+    }
+
     fn lock(&self) -> MutexGuard<'_, Shared> {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -255,6 +315,10 @@ fn texts(node: &Node) -> Vec<&str> {
         }
         NodeKind::Column | NodeKind::Row | NodeKind::Scroll | NodeKind::Separator => {}
         NodeKind::Progress(_) => {}
+        NodeKind::Grid(grid) => {
+            texts.push(&grid.label);
+            texts.extend(grid.cells.iter().map(|cell| cell.ch.as_str()));
+        }
     }
     texts
 }
@@ -267,6 +331,7 @@ fn label(node: &Node) -> Option<&str> {
         NodeKind::Input(input) => Some(&input.label),
         NodeKind::List(list) => Some(&list.label),
         NodeKind::TreeItem(item) => Some(&item.label),
+        NodeKind::Grid(grid) => Some(&grid.label),
         _ => None,
     }
 }
@@ -296,6 +361,7 @@ pub fn validate(view: &View) -> Result<(), Error> {
         )));
     }
     let mut total = 0usize;
+    let mut grids = 0usize;
     let mut ids = std::collections::HashSet::with_capacity(nodes.len());
     for node in nodes {
         let bytes: usize = texts(node).iter().map(|text| text.len()).sum();
@@ -337,6 +403,15 @@ pub fn validate(view: &View) -> Result<(), Error> {
                 "node {:?}: progress {percent} is over 100",
                 node.id
             )));
+        }
+        if let NodeKind::Grid(grid) = &node.kind {
+            validate_grid(&node.id, grid)?;
+            grids += 1;
+            if grids > MAX_GRIDS {
+                return Err(invalid(format!(
+                    "more than {MAX_GRIDS} grids, the most a view may have"
+                )));
+            }
         }
         if !node.children.is_empty() && !may_have_children(&node.kind) {
             return Err(invalid(format!("node {:?} cannot have children", node.id)));
@@ -386,6 +461,39 @@ pub fn validate(view: &View) -> Result<(), Error> {
         return Err(invalid(format!(
             "{} nodes are not under the root",
             nodes.len() - reached
+        )));
+    }
+    Ok(())
+}
+
+/// A grid's size, and that each of its cells is one grapheme.
+fn validate_grid(id: &str, grid: &GridNode) -> Result<(), Error> {
+    let (cols, rows) = (usize::from(grid.cols), usize::from(grid.rows));
+    if cols > MAX_GRID_SIDE || rows > MAX_GRID_SIDE || cols * rows > MAX_GRID_CELLS {
+        return Err(invalid(format!(
+            "grid {:?} is {cols}x{rows}, the most a grid may be is {MAX_GRID_SIDE}x{MAX_GRID_SIDE} and {MAX_GRID_CELLS} cells",
+            abbreviated(id)
+        )));
+    }
+    if grid.cells.len() != cols * rows {
+        return Err(invalid(format!(
+            "grid {:?} is {cols}x{rows} and needs {} cells, not {}",
+            abbreviated(id),
+            cols * rows,
+            grid.cells.len()
+        )));
+    }
+    for (index, cell) in grid.cells.iter().enumerate() {
+        check_cell(id, index, cell)?;
+    }
+    Ok(())
+}
+
+fn check_cell(id: &str, index: usize, cell: &Cell) -> Result<(), Error> {
+    if cell.ch.graphemes(true).count() != 1 {
+        return Err(invalid(format!(
+            "grid {:?} cell {index} must be exactly one grapheme",
+            abbreviated(id)
         )));
     }
     Ok(())
@@ -506,6 +614,25 @@ impl State {
             .patch_at(&attached.plugin, attached.load, panel, id, view, now)
     }
 
+    /// [`Host::set_grid_rows`] with the time of the update given.
+    pub fn set_grid_rows_at(
+        &self,
+        panel: &str,
+        id: &str,
+        first_row: u8,
+        rows: Vec<Vec<Cell>>,
+        now: Instant,
+    ) -> Result<Update, Error> {
+        let attached = self.granted("fastedit:editor/panels.set-grid-rows")?;
+        attached.views.set_grid_rows_at(
+            &attached.plugin,
+            attached.load,
+            panel,
+            (id, first_row, rows),
+            now,
+        )
+    }
+
     /// The attachment, if its grants include `panels`, which `import` needs.
     fn granted(&self, import: &str) -> Result<&Attached, Error> {
         let Some(attached) = &self.attached else {
@@ -531,6 +658,18 @@ impl Host for HostState {
     fn patch(&mut self, panel: String, id: String, view: View) -> Result<(), Error> {
         self.panels
             .patch_at(&panel, &id, view, Instant::now())
+            .map(drop)
+    }
+
+    fn set_grid_rows(
+        &mut self,
+        panel: String,
+        id: String,
+        first_row: u8,
+        rows: Vec<Vec<Cell>>,
+    ) -> Result<(), Error> {
+        self.panels
+            .set_grid_rows_at(&panel, &id, first_row, rows, Instant::now())
             .map(drop)
     }
 

@@ -17,6 +17,7 @@ futures.workspace = true
 http.workspace = true
 kiln-command.workspace = true
 kiln-plugin.workspace = true
+unicode-segmentation.workspace = true
 wasmtime.workspace = true
 
 [dev-dependencies]

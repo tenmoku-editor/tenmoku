@@ -7,7 +7,8 @@ package fastedit:editor@1.1.0;
 /// The host validates a view before it takes it, and refuses an invalid one whole, leaving the
 /// last good view shown (`invalid-argument`). Limits: 10,000 nodes per view, depth 32, 16 KiB of
 /// text per node, 1 MiB of text per view, 8 panels per plugin, and 20 updates a second per panel,
-/// coalesced so the latest view wins.
+/// coalesced so the latest view wins. A `grid` has at most 64 columns, 64 rows and 4096 cells, and
+/// a view at most 4 grids.
 interface panels {
     use kiln:extension/types@1.1.0.{error, command-id};
 
@@ -68,6 +69,25 @@ interface panels {
         tone: tone,
     }
 
+    /// One cell of a grid: a character and a tone, so every theme styles it.
+    record cell {
+        /// Exactly one grapheme cluster (UAX #29).
+        ch: string,
+        tone: tone,
+        /// Swaps the cell's foreground and background.
+        reverse: bool,
+    }
+
+    /// A fixed-width grid of monospace cells, for a game on a text surface. `cells` is row-major
+    /// and holds exactly `cols * rows` of them. `label` is its non-empty accessible name: the
+    /// grid is read as one image region, not cell by cell.
+    record grid-node {
+        label: string,
+        cols: u8,
+        rows: u8,
+        cells: list<cell>,
+    }
+
     variant node-kind {
         column,
         row,
@@ -84,6 +104,8 @@ interface panels {
         separator,
         /// Percent done, 0 to 100; none is indeterminate.
         progress(option<u8>),
+        /// A leaf; see `set-grid-rows` for updating it cheaply.
+        grid(grid-node),
     }
 
     /// `id` is the plugin's own, unique in the view. Only `column`, `row`, `scroll`, `list` and
@@ -106,6 +128,12 @@ interface panels {
     /// Replaces the subtree at node `id` of the panel's current view with `view`'s root and
     /// what is under it.
     patch: func(panel: string, id: string, view: view) -> result<_, error>;
+
+    /// Replaces rows of the grid node `id` in the panel's current view, starting at row
+    /// `first-row`, with `rows`, each exactly the grid's `cols` cells; the other rows are kept.
+    /// `invalid-argument` if `id` is not a grid, a row is the wrong width or the rows run past
+    /// the grid's last row.
+    set-grid-rows: func(panel: string, id: string, first-row: u8, rows: list<list<cell>>) -> result<_, error>;
 
     /// Shows the panel and focuses it, only while a command the user ran is being handled.
     reveal: func(panel: string) -> result<_, error>;
