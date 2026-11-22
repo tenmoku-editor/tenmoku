@@ -592,6 +592,13 @@ pub(crate) fn workspace_changed(cx: &mut App) {
     if !cx.has_global::<PluginHost>() {
         return;
     }
+    let open = open_roots(cx);
+    if cx.has_global::<PluginHost>() {
+        *cx.global::<PluginHost>()
+            .open_roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = open;
+    }
     let roots = trusted_roots(cx);
     set_workspace_roots(cx, roots);
 }
@@ -788,6 +795,8 @@ pub(crate) struct PluginHost {
     logs: PluginLogs,
     /// The trusted roots of the open windows.
     workspace: Vec<PathBuf>,
+    /// Every open root and its trust, for `settings.get`.
+    open_roots: OpenRoots,
     /// The plugins' background jobs: their queue and their runs.
     pub(crate) jobs: plugin_jobs::JobsHub,
     evaluating: Option<Task<()>>,
@@ -974,6 +983,7 @@ fn host_mut(cx: &mut App) -> &mut PluginHost {
             limits: Limits::default(),
             logs,
             workspace: Vec::new(),
+            open_roots: OpenRoots::default(),
             jobs: plugin_jobs::JobsHub::default(),
             evaluating: None,
             listed: HashSet::new(),
@@ -1075,6 +1085,23 @@ impl SecretStore for Keychain {
     fn delete(&self, service: &str, account: &str) -> Result<(), SecretError> {
         self.store()?.delete(service, account)
     }
+}
+
+/// Every root open in a window now, with whether it is trusted: what a plugin's `settings.get`
+/// is answered from, so an open but untrusted root gets no project keys instead of "not open".
+type OpenRoots = Arc<Mutex<Vec<(PathBuf, bool)>>>;
+
+fn open_roots(cx: &App) -> Vec<(PathBuf, bool)> {
+    let mut roots: Vec<(PathBuf, bool)> = cx
+        .windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<Workbench>())
+        .filter_map(|window| window.read(cx).ok())
+        .filter_map(|workbench| Some((workbench.root()?.to_owned(), workbench.root_trusted())))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 /// The trusted roots of the windows open now.
@@ -1592,6 +1619,7 @@ fn start_load(id: &str, cx: &mut App) {
         workspace: Workspace {
             roots: host.workspace.clone(),
         },
+        open_roots: host.open_roots.clone(),
         record: record(host),
         paint,
         ticker,
@@ -1867,6 +1895,67 @@ fn builtin_commands(cx: &App) -> Vec<CommandId> {
     ids
 }
 
+/// A plugin's settings layers: the user's file, and an open root's project file. Read at each
+/// call, so an edit shows at once. A root's trust is the workbench's, kept current by
+/// `workspace_changed`.
+struct FeSettings {
+    id: String,
+    open: OpenRoots,
+}
+
+/// The settings slice of a plugin's store, interactive or a job's worker.
+fn settings_state(
+    schema: &Arc<kiln_plugin::settings::SettingsSchema>,
+    id: &str,
+    open: &OpenRoots,
+) -> kiln_plugin::settings::State {
+    let source = FeSettings {
+        id: id.to_owned(),
+        open: open.clone(),
+    };
+    kiln_plugin::settings::State::new(kiln_plugin::settings::PluginSettings::new(
+        schema.clone(),
+        Arc::new(source),
+    ))
+}
+
+/// The open root a plugin names by its guest path `guest`, under `rules`, with its trust: the
+/// root whose guest form it is, never a nearest or first root.
+fn find_open_root(
+    open: &[(PathBuf, bool)],
+    guest: &str,
+    rules: kiln_plugin::paths::Rules,
+) -> Option<(PathBuf, bool)> {
+    open.iter()
+        .find(|(host, _)| {
+            kiln_plugin::paths::to_guest(&host.to_string_lossy(), rules)
+                .is_ok_and(|mapped| mapped == guest)
+        })
+        .cloned()
+}
+
+impl kiln_plugin::settings::SettingsSource for FeSettings {
+    fn user(&self) -> toml::Table {
+        let text = fe_config::paths::user_settings_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        fe_config::settings::plugin_table(&text, &self.id)
+    }
+
+    fn project(&self, root: &str) -> Option<kiln_plugin::settings::ProjectSettings> {
+        let open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        let (root, trusted) = find_open_root(&open, root, kiln_plugin::paths::Rules::HOST)?;
+        drop(open);
+        // Read even if untrusted: the resolver drops its keys and says why.
+        let text = std::fs::read_to_string(fe_config::paths::project_settings_path(&root))
+            .unwrap_or_default();
+        Some(kiln_plugin::settings::ProjectSettings {
+            trusted,
+            table: fe_config::settings::plugin_table(&text, &self.id),
+        })
+    }
+}
+
 /// What a load needs from the host.
 struct LoadContext {
     cache: Option<Arc<ComponentCache>>,
@@ -1878,6 +1967,7 @@ struct LoadContext {
     /// Where a spawn grant whose program changed is suspended.
     store: Option<GrantStore>,
     workspace: Workspace,
+    open_roots: OpenRoots,
     record: Record,
     /// What its decorations and status items are drawn from, and its
     /// diagnostics shown from.
@@ -1960,6 +2050,9 @@ impl LoadContext {
             data.set_quota(data_quota);
             kiln.data = kiln_plugin::data::State::new(data);
         }
+        if let Some(schema) = &artifact.manifest.settings {
+            kiln.settings = settings_state(schema, id, &self.open_roots);
+        }
         kiln.net = kiln_plugin::net::State::new(grants, &limits, Box::new(FeNet::new(grants)));
         // A program run has its own limit, which the call's deadline doesn't count.
         let process = kiln_plugin::process::State::new(artifact.record.clone(), &limits);
@@ -2011,7 +2104,14 @@ impl LoadContext {
                 diagnostics: host.diagnostics.shared(),
                 status: host.status.shared(),
             };
-            let workers = self.worker_data(id, grants, limits, &artifact.record, shared);
+            let workers = self.worker_data(
+                id,
+                grants,
+                limits,
+                &artifact.record,
+                shared,
+                artifact.manifest.settings.clone(),
+            );
             (hub.clone(), background, workers)
         });
         let unloader = host.lsp.unloader();
@@ -2064,7 +2164,9 @@ impl LoadContext {
         limits: Limits,
         record: &GrantRecord,
         shared: LoadShared,
+        settings: Option<Arc<kiln_plugin::settings::SettingsSchema>>,
     ) -> plugin_jobs::WorkerData {
+        let open_roots = self.open_roots.clone();
         let (id, grants, record) = (id.to_owned(), grants.clone(), record.clone());
         let (secrets, secrets_index) = (self.secrets.clone(), self.secrets_index.clone());
         let (store, lines) = (self.store.clone(), self.record.clone());
@@ -2078,6 +2180,9 @@ impl LoadContext {
                 kiln.secrets = kiln_plugin::secrets::State::new(secrets);
             }
             kiln.data = shared.data.clone();
+            if let Some(schema) = &settings {
+                kiln.settings = settings_state(schema, &id, &open_roots);
+            }
             kiln.net =
                 kiln_plugin::net::State::new(&grants, &limits, Box::new(FeNet::new(&grants)));
             let workspace = Workspace {

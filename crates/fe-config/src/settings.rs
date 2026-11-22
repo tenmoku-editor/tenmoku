@@ -2927,6 +2927,19 @@ pub(crate) fn key_offset(table: &DeTable<'_>, first: &str, rest: &[String]) -> u
     offset
 }
 
+/// The `[plugins."<id>"]` table of a settings file's `text`: a plugin's own keys, which its
+/// manifest's schema checks (kiln-plugin's `settings`). Empty when the text isn't TOML or has
+/// no such table.
+pub fn plugin_table(text: &str, id: &str) -> toml::Table {
+    let Ok(file) = text.parse::<toml::Table>() else {
+        return toml::Table::new();
+    };
+    match file.get("plugins").and_then(|plugins| plugins.get(id)) {
+        Some(toml::Value::Table(table)) => table.clone(),
+        _ => toml::Table::new(),
+    }
+}
+
 #[cfg(test)]
 mod plugin_limit_ceiling_tests {
     use super::*;

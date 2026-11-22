@@ -342,6 +342,7 @@ fn what_a_failed_init_drew_goes_with_it(cx: &mut TestAppContext) {
             secrets_index: None,
             store: None,
             workspace: kiln_plugin::fs::Workspace::default(),
+            open_roots: Default::default(),
             record: record(host),
             paint,
             ticker,

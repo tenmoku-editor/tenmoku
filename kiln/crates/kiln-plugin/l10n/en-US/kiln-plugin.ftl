@@ -235,3 +235,30 @@ kiln-plugin-secrets-index = couldn't { $action ->
         [serialize] serialize
        *[write] write
     } the secrets index { $path }: { $reason }
+
+# Settings contributions (src/settings.rs).
+kiln-plugin-settings-schema-too-large = the settings schema is over { $max } bytes
+kiln-plugin-settings-schema-not-json = the settings schema isn't JSON: { $reason }
+kiln-plugin-settings-schema-not-object = the settings schema must be an object with "properties"
+kiln-plugin-settings-schema-too-many-keys = the settings schema has more than { $max } keys
+kiln-plugin-settings-schema-key = settings key { $key }: { $reason }
+kiln-plugin-settings-key-not-object = the declaration must be an object
+kiln-plugin-settings-key-keyword = "{ $keyword }" isn't in the supported schema subset
+kiln-plugin-settings-key-type = "type" must be string, number, integer, boolean or array of those
+kiln-plugin-settings-key-scope = "x-scope" must be "user" or "project"
+kiln-plugin-settings-key-secret = "x-secret" must be true or false
+kiln-plugin-settings-key-enum = "enum" must be a non-empty list of strings
+kiln-plugin-settings-key-default = "default" doesn't fit the key's type
+kiln-plugin-settings-key-secret-default = a secret key can't have a default
+kiln-plugin-settings-manifest = { $id }: settings schema { $path }: { $reason }
+kiln-plugin-settings-manifest-not-string = { $id }: "settings" must be a path to a schema file
+kiln-plugin-settings-untrusted = project settings apply only in trusted folders; ignored
+kiln-plugin-settings-unknown-key = unknown setting "{ $key }"; ignored
+kiln-plugin-settings-secret-in-file = "{ $key }" is a secret and can't be set in a settings file; ignored
+kiln-plugin-settings-not-project = "{ $key }" can't be set per project; ignored
+kiln-plugin-settings-type-mismatch = the value of "{ $key }" doesn't fit its type; ignored
+kiln-plugin-settings-root-not-open = that root isn't open
+kiln-plugin-settings-too-large = the settings are over { $max } bytes
+kiln-plugin-settings-key-description = "description" must be a string
+kiln-plugin-settings-key-items = "items" must be an object with only a scalar "type"
+kiln-plugin-settings-schema-root = the schema's root "{ $keyword }" isn't in the supported subset

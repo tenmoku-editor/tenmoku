@@ -1,0 +1,14 @@
+package kiln:extension@1.1.0;
+
+/// The plugin's own settings, as its manifest's schema declares them. Needs no capability:
+/// nothing another plugin owns is reachable.
+interface settings {
+    use types.{error};
+
+    /// The plugin's effective settings as a JSON object: the schema's defaults, then the
+    /// user's `[plugins."<id>"]` table, then, with `root`, that project's `project`-scoped
+    /// keys if the root is trusted. `root` is an open root (a guest path); one that isn't open
+    /// is `invalid-argument`. Secret keys are absent: read them with `secrets.get`. At most
+    /// 256 KiB; more is `failed`.
+    get: func(root: option<string>) -> result<string, error>;
+}

@@ -1073,6 +1073,7 @@ fn no_deadline_ticker_no_plugin(cx: &mut TestAppContext) {
         secrets_index: None,
         store: None,
         workspace: kiln_plugin::fs::Workspace::default(),
+        open_roots: Default::default(),
         record: super::record(cx.global::<PluginHost>()),
         paint: crate::plugin_paint::paint(cx),
         ticker: |_| Err("no thread to enforce plugins' deadlines: refused".into()),
@@ -1611,4 +1612,68 @@ fn an_event_handler_edits_its_buffer_after_a_slow_process(cx: &mut TestAppContex
         .remove(0);
     let text = editor.read_with(vcx, |editor, _| editor.model().buffer().text().to_string());
     assert_eq!(text, "Xalpha\n");
+}
+
+/// A plugin's `settings.get` names an open root by its guest path: on Windows `/C:/work` for
+/// `C:\work`. Only that root answers, never a parent, child or other root.
+#[test]
+fn settings_roots_match_by_guest_path_under_each_os_rules() {
+    use kiln_plugin::paths::Rules;
+    let open = vec![
+        (PathBuf::from(r"C:\work"), true),
+        (PathBuf::from(r"C:\other"), false),
+    ];
+    let find = |guest: &str| super::find_open_root(&open, guest, Rules::Windows);
+    assert_eq!(find("/C:/work"), Some((PathBuf::from(r"C:\work"), true)));
+    assert_eq!(find("/C:/other"), Some((PathBuf::from(r"C:\other"), false)));
+    assert_eq!(find("/C:/work/sub"), None);
+    assert_eq!(find("/C:"), None);
+    assert_eq!(find("/D:/work"), None);
+    assert_eq!(find(r"C:\work"), None);
+
+    let open = vec![(PathBuf::from("/home/d/a"), true)];
+    let find = |guest: &str| super::find_open_root(&open, guest, Rules::Unix);
+    assert!(find("/home/d/a").is_some());
+    assert_eq!(find("/home/d"), None);
+    assert_eq!(find("/home/d/a/b"), None);
+}
+
+/// The settings slice that interactive stores and every job's worker store are given: user
+/// settings, and a root's project layer by its guest path, an untrusted open root's dropped,
+/// and a root that isn't open refused.
+#[test]
+fn settings_state_serves_interactive_and_worker_stores_alike() {
+    use kiln_plugin::bindings::kiln::extension::settings::Host as _;
+    let schema = std::sync::Arc::new(
+        kiln_plugin::settings::SettingsSchema::parse(
+            r#"{"properties": {"jobs": {"type": "integer", "default": 2, "x-scope": "project"}}}"#,
+        )
+        .unwrap(),
+    );
+    let (trusted, untrusted) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    for dir in [&trusted, &untrusted] {
+        let file = fe_config::paths::project_settings_path(dir.path());
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "[plugins.\"acme.settings\"]\njobs = 9\n").unwrap();
+    }
+    let open: super::OpenRoots = std::sync::Arc::new(std::sync::Mutex::new(vec![
+        (trusted.path().to_owned(), true),
+        (untrusted.path().to_owned(), false),
+    ]));
+    let guest = |dir: &Path| {
+        kiln_plugin::paths::to_guest(&dir.to_string_lossy(), kiln_plugin::paths::Rules::HOST)
+            .unwrap()
+    };
+    let mut host = kiln_plugin::bindings::HostState {
+        settings: super::settings_state(&schema, "acme.settings", &open),
+        ..Default::default()
+    };
+    let jobs = |host: &mut kiln_plugin::bindings::HostState, root: Option<String>| {
+        let text = host.get(root).unwrap();
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["jobs"].clone()
+    };
+    assert_eq!(jobs(&mut host, None), 2);
+    assert_eq!(jobs(&mut host, Some(guest(trusted.path()))), 9);
+    assert_eq!(jobs(&mut host, Some(guest(untrusted.path()))), 2);
+    assert!(host.get(Some(guest(&trusted.path().join("nope")))).is_err());
 }

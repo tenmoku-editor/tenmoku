@@ -22,6 +22,7 @@ use crate::limits::{
     BACKGROUND_MEMORY_FLOOR, BACKGROUND_WALL_FLOOR, BackgroundLimit, BackgroundLimits, Ceilings,
     DATA_QUOTA_CEILING,
 };
+use crate::settings::{SchemaError, SettingsSchema};
 
 /// The `contributes` key that makes an extension a plugin.
 pub const PLUGIN_KIND: &str = "plugin";
@@ -37,6 +38,7 @@ pub fn plugin_kind() -> AppKind {
                 "wasm": { "type": "string" },
                 "capabilities": { "type": "array", "items": { "type": "string" } },
                 "signature": { "type": "string" },
+                "settings": { "type": "string" },
                 "panels": { "type": "array", "items": { "type": "object" } },
                 "background": {
                     "type": "object",
@@ -103,6 +105,14 @@ pub enum PluginManifestError {
         id: String,
         reason: PanelError,
     },
+    SettingsNotString {
+        id: String,
+    },
+    Settings {
+        id: String,
+        path: String,
+        reason: String,
+    },
 }
 
 /// In the active locale.
@@ -142,6 +152,15 @@ impl std::fmt::Display for PluginManifestError {
                 "kiln-plugin-manifest-panel",
                 id = id,
                 reason = reason.to_string()
+            ),
+            Self::SettingsNotString { id } => {
+                tr!("kiln-plugin-settings-manifest-not-string", id = id)
+            }
+            Self::Settings { id, path, reason } => tr!(
+                "kiln-plugin-settings-manifest",
+                id = id,
+                path = format!("{path:?}"),
+                reason = reason
             ),
             Self::WasmPath { id, path, reason } => tr!(
                 "kiln-plugin-manifest-wasm-path",
@@ -361,6 +380,8 @@ pub struct PluginManifest {
     pub background: BackgroundLimits,
     /// The panels `[[contributes.plugin.panels]]` declares, in order.
     pub panels: Vec<PanelDecl>,
+    /// The settings schema `settings` names, checked.
+    pub settings: Option<std::sync::Arc<SettingsSchema>>,
     /// Notes on capabilities that were accepted but are better written
     /// another way, such as `process.spawn:rg.exe`.
     pub warnings: Vec<String>,
@@ -494,6 +515,26 @@ impl PluginManifest {
                 });
             }
         }
+        let settings = match entry.get("settings") {
+            None => None,
+            Some(Value::String(path)) => {
+                let fail = |reason: String| PluginManifestError::Settings {
+                    id: id.clone(),
+                    path: path.clone(),
+                    reason,
+                };
+                let file = wasm_file(&manifest.dir, path).map_err(|e| fail(e.to_string()))?;
+                if std::fs::metadata(&file)
+                    .is_ok_and(|meta| meta.len() > crate::settings::MAX_SCHEMA_BYTES as u64)
+                {
+                    return Err(fail(SchemaError::TooLarge.to_string()));
+                }
+                let text = std::fs::read_to_string(&file).map_err(|e| fail(e.to_string()))?;
+                let schema = SettingsSchema::parse(&text).map_err(|e| fail(e.to_string()))?;
+                Some(std::sync::Arc::new(schema))
+            }
+            Some(_) => return Err(PluginManifestError::SettingsNotString { id: id.clone() }),
+        };
         Ok(Some(Self {
             id: manifest.id.clone(),
             name: manifest.name.clone(),
@@ -503,6 +544,7 @@ impl PluginManifest {
             signature,
             background,
             panels,
+            settings,
             warnings,
         }))
     }

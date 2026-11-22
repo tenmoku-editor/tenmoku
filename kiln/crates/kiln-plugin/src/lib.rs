@@ -22,6 +22,7 @@ pub mod process;
 pub mod process_stream;
 pub mod runner;
 pub mod secrets;
+pub mod settings;
 #[cfg(test)]
 mod tests;
 pub mod warnings;
