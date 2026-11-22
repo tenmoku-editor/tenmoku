@@ -45,7 +45,11 @@ fn fixture(staged: bool) -> tempfile::TempDir {
     let dir = tempfile::tempdir_in(temp).unwrap();
     let root = dir.path();
     git(root, &["init", "-q"]);
-    for (key, value) in [("user.name", "t"), ("user.email", "t@t")] {
+    for (key, value) in [
+        ("user.name", "t"),
+        ("user.email", "t@t"),
+        ("commit.gpgsign", "false"),
+    ] {
         git(root, &["config", key, value]);
     }
     fs::write(root.join("a.rs"), "fn a() {}\nhead\n").unwrap();
@@ -345,7 +349,11 @@ fn binary_blobs_and_files_under_a_changed_kind_stay_out(cx: &mut TestAppContext)
     let dir = tempfile::tempdir_in(temp).unwrap();
     let root = dir.path();
     git(root, &["init", "-q"]);
-    for (key, value) in [("user.name", "t"), ("user.email", "t@t")] {
+    for (key, value) in [
+        ("user.name", "t"),
+        ("user.email", "t@t"),
+        ("commit.gpgsign", "false"),
+    ] {
         git(root, &["config", key, value]);
     }
     fs::write(root.join(".gitattributes"), "data.txt diff\n").unwrap();
