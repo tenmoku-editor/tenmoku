@@ -12,7 +12,10 @@
 //!   hard linked: an in-place rewrite of an installed file would change the
 //!   snapshot) into a `.staging-*` directory, hashed from the copy, made
 //!   read-only, and only then renamed to its hash, so a directory with a
-//!   hash's name is always finished. A symlink is copied as one, unfollowed;
+//!   hash's name is finished once it is read-only. Its own write bits are
+//!   cleared last, after the rename, as macOS 15 doesn't rename a directory
+//!   its owner can't write; until then a check finds it unfinished, as it
+//!   would one a crash left there. A symlink is copied as one, unfollowed;
 //!   one reaching back into the live directory makes the package not
 //!   snapshottable, checked on every evaluation, reuse included. A reused
 //!   snapshot is hashed again and checked read-only; a damaged one is
@@ -331,13 +334,18 @@ impl Session<'_> {
         check_links(live, &staged, &staged)
     }
 
-    /// Makes the staged copy read-only and renames it to the hash of its
-    /// own content, under a shared lock on that hash, kept; if one is there
-    /// already, that one is used if it is sound.
+    /// Makes what's in the staged copy read-only and renames it to the hash
+    /// of its own content, under a shared lock on that hash, kept, and then
+    /// makes the directory itself read-only; if one is there already, that
+    /// one is used if it is sound.
     fn publish(&mut self, staging: &Path) -> io::Result<(String, PathBuf)> {
         let staged = dunce::canonicalize(staging).map_err(at(PUBLISH, staging))?;
         let hash = package_hash_or_why(&staged).map_err(at(PUBLISH, &staged))?;
-        make_readonly(staging)?;
+        // Not the directory itself yet: macOS 15 refuses to rename a
+        // directory its owner can't write (EACCES, on the GitHub runner's
+        // APFS; T2083), where macOS 27 and Linux, renaming within one
+        // directory, don't.
+        make_readonly_within(staging)?;
         // Taken before the rename, so a collection removing this hash
         // finishes first and none starts after.
         let lock = shared_lock(&self.dir, &hash)?;
@@ -366,8 +374,11 @@ impl Session<'_> {
             self.fresh.insert(hash.clone(), lock);
             return Ok((hash, found));
         }
-        self.fresh.insert(hash.clone(), lock);
+        // Until this, a check of it finds it unfinished, as one left by a
+        // crash here would be: replaced if nothing holds it.
+        set_readonly(&target)?;
         let found = dunce::canonicalize(&target).map_err(at(RENAME, &target))?;
+        self.fresh.insert(hash.clone(), lock);
         Ok((hash, found))
     }
 
@@ -824,13 +835,15 @@ fn symlink(target: &Path, to: &Path, from: &Path) -> io::Result<()> {
     }
 }
 
-/// Clears the write bits of everything under `dir` (the execute bits stay),
-/// symlinks left alone. An error if any can't be.
-fn make_readonly(dir: &Path) -> io::Result<()> {
+/// Clears the write bits of everything under `dir` (the execute bits
+/// stay), symlinks left alone, but not of `dir` itself ([`set_readonly`]).
+/// An error if any can't be.
+fn make_readonly_within(dir: &Path) -> io::Result<()> {
     walk(dir, &mut |path, _| {
-        let mut permissions = fs::metadata(path).map_err(at(PUBLISH, path))?.permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(path, permissions).map_err(at(PUBLISH, path))
+        if path == dir {
+            return Ok(());
+        }
+        set_readonly(path)
     })
     .map_err(|error| match error.get_ref() {
         // Already named by the visit.
@@ -839,7 +852,15 @@ fn make_readonly(dir: &Path) -> io::Result<()> {
     })
 }
 
-/// Undoes [`make_readonly`], so the tree can be removed.
+/// Clears the write bits of `path` alone (the execute bits stay).
+fn set_readonly(path: &Path) -> io::Result<()> {
+    let mut permissions = fs::metadata(path).map_err(at(PUBLISH, path))?.permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions).map_err(at(PUBLISH, path))
+}
+
+/// Undoes [`make_readonly_within`] and [`set_readonly`], so the tree can be
+/// removed.
 fn make_writable(dir: &Path) {
     let _ = walk(dir, &mut |path, is_dir| {
         let mut permissions = fs::metadata(path)?.permissions();
