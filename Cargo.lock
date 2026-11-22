@@ -2641,9 +2641,12 @@ name = "fe-remote-client"
 version = "0.2.5"
 dependencies = [
  "fe-git",
+ "fe-host",
+ "fe-project",
  "fe-remote-client",
  "fe-remote-proto",
  "flate2",
+ "serde",
  "sha2 0.10.9",
  "tar",
  "tempfile",
