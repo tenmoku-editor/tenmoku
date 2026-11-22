@@ -8,6 +8,7 @@
 
 use crate::Config;
 use crate::clock::Clock;
+use crate::services::Services;
 use fe_remote_proto::{
     Accept, ControlOp, HandshakeError, Hello, Incoming, IoError, IoKind, Link, Mux, OpenTarget,
     PathBytes, SessionToken, Status, chan,
@@ -192,9 +193,15 @@ impl Shared {
             }
         };
         let token = made.expect("an accepted handshake made a session");
+        let services = Services::new((self.config.hosts)());
         while let Some(incoming) = mux.accept() {
-            answer(incoming);
+            if incoming.header.chan == chan::CONTROL {
+                answer(incoming);
+            } else {
+                services.serve(incoming);
+            }
         }
+        drop(services);
         let lost = mux.wait_lost();
         log!("session {} lost its link: {lost}", hex(token));
         self.detach(token, conn);
@@ -562,36 +569,18 @@ fn signal_group(leader: &Child, signal: libc::c_int) {
     }
 }
 
-/// Answers a request on a channel with no service yet (D § 3: control only
-/// in this phase), with the reason as its status.
+/// Answers a request on the control channel. Only `Open` is one, and
+/// nothing can be opened yet.
 fn answer(incoming: Incoming) {
-    let unsupported = |message: String| {
-        Status::Error(IoError {
+    let status = match incoming.op::<ControlOp>() {
+        Ok(ControlOp::Open(OpenTarget::Tcp { host, port })) => Status::Error(IoError {
             kind: IoKind::Unsupported,
-            message,
-        })
-    };
-    let status = match incoming.header.chan {
-        chan::CONTROL => match incoming.op::<ControlOp>() {
-            Ok(ControlOp::Open(OpenTarget::Tcp { host, port })) => unsupported(format!(
-                "this tenmoku-server can't open a connection to {host}:{port} yet"
-            )),
-            Err(e) => Status::Error(IoError {
-                kind: IoKind::InvalidData,
-                message: e.to_string(),
-            }),
-        },
-        c => {
-            let service = match c {
-                chan::FS => "file",
-                chan::WATCH => "watch",
-                chan::SEARCH => "search",
-                chan::GIT => "git",
-                chan::PROCESS => "process",
-                _ => "such",
-            };
-            unsupported(format!("this tenmoku-server has no {service} service yet"))
-        }
+            message: format!("this tenmoku-server can't open a connection to {host}:{port} yet"),
+        }),
+        Err(e) => Status::Error(IoError {
+            kind: IoKind::InvalidData,
+            message: e.to_string(),
+        }),
     };
     // A request cancelled or a link lost meanwhile needs no answer.
     let _ = incoming.stream.end(status);

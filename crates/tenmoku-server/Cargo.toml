@@ -21,9 +21,17 @@ doc = false
 fe-remote-proto.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+# The host side of the fs, watch and search services: fe-host's traits,
+# and fe-project's local impls of them (D § 3, § 5).
+fe-host.workspace = true
+fe-project.workspace = true
 libc.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
+fe-host.workspace = true
+# Trashes into a test trash of the process's own, never the user's.
+fe-project = { workspace = true, features = ["test-support"] }
 # A raw-frame peer, for the pings and handshakes the tests send by hand.
 fe-remote-proto = { workspace = true, features = ["test-support"] }
 # Turns `test-support` on for the tests.

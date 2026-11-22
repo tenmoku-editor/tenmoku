@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WatchOp {
     /// Watches `root` recursively. The request stays open: each `Data`
-    /// frame is a batch of changes, a `Vec<FsChange>`, until `Cancel`.
+    /// frame is a batch of changes, a `Vec<FsChange>`, until `Cancel`. The
+    /// first batch is empty, and comes once the watch is in place: a change
+    /// made after it is reported. A watch that can't start ends with the
+    /// error instead.
     Watch { root: PathBytes },
 }
 

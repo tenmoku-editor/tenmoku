@@ -132,6 +132,13 @@ impl<T, E> Stream<T, E> {
         ended.wait()
     }
 
+    /// The flag dropping the stream sets. Setting it cancels the work as
+    /// dropping would, while another thread holds the stream and waits in
+    /// [`Stream::recv`]: that wait ends once the producer stops.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.shared.cancel.clone()
+    }
+
     /// A handle that waits for the producer to end, whether or not the
     /// stream is still held.
     pub fn ended(&self) -> Ended<E> {
@@ -261,6 +268,12 @@ impl<T> Subscription<T> {
     /// [`Subscription::recv`], waiting at most `timeout`.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
         self.items.recv_timeout(timeout)
+    }
+
+    /// The items, and what sends them, apart: one thread can wait for items
+    /// while another stops the source by dropping it, which ends that wait.
+    pub fn into_parts(self) -> (Receiver<T>, Box<dyn Send>) {
+        (self.items, self._source)
     }
 }
 

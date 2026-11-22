@@ -27,15 +27,18 @@ pub use control::{
 };
 pub use frame::{
     CHUNK, FrameError, HEADER, Header, Kind, MAX_BODY, SERVER_ORIGINATED, body, decode_all,
-    decode_frame, decode_header, encode, encode_header, encode_raw, read_frame,
+    decode_frame, decode_header, encode, encode_header, encode_raw, encoded_len, read_frame,
 };
-pub use fs::{DirEntry, DiskStamp, EntryId, EntryKind, FsData, FsOp, Stat, Time, WriteExpect};
+pub use fs::{
+    Created, DirEntry, DiskStamp, Entry, EntryId, EntryKind, FileKind, FsData, FsOp, ListTree,
+    ListingLost, Placed, Stat, Time, TrashRecord, WriteExpect,
+};
 pub use link::Link;
 pub use mux::{Accept, Config, Event, HandshakeError, Incoming, Lost, Mux, MuxError, Stream};
 pub use path::PathBytes;
 pub use search::{
-    FileMatches, LineMatch, PathFilter, SearchData, SearchOp, SearchOptions, SearchQuery,
-    SearchSummary,
+    FILES_BATCH, FileMatches, LineMatch, PathFilter, SearchData, SearchFailure, SearchOp,
+    SearchOptions, SearchQuery, SearchSummary,
 };
 pub use watch::{FsChange, WatchOp};
 

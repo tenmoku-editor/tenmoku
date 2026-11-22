@@ -3,7 +3,7 @@
 //! same function with libFuzzer.
 
 use fe_remote_proto::{
-    DirEntry, DiskStamp, EntryKind, FileMatches, FsData, FsOp, Hello, Kind, LineMatch, Location,
+    DiskStamp, Entry, EntryKind, FileMatches, FsData, FsOp, Hello, Kind, LineMatch, Location,
     PathBytes, SearchData, Time, WriteExpect, chan, decode_all, encode,
 };
 
@@ -25,7 +25,7 @@ fn seeds() -> Vec<Vec<u8>> {
             path: "/home/me/src/app".into(),
         },
     };
-    let entries = FsData::Entries(vec![DirEntry {
+    let entries = FsData::Tree(vec![Entry {
         name: PathBytes(b"main\xff.rs".to_vec()),
         kind: EntryKind::File,
         ignored: false,

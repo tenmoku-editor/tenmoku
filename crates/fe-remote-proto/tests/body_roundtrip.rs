@@ -2,11 +2,12 @@
 //! the frame (D § 2.1, § 2.3).
 
 use fe_remote_proto::{
-    ControlOp, Credit, DirEntry, DiskStamp, EntryId, EntryKind, FileMatches, FsChange, FsData,
-    FsOp, Hello, IoError, IoKind, Kind, LineMatch, Location, OpenTarget, Opened, PathBytes,
-    PathFilter, Refused, Resume, SearchData, SearchOp, SearchOptions, SearchQuery, SearchSummary,
-    SessionToken, Stat, Status, StreamOffset, StreamResume, Time, WatchOp, Welcome, WriteExpect,
-    body, chan, decode_all, decode_frame, encode, read_frame,
+    ControlOp, Created, Credit, DirEntry, DiskStamp, Entry, EntryId, EntryKind, FileKind,
+    FileMatches, FsChange, FsData, FsOp, HEADER, Hello, IoError, IoKind, Kind, LineMatch, ListTree,
+    ListingLost, Location, OpenTarget, Opened, PathBytes, PathFilter, Placed, Refused, Resume,
+    SearchData, SearchFailure, SearchOp, SearchOptions, SearchQuery, SearchSummary, SessionToken,
+    Stat, Status, StreamOffset, StreamResume, Time, TrashRecord, WatchOp, Welcome, WriteExpect,
+    body, chan, decode_all, decode_frame, encode, encoded_len, read_frame,
 };
 use proptest::collection::vec;
 use proptest::option;
@@ -17,13 +18,14 @@ use std::fmt::Debug;
 use std::time::{Duration, SystemTime};
 
 /// Encodes `value` as a `kind` frame on `chan`, then decodes it back both
-/// from a slice and from a reader.
+/// from a slice and from a reader. `encoded_len` gives its body's length.
 fn round_trip<T>(kind: Kind, chan: u16, value: &T)
 where
     T: Serialize + DeserializeOwned + PartialEq + Debug,
 {
     let id = 0x8000_0007;
     let frame = encode(kind, chan, id, value).unwrap();
+    assert_eq!(encoded_len(value).unwrap(), frame.len() - HEADER);
     let headers = decode_all(&frame).unwrap();
     assert_eq!(headers.len(), 1);
     assert_eq!(
@@ -148,11 +150,56 @@ fn expect() -> impl Strategy<Value = WriteExpect> {
     ]
 }
 
+fn file_kind() -> impl Strategy<Value = FileKind> {
+    prop::sample::select(vec![
+        FileKind::File,
+        FileKind::Dir,
+        FileKind::Symlink,
+        FileKind::Other,
+    ])
+}
+
 fn entry_kind() -> impl Strategy<Value = EntryKind> {
     prop::sample::select(vec![EntryKind::File, EntryKind::Dir, EntryKind::Symlink])
 }
 
+fn dev_ino() -> impl Strategy<Value = (u64, u64)> {
+    (any::<u64>(), any::<u64>())
+}
+
+fn entry_id() -> impl Strategy<Value = EntryId> {
+    (
+        any::<u64>(),
+        any::<u64>(),
+        option::of((any::<i64>(), 0u32..1_000_000_000)),
+    )
+        .prop_map(|(dev, ino, born)| EntryId { dev, ino, born })
+}
+
+fn placed() -> impl Strategy<Value = Placed> {
+    (path(), entry_id()).prop_map(|(path, id)| Placed { path, id })
+}
+
+fn trash_record() -> impl Strategy<Value = TrashRecord> {
+    (path(), option::of(path()), entry_id()).prop_map(|(path, at, id)| TrashRecord { path, at, id })
+}
+
 fn fs_op() -> impl Strategy<Value = FsOp> {
+    let list_tree = (
+        path(),
+        path(),
+        any::<[bool; 2]>(),
+        vec(option::of(dev_ino()), 0..4),
+    )
+        .prop_map(
+            |(root, rel, [show_ignored, parent_ignored], ids)| ListTree {
+                root,
+                rel,
+                show_ignored,
+                parent_ignored,
+                ids,
+            },
+        );
     prop_oneof![
         path().prop_map(|path| FsOp::Read { path }),
         (path(), any::<u64>(), expect()).prop_map(|(path, len, expect)| FsOp::WriteAtomic {
@@ -160,46 +207,86 @@ fn fs_op() -> impl Strategy<Value = FsOp> {
             len,
             expect
         }),
-        (path(), any::<bool>()).prop_map(|(path, follow)| FsOp::Stat { path, follow }),
-        (path(), any::<bool>()).prop_map(|(path, ignored)| FsOp::ListDir { path, ignored }),
-        (path(), path(), any::<bool>()).prop_map(|(parent, name, folder)| FsOp::Create {
-            parent,
-            name,
-            folder
-        }),
-        (path(), path()).prop_map(|(from, new_name)| FsOp::Rename { from, new_name }),
-        path().prop_map(|path| FsOp::Remove { path }),
-        vec(path(), 0..4).prop_map(|paths| FsOp::Trash { paths }),
+        path().prop_map(|path| FsOp::Stat { path }),
+        path().prop_map(|path| FsOp::ListDir { path }),
         path().prop_map(|path| FsOp::Canonicalize { path }),
+        list_tree.prop_map(FsOp::ListTree),
+        (path(), path(), text(), any::<u64>(), any::<bool>()).prop_map(
+            |(root, dir, name, len, folder)| FsOp::CreateRecorded {
+                root,
+                dir,
+                name,
+                len,
+                folder
+            }
+        ),
+        (path(), path(), text()).prop_map(|(root, from, new_name)| FsOp::Rename {
+            root,
+            from,
+            new_name
+        }),
+        (path(), path()).prop_map(|(root, path)| FsOp::DuplicateRecorded { root, path }),
+        (path(), path(), path()).prop_map(|(root, path, dir)| FsOp::CopyIntoRecorded {
+            root,
+            path,
+            dir
+        }),
+        (path(), path(), path(), vec(path(), 0..4)).prop_map(|(root, path, dir, planned)| {
+            FsOp::PasteName {
+                root,
+                path,
+                dir,
+                planned,
+            }
+        }),
+        (path(), path(), path(), path()).prop_map(|(root, from, dir, name)| FsOp::MoveInto {
+            root,
+            from,
+            dir,
+            name
+        }),
+        (path(), vec(path(), 0..4)).prop_map(|(root, paths)| FsOp::TrashRecorded { root, paths }),
+        Just(FsOp::RestoresFromTrash),
+        (path(), trash_record()).prop_map(|(root, trashed)| FsOp::Restore { root, trashed }),
+        trash_record().prop_map(|trashed| FsOp::InTrash { trashed }),
+        (path(), path()).prop_map(|(root, path)| FsOp::Exists { root, path }),
+        (path(), path()).prop_map(|(root, path)| FsOp::Truncate { root, path }),
     ]
 }
 
 fn fs_data() -> impl Strategy<Value = FsData> {
-    let entry = (
-        path(),
-        entry_kind(),
-        any::<bool>(),
-        option::of((any::<u64>(), any::<u64>()).prop_map(|(dev, ino)| EntryId { dev, ino })),
-    )
-        .prop_map(|(name, kind, ignored, id)| DirEntry {
+    let dir_entry = (path(), file_kind()).prop_map(|(name, kind)| DirEntry { name, kind });
+    let entry = (path(), entry_kind(), any::<bool>(), option::of(dev_ino())).prop_map(
+        |(name, kind, ignored, id)| Entry {
             name,
             kind,
             ignored,
             id,
-        });
-    let stat = (entry_kind(), stamp(), any::<bool>()).prop_map(|(kind, stamp, readonly)| Stat {
-        kind,
-        stamp,
-        readonly,
-    });
+        },
+    );
+    let stat = (file_kind(), stamp()).prop_map(|(kind, stamp)| Stat { kind, stamp });
+    let lost = prop::sample::select(vec![
+        ListingLost::Itself,
+        ListingLost::Above,
+        ListingLost::Root,
+    ]);
     prop_oneof![
         vec(any::<u8>(), 0..256).prop_map(FsData::Bytes),
         (stamp(), any::<u64>()).prop_map(|(stamp, len)| FsData::File { stamp, len }),
         stamp().prop_map(FsData::Written),
         option::of(stamp()).prop_map(|current| FsData::Conflict { current }),
-        stat.prop_map(FsData::Stat),
-        vec(entry, 0..8).prop_map(FsData::Entries),
+        option::of(stat).prop_map(FsData::Stat),
+        vec(dir_entry, 0..8).prop_map(FsData::Entries),
         path().prop_map(FsData::Path),
+        vec(entry, 0..8).prop_map(FsData::Tree),
+        option::of(dev_ino()).prop_map(|id| FsData::Listed { id }),
+        option::of(lost).prop_map(|lost| FsData::Unlisted { lost }),
+        (path(), placed()).prop_map(|(path, first)| FsData::Created(Created { path, first })),
+        placed().prop_map(FsData::Placed),
+        path().prop_map(FsData::Name),
+        vec(trash_record(), 0..4).prop_map(FsData::Trashed),
+        trash_record().prop_map(FsData::Record),
+        any::<bool>().prop_map(FsData::Bool),
     ]
 }
 
@@ -235,7 +322,13 @@ fn search_op() -> impl Strategy<Value = SearchOp> {
                 excluded,
             }
         ),
-        (path(), filter()).prop_map(|(root, filter)| SearchOp::Files { root, filter }),
+        (path(), filter(), option::of(path())).prop_map(|(root, filter, excluded)| {
+            SearchOp::Files {
+                root,
+                filter,
+                excluded,
+            }
+        }),
     ]
 }
 
@@ -288,7 +381,12 @@ fn search_data() -> impl Strategy<Value = SearchData> {
     prop_oneof![
         vec(file, 0..4).prop_map(SearchData::Matches),
         summary.prop_map(SearchData::Summary),
+        vec((path(), text()), 0..3).prop_map(SearchData::Errors),
         vec(path(), 0..8).prop_map(SearchData::Files),
+        text().prop_map(|m| SearchData::Failed(SearchFailure::InvalidPattern(m))),
+        (text(), text()).prop_map(|(glob, message)| SearchData::Failed(
+            SearchFailure::InvalidGlob { glob, message }
+        )),
     ]
 }
 

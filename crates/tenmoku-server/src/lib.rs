@@ -12,8 +12,10 @@
 //! [`serve`] runs one session over any link, so a client's tests can run a
 //! server in-process without the binary.
 //!
-//! Control is the only service so far: pings are answered, and `Open` and
-//! the fixed service channels end with an `Unsupported` status.
+//! Pings are answered on the control channel, and `Open` ends with an
+//! `Unsupported` status. The fixed service channels serve fe-host's
+//! `FsHost`, `WatchHost` and `SearchHost` from the session's [`Hosts`]
+//! (D § 2.2, § 5).
 
 #![cfg(unix)]
 
@@ -24,9 +26,11 @@ macro_rules! log {
 }
 
 pub mod clock;
+mod convert;
 mod daemon;
 mod paths;
 mod server;
+mod services;
 pub mod stdio;
 #[cfg(feature = "test-support")]
 pub mod testing;
@@ -34,10 +38,12 @@ pub mod testing;
 pub use daemon::{Daemon, socket_link};
 pub use paths::Paths;
 pub use server::{SessionInfo, Snapshot, TERM_WAIT, TornDown};
+pub use services::{FS_WORKERS, Hosts};
 
 use clock::Clock;
 use fe_remote_proto::{HandshakeError, Link, SessionToken};
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How long a session waits for its client after the link drops (D § 3).
@@ -54,6 +60,9 @@ pub struct Config {
     pub linger: Duration,
     /// The time the grace, the teardown and the linger read.
     pub clock: Clock,
+    /// Makes each new session's hosts: [`Hosts::local`], unless a test
+    /// gives its own.
+    pub hosts: Arc<dyn Fn() -> Hosts + Send + Sync>,
 }
 
 impl Default for Config {
@@ -66,6 +75,7 @@ impl Default for Config {
             grace: GRACE,
             linger: LINGER,
             clock: Clock::System,
+            hosts: Arc::new(Hosts::local),
         }
     }
 }

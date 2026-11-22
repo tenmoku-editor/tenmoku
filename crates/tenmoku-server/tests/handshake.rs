@@ -1,6 +1,7 @@
 //! The daemon's side of the handshake (D § 2.5): a strict match before any
 //! session is made, a fresh session for a resume it can't honour; and the
-//! control channel, the only service so far.
+//! control channel. The service channels have tests of their own
+//! (fs_service, watch_service, search_service).
 
 #![cfg(unix)]
 
@@ -9,8 +10,8 @@ mod common;
 use common::{Host, client_config, handshake, location, run_daemon, socket_link};
 use fe_remote_proto::testing::RawPeer;
 use fe_remote_proto::{
-    BUILD, Config as MuxConfig, ControlOp, Event, FsOp, HandshakeError, IoKind, Kind, Link,
-    OpenTarget, PROTOCOL, PathBytes, Resume, SessionToken, Status, StreamOffset, chan,
+    BUILD, Config as MuxConfig, ControlOp, Event, HandshakeError, IoKind, Kind, Link, OpenTarget,
+    PROTOCOL, Resume, SessionToken, Status, StreamOffset, chan,
 };
 use std::thread;
 use tenmoku_server::{Config, serve};
@@ -155,23 +156,6 @@ fn open_is_refused_with_a_clear_status() {
     };
     assert_eq!(e.kind, IoKind::Unsupported);
     assert!(e.message.contains("localhost:8080"), "{}", e.message);
-}
-
-#[test]
-fn a_service_not_built_yet_is_refused_with_a_clear_status() {
-    let host = Host::new();
-    let _running = run_daemon(&host, Config::default());
-    let (client, _) = handshake(socket_link(&host.paths()), client_config(), None).unwrap();
-    let stat = FsOp::Stat {
-        path: PathBytes(b"/etc".to_vec()),
-        follow: true,
-    };
-    let mut reply = client.request(chan::FS, &stat).unwrap();
-    let Some(Event::End(Status::Error(e))) = reply.recv() else {
-        panic!("the fs request wasn't refused");
-    };
-    assert_eq!(e.kind, IoKind::Unsupported);
-    assert!(e.message.contains("no file service"), "{}", e.message);
 }
 
 #[test]

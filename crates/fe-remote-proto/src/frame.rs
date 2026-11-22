@@ -158,6 +158,13 @@ pub fn encode<T: Serialize + ?Sized>(kind: Kind, chan: u16, id: u32, body: &T) -
     Ok(out)
 }
 
+/// How many bytes `body` takes in postcard: the body of its frame, for a
+/// sender that batches items under [`CHUNK`].
+pub fn encoded_len<T: Serialize + ?Sized>(body: &T) -> Result<usize> {
+    postcard::serialize_with_flavor(body, postcard::ser_flavors::Size::default())
+        .map_err(|e| FrameError::Encode(e.to_string()))
+}
+
 /// One whole frame whose body is `body` as it is: an opaque `Data` frame on
 /// a dynamic channel.
 pub fn encode_raw(kind: Kind, chan: u16, id: u32, body: &[u8]) -> Result<Vec<u8>> {

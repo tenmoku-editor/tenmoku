@@ -8557,8 +8557,11 @@ dependencies = [
 name = "tenmoku-server"
 version = "0.2.5"
 dependencies = [
+ "fe-host",
+ "fe-project",
  "fe-remote-proto",
  "libc",
+ "serde",
  "tempfile",
  "tenmoku-server",
 ]

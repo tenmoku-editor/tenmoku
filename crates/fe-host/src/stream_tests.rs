@@ -86,6 +86,22 @@ fn cancel_waits_for_the_end() {
 }
 
 #[test]
+fn setting_the_cancel_flag_stops_the_producer_while_a_reader_waits() {
+    let (tx, stream) = Stream::<u32, &str>::channel(1);
+    let flag = stream.cancel_flag();
+    let producer = thread::spawn(move || {
+        while !tx.is_cancelled() {
+            thread::yield_now();
+        }
+        tx.end("stopped");
+    });
+    let reader = thread::spawn(move || (stream.recv(), stream.finish()));
+    flag.store(true, Ordering::Relaxed);
+    producer.join().unwrap();
+    assert_eq!(reader.join().unwrap(), (None, Some("stopped")));
+}
+
+#[test]
 fn ended_with_has_no_items() {
     let stream = Stream::<u32, &str>::ended_with("refused");
     assert!(stream.ended().is_done());
@@ -110,4 +126,14 @@ fn a_subscription_drops_its_source_when_dropped() {
     drop(subscription);
     dropped.recv().unwrap();
     assert!(tx.send(8).is_err());
+}
+
+#[test]
+fn a_subscription_in_parts_stops_when_its_source_is_dropped() {
+    let (tx, rx) = mpsc::channel::<u32>();
+    let subscription = Subscription::new(rx, tx);
+    let (items, source) = subscription.into_parts();
+    let reader = thread::spawn(move || items.recv());
+    drop(source);
+    assert!(reader.join().unwrap().is_err());
 }
