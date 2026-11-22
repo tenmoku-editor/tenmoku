@@ -66,6 +66,14 @@
     (symbol)* @variable.parameter)
   (#match? @keyword "^(define|define/contract)$"))
 
+; (struct name ...) and (define-struct name ...): the name is a type
+(list
+  .
+  (symbol) @keyword
+  .
+  (symbol) @type
+  (#match? @keyword "^(struct|define-struct)$"))
+
 ;; quote ;;
 
 ;; hardcoded highlight four levels of nested structure
@@ -108,12 +116,3 @@
 
 [(comment)
  (block_comment)] @comment
-
-
-; (struct name ...) and (define-struct name ...): the name is a type
-(list
-  .
-  (symbol) @keyword
-  .
-  (symbol) @type
-  (#match? @keyword "^(struct|define-struct)$"))

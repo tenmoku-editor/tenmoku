@@ -33,6 +33,10 @@
 (define square (lambda (x) (* x x)))
 
 #;(this-is-a-datum-comment (ignored))
+#;(struct hidden (a b))
+#;(define-struct hidden2 (a b))
+(define quoted-structs '((struct quoted (a)) (define-struct quoted2 (a))))
+'(struct quoted3 (a))
 
 (define (classify n)
   (cond
