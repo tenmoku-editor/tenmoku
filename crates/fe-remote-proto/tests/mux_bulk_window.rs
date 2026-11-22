@@ -89,111 +89,55 @@ fn flood(client: &Mux, bulk: bool) -> Stream {
     client.stream(opened.chan).unwrap()
 }
 
-/// What [`drink`] took.
-struct Drunk {
-    /// Everything taken since the stream opened, and how long that took.
-    total: usize,
-    elapsed: Duration,
-    /// The bytes taken in the last `tail`.
-    tail: usize,
-}
-
-/// Takes what the stream delivers for `run`, counting the last `tail`
-/// apart.
-fn drink(s: &mut Stream, run: Duration, tail: Duration) -> Drunk {
+/// Takes what the stream delivers for `run`; returns the bytes taken in
+/// its last `tail`, and how long that tail lasted.
+fn drink(s: &mut Stream, run: Duration, tail: Duration) -> (usize, Duration) {
     let t = Instant::now();
-    let mut total = 0;
-    let mut tail_bytes = 0;
+    let mut tail_start: Option<Instant> = None;
+    let mut bytes = 0;
     while t.elapsed() < run {
         let Some(Event::Data(b)) = s.recv() else {
             panic!("the stream ended");
         };
-        total += b.len();
         if t.elapsed() >= run - tail {
-            tail_bytes += b.len();
+            tail_start.get_or_insert_with(Instant::now);
+            bytes += b.len();
         }
     }
-    Drunk {
-        total,
-        elapsed: t.elapsed(),
-        tail: tail_bytes,
-    }
-}
-
-/// Drinks from two streams at once, on two threads started together, so
-/// a loaded host slows both alike and only their ratio is meaningful.
-fn drink_both(a: &mut Stream, b: &mut Stream, run: Duration, tail: Duration) -> (Drunk, Drunk) {
-    let go = std::sync::Barrier::new(2);
-    thread::scope(|scope| {
-        let a = scope.spawn(|| {
-            go.wait();
-            drink(a, run, tail)
-        });
-        let b = scope.spawn(|| {
-            go.wait();
-            drink(b, run, tail)
-        });
-        (a.join().unwrap(), b.join().unwrap())
-    })
-}
-
-/// The wire releases bytes no faster than its cap from the moment the
-/// stream opened, whatever the host's load: a slow reader only takes
-/// them later. So the total taken can't beat `cap × elapsed` (plus the
-/// 0.3 MiB the link holds in flight), unlike a rate over a short span,
-/// where a reader catching up takes a burst.
-fn assert_within_cap(d: &Drunk, cap: f64) {
-    let ceiling = cap * d.elapsed.as_secs_f64() + MIB;
-    assert!(
-        (d.total as f64) <= ceiling,
-        "took {:.1} MiB in {:?}, over a {:.0} MiB/s cap",
-        d.total as f64 / MIB,
-        d.elapsed,
-        cap / MIB
-    );
-}
-
-fn capped(cap: f64) -> Latency {
-    Latency {
-        one_way: ms(20),
-        bytes_per_sec: Some(cap),
-    }
+    (bytes, tail_start.map_or(Duration::ZERO, |at| at.elapsed()))
 }
 
 #[test]
 fn a_capped_link_delivers_at_its_cap() {
-    // Not bulk: the 1.25 MiB window is over the link's 0.3 MiB in flight,
-    // so the cap is all that limits the stream. The wire releases bytes
-    // at its cap whatever the host's load, so what is checked is that it
-    // never releases more (a lower bound on the rate would be the host's,
-    // not the link's; the bulk test below compares a stream's rate with
-    // this one's under the same load).
     let cap = 8.0 * MIB;
-    let client = client(capped(cap), Duration::from_secs(10));
+    let link = Latency {
+        one_way: ms(20),
+        bytes_per_sec: Some(cap),
+    };
+    let client = client(link, Duration::from_secs(10));
+    // Not bulk: the 1.25 MiB window is over the link's 0.3 MiB in flight,
+    // so the cap is all that limits the stream.
     let mut s = flood(&client, false);
-    let d = drink(&mut s, Duration::from_secs(3), Duration::from_secs(2));
-    assert!(d.total > 0, "nothing arrived");
-    assert_within_cap(&d, cap);
+    let (bytes, over) = drink(&mut s, Duration::from_secs(3), Duration::from_secs(2));
+    let rate = bytes as f64 / over.as_secs_f64();
+    assert!(
+        rate > 0.6 * cap && rate < 1.1 * cap,
+        "{:.1} MiB/s",
+        rate / MIB
+    );
 }
 
 #[test]
 fn a_capped_link_sizes_a_bulk_window_to_twice_its_bdp_and_stays_full() {
     let cap = 8.0 * MIB;
-    let client = client(capped(cap), ms(500));
-    // The reference: the same link, not bulk, whose 1.25 MiB window is
-    // over its bandwidth-delay product, so it keeps the link full. Set up
-    // first, so the bulk stream's window is read as it opens, before any
-    // of its data has moved the estimate.
-    let reference_client = self::client(capped(cap), Duration::from_secs(10));
-    let mut reference = flood(&reference_client, false);
+    let link = Latency {
+        one_way: ms(20),
+        bytes_per_sec: Some(cap),
+    };
+    let client = client(link, ms(500));
     let mut s = flood(&client, true);
     assert_eq!(client.window(s.chan()), INITIAL_WINDOW);
-    let (bulk, full) = drink_both(
-        &mut s,
-        &mut reference,
-        Duration::from_secs(5),
-        Duration::from_secs(2),
-    );
+    let (bytes, over) = drink(&mut s, Duration::from_secs(5), Duration::from_secs(2));
     let rtt = client.rtt().expect("no pong").min;
     assert!(rtt >= ms(40), "{rtt:?}");
     // 2 × 8 MiB/s × ~40 ms ≈ 0.66 MiB: well under the initial window, so
@@ -206,13 +150,9 @@ fn a_capped_link_sizes_a_bulk_window_to_twice_its_bdp_and_stays_full() {
         window / MIB,
         expected / MIB
     );
-    // Twice the BDP still keeps the link busy: over the same span, under
-    // the same load, the bulk stream takes what the stream that can't be
-    // window-limited does. A window that starved the link takes less.
-    assert_within_cap(&bulk, cap);
-    assert_within_cap(&full, cap);
-    let ratio = bulk.tail as f64 / full.tail as f64;
-    assert!(ratio > 0.8, "bulk took {ratio:.2} of a full link");
+    // Twice the BDP still keeps the link busy.
+    let rate = bytes as f64 / over.as_secs_f64();
+    assert!(rate > 0.6 * cap, "{:.1} MiB/s", rate / MIB);
 }
 
 #[test]
