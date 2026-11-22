@@ -113,7 +113,32 @@ interface panels {
 
 /// What the host tells a plugin about a panel. A plugin that shows panels exports it; the host
 /// queues the events it has not delivered, with a cap.
+///
+/// `tick` and `key` are the realtime pair, for a panel whose
+/// `[[contributes.plugin.panels]]` entry sets `tick_ms` or `keys = true`. Both need the
+/// `panels.realtime` capability, and a plugin that sets either without it is refused at load.
+/// The host owns focus throughout: neither is ever delivered to a panel that is not shown and
+/// focused, so a plugin cannot run a loop unseen and there is no idle cost.
 interface panel-handler {
+    /// A key pressed while the panel is focused. There is no text input here: a panel that
+    /// wants typing uses an `input` node.
+    ///
+    /// The host keeps these, and a plugin never sees them:
+    /// - `escape`, which returns focus to the editor; it always does, in every panel;
+    /// - `tab`, which moves focus on;
+    /// - anything with `secondary`, the platform's command modifier, which is the host's
+    ///   whatever the key is. (A game panel may be given these later, for a key that is not a
+    ///   registered command; today it is not.)
+    record key-event {
+        /// The host's key name, as `escape`, `f1` or `a`; compared without case.
+        key: string,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        /// The platform's command modifier: `cmd` on macOS, `ctrl` elsewhere.
+        secondary: bool,
+    }
+
     variant panel-event {
         /// A button pressed, or a tree item or list row opened.
         activated(string),
@@ -125,6 +150,14 @@ interface panel-handler {
         expanded(tuple<string, bool>),
         shown,
         hidden,
+        /// A key the host does not keep, while the panel is focused.
+        key(key-event),
+        /// Milliseconds since the panel's last tick, for a panel with `tick_ms`. At most 20 a
+        /// second, and one at a time: a tick falling due while the plugin still has the last
+        /// one is dropped and counted, never queued, so a slow plugin falls behind the clock
+        /// rather than being handed a backlog late. A tick is an ordinary call and has the
+        /// ordinary 100 ms deadline.
+        tick(u32),
     }
 
     on-event: func(panel: string, event: panel-event);

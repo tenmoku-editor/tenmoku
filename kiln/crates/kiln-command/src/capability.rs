@@ -56,6 +56,11 @@ pub enum Capability {
     Language,
     /// `panels`: show panels.
     Panels,
+    /// `panels.realtime`: a panel may declare `tick_ms` and `keys`, so the
+    /// host runs a timer for it and routes key events to it while it is
+    /// focused. Separate from [`Self::Panels`] because it costs the user
+    /// something `panels` does not: a repeating call and their keystrokes.
+    PanelsRealtime,
     /// `tasks`: contribute and run tasks.
     Tasks,
     /// `lsp:<server>`: send requests and notifications to the named language
@@ -107,10 +112,11 @@ impl Capability {
             ("jobs", None) => Ok(Self::Jobs),
             ("language", None) => Ok(Self::Language),
             ("panels", None) => Ok(Self::Panels),
+            ("panels.realtime", None) => Ok(Self::PanelsRealtime),
             ("tasks", None) => Ok(Self::Tasks),
             (
                 "buffer.read" | "buffer.write" | "commands" | "decorations" | "status" | "jobs"
-                | "language" | "panels" | "tasks",
+                | "language" | "panels" | "panels.realtime" | "tasks",
                 Some(_),
             ) => Err(invalid("this capability takes no argument")),
             ("fs.read", Some(scope)) => Ok(Self::FsRead(parse_scope(scope).map_err(invalid)?)),
@@ -260,6 +266,7 @@ impl fmt::Display for Capability {
             Self::Jobs => f.write_str("jobs"),
             Self::Language => f.write_str("language"),
             Self::Panels => f.write_str("panels"),
+            Self::PanelsRealtime => f.write_str("panels.realtime"),
             Self::Tasks => f.write_str("tasks"),
             Self::Lsp(server) => write!(f, "lsp:{server}"),
         }

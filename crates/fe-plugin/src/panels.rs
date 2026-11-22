@@ -7,6 +7,14 @@
 //! Updates are rate-capped per panel; one over the rate is validated, then held, the latest
 //! replacing an earlier held one, until [`PanelViews::flush`] finds it due. Unloading a plugin
 //! clears its views.
+//!
+//! [`PanelRuntime`] is the other direction: the ticks and keys the host delivers to a panel that
+//! asked for them ([`PanelDecl`]'s `tick_ms` and `keys`, which need the `panels.realtime`
+//! capability). The host owns focus, so nothing is delivered to a panel that is not shown and
+//! focused, and nothing reserved is delivered at all; the renderer calls it and nothing here
+//! draws or talks to a guest.
+//!
+//! [`PanelDecl`]: kiln_plugin::manifest::PanelDecl
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -530,5 +538,154 @@ impl Host for HostState {
         // Showing a dock is the app's: A4 lands it.
         self.panels.granted("fastedit:editor/panels.reveal")?;
         unimplemented("fastedit:editor/panels.reveal")
+    }
+}
+
+/// Ticks one panel takes a second: the update rate of the design's §4.2, which a tick is one
+/// source of, so a ticking panel cannot outpace what the docks will draw.
+pub const MAX_TICKS_PER_SECOND: u32 = MAX_UPDATES_PER_SECOND;
+/// The least time between two ticks of one panel.
+pub const MIN_TICK_INTERVAL: Duration = MIN_UPDATE_INTERVAL;
+
+/// The keys the host keeps, whatever a panel asks for, lower-case as the host names them:
+/// `escape` returns focus to the editor and `tab` moves it on. A key with the `secondary`
+/// modifier is the host's too, which is not a name and so is not in this list.
+pub const RESERVED_KEYS: [&str; 2] = ["escape", "tab"];
+
+/// What the renderer knows about a panel when it has an event for it. The host owns both: a
+/// plugin cannot show, hide or focus its own panel, and so cannot trap focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PanelState {
+    pub shown: bool,
+    pub focused: bool,
+}
+
+/// Why the host kept an event rather than delivering it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Skipped {
+    /// The panel is not shown, or not focused.
+    Unfocused,
+    /// A call into the plugin for this panel has not come back. The tick is dropped and counted
+    /// ([`PanelRuntime::dropped_ticks`]), never queued: a slow plugin falls behind the clock
+    /// instead of building a backlog to be delivered late.
+    Busy,
+    /// Less than [`MIN_TICK_INTERVAL`] since the panel's last tick.
+    TooSoon,
+    /// One of [`RESERVED_KEYS`], or a key with the `secondary` modifier.
+    Reserved,
+}
+
+/// What [`PanelRuntime::deliver_tick`] or [`PanelRuntime::deliver_key`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// The renderer should call the plugin's `panel-handler.on-event` with it.
+    Delivered,
+    Skipped(Skipped),
+}
+
+/// A key press as the host names it: `fastedit:editor/panel-handler`'s `key-event`, with no text
+/// input. `secondary` is the platform's command modifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyEvent {
+    /// The host's key name, as `escape` or `f1`; compared without case.
+    pub key: String,
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub secondary: bool,
+}
+
+impl KeyEvent {
+    /// Whether the host keeps this key: one of [`RESERVED_KEYS`], or any key with `secondary`.
+    pub fn is_reserved(&self) -> bool {
+        self.secondary
+            || RESERVED_KEYS
+                .iter()
+                .any(|reserved| self.key.eq_ignore_ascii_case(reserved))
+    }
+}
+
+/// One plugin load's realtime panels: what it is owed and what it is in the middle of. The
+/// renderer holds one and calls it; clones share it. Nothing here calls a guest - a
+/// [`Delivery::Delivered`] is the renderer's cue to make that call, under the same
+/// [`PanelRuntime::call_deadline`] as any other.
+#[derive(Clone, Default)]
+pub struct PanelRuntime {
+    panels: Arc<Mutex<BTreeMap<String, Realtime>>>,
+}
+
+#[derive(Default)]
+struct Realtime {
+    /// When the panel's last tick was delivered.
+    last_tick: Option<Instant>,
+    /// Whether a call for this panel is still in the plugin.
+    in_call: bool,
+    dropped: u64,
+}
+
+impl PanelRuntime {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How long a tick or a key has in the plugin: kiln-plugin's call deadline, the same one
+    /// every other call gets. A panel that asked to be ticked buys no more time.
+    pub fn call_deadline() -> Duration {
+        kiln_plugin::limits::CALL_DEADLINE
+    }
+
+    /// Whether the renderer should deliver a tick to `panel` at `now`, given what it is showing.
+    /// A tick goes only to a shown and focused panel, one at a time, and no sooner than
+    /// [`MIN_TICK_INTERVAL`] after the last.
+    pub fn deliver_tick(&self, panel: &str, state: PanelState, now: Instant) -> Delivery {
+        if !state.shown || !state.focused {
+            return Delivery::Skipped(Skipped::Unfocused);
+        }
+        let mut panels = self.lock();
+        let realtime = panels.entry(panel.to_owned()).or_default();
+        if realtime.in_call {
+            realtime.dropped += 1;
+            return Delivery::Skipped(Skipped::Busy);
+        }
+        if realtime
+            .last_tick
+            .is_some_and(|last| now.saturating_duration_since(last) < MIN_TICK_INTERVAL)
+        {
+            return Delivery::Skipped(Skipped::TooSoon);
+        }
+        realtime.in_call = true;
+        realtime.last_tick = Some(now);
+        Delivery::Delivered
+    }
+
+    /// Tells the runtime that the call carrying `panel`'s tick has come back, however it ended:
+    /// returned, trapped, or stopped at its deadline. Until it does, ticks are dropped.
+    pub fn tick_finished(&self, panel: &str) {
+        self.lock().entry(panel.to_owned()).or_default().in_call = false;
+    }
+
+    /// Whether the renderer should deliver `key` to `panel`. A key goes only to a focused panel,
+    /// and never one the host keeps ([`KeyEvent::is_reserved`]).
+    pub fn deliver_key(&self, panel: &str, key: &KeyEvent, state: PanelState) -> Delivery {
+        let _ = panel;
+        if !state.focused {
+            return Delivery::Skipped(Skipped::Unfocused);
+        }
+        if key.is_reserved() {
+            return Delivery::Skipped(Skipped::Reserved);
+        }
+        Delivery::Delivered
+    }
+
+    /// How many of `panel`'s ticks fell due while a call for it was still in the plugin. They are
+    /// gone, not queued; the count is what the host knows about a plugin falling behind.
+    pub fn dropped_ticks(&self, panel: &str) -> u64 {
+        self.lock()
+            .get(panel)
+            .map_or(0, |realtime| realtime.dropped)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<String, Realtime>> {
+        self.panels.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

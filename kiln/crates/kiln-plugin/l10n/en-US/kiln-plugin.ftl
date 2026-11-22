@@ -26,6 +26,7 @@ kiln-plugin-capability-net-any = connect to any host on the internet
 kiln-plugin-capability-jobs = run background jobs
 kiln-plugin-capability-language = add completions, hovers and other language features
 kiln-plugin-capability-panels = show panels
+kiln-plugin-capability-panels-realtime = run a timer and read keys while its panel is focused
 kiln-plugin-capability-tasks = add tasks, and run them
 # `$server` is a language server's name, as in `lsp:rust-analyzer`.
 kiln-plugin-capability-lsp = send requests to the language server { $server }
@@ -109,6 +110,12 @@ kiln-plugin-panel-bad-id = panel id { $panel } must be ASCII letters, digits, `-
 kiln-plugin-panel-bad-dock = panel dock { $dock } must be left, right or bottom
 kiln-plugin-panel-duplicate = panel { $panel } is declared twice
 kiln-plugin-panel-too-many = a plugin may declare at most { $max } panels
+kiln-plugin-panel-not-an-integer = panel `{ $key }` must be an integer
+kiln-plugin-panel-not-a-bool = panel `{ $key }` must be true or false
+# `$value` is as declared; `$min` and `$max` are the ends of the allowed range.
+kiln-plugin-panel-tick-out-of-range = panel `tick_ms` of { $value } must be between { $min } and { $max }
+# `$panel` is the panel id, quoted; `$capability` is the capability it needs.
+kiln-plugin-panel-realtime-without-capability = panel { $panel } declares `tick_ms` or `keys`, which needs the `{ $capability }` capability
 # `$path` is the `wasm` path, quoted; `$reason` one of the messages below.
 kiln-plugin-manifest-wasm-path = { $id }: wasm path { $path }: { $reason }
 kiln-plugin-wasm-path-empty = the path is empty

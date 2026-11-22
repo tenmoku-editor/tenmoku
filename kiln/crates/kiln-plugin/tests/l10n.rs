@@ -605,6 +605,10 @@ fn en_us_errors_and_prompt_text_are_unchanged() {
             "add completions, hovers and other language features",
         ),
         (Capability::Panels, "show panels"),
+        (
+            Capability::PanelsRealtime,
+            "run a timer and read keys while its panel is focused",
+        ),
         (Capability::Tasks, "add tasks, and run them"),
         (
             Capability::Lsp("rust-analyzer".into()),

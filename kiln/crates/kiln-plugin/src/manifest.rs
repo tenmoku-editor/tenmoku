@@ -270,6 +270,12 @@ impl std::fmt::Display for WasmPathError {
 /// Panels one plugin may declare.
 pub const MAX_PANELS: usize = 8;
 
+/// What `tick_ms` may be, in milliseconds. The floor keeps a plugin from
+/// asking for a tick faster than the panel update rate the stage-3 record
+/// allows; the ceiling keeps `tick_ms` meaning "a timer" rather than "a
+/// once-a-minute job", which is what `jobs` is for.
+pub const TICK_MS_RANGE: std::ops::RangeInclusive<i64> = 50..=1000;
+
 /// Where a panel's dock is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelLocation {
@@ -290,6 +296,13 @@ pub struct PanelDecl {
     pub icon: String,
     /// The `dock` key: `left`, `right` or `bottom`.
     pub location: PanelLocation,
+    /// `tick_ms`: how often the panel asks to be ticked, in milliseconds,
+    /// within [`TICK_MS_RANGE`]. Absent means the panel is never ticked.
+    /// Needs `panels.realtime`.
+    pub tick_ms: Option<u32>,
+    /// `keys`: whether key events reach the panel while it is focused.
+    /// Needs `panels.realtime`.
+    pub keys: bool,
 }
 
 /// Why a `[[contributes.plugin.panels]]` entry is refused.
@@ -304,6 +317,16 @@ pub enum PanelError {
     BadDock(String),
     Duplicate(String),
     TooMany,
+    /// `tick_ms` was not an integer.
+    NotAnInteger(&'static str),
+    /// `keys` was not a boolean.
+    NotABool(&'static str),
+    /// `tick_ms` was an integer outside [`TICK_MS_RANGE`]. Carries the value
+    /// as declared, signed, so a negative tick is reported as written.
+    TickOutOfRange(i64),
+    /// The panel declared `tick_ms` or `keys` without `panels.realtime`.
+    /// Carries the panel's id.
+    RealtimeWithoutCapability(String),
 }
 
 /// In the active locale.
@@ -319,6 +342,19 @@ impl std::fmt::Display for PanelError {
             Self::BadDock(dock) => tr!("kiln-plugin-panel-bad-dock", dock = format!("{dock:?}")),
             Self::Duplicate(id) => tr!("kiln-plugin-panel-duplicate", panel = format!("{id:?}")),
             Self::TooMany => tr!("kiln-plugin-panel-too-many", max = MAX_PANELS),
+            Self::NotAnInteger(key) => tr!("kiln-plugin-panel-not-an-integer", key = *key),
+            Self::NotABool(key) => tr!("kiln-plugin-panel-not-a-bool", key = *key),
+            Self::TickOutOfRange(value) => tr!(
+                "kiln-plugin-panel-tick-out-of-range",
+                value = *value,
+                min = *TICK_MS_RANGE.start(),
+                max = *TICK_MS_RANGE.end()
+            ),
+            Self::RealtimeWithoutCapability(id) => tr!(
+                "kiln-plugin-panel-realtime-without-capability",
+                panel = format!("{id:?}"),
+                capability = Capability::PanelsRealtime.to_string()
+            ),
         })
     }
 }
@@ -327,10 +363,12 @@ fn panel_decl(entry: &Value) -> Result<PanelDecl, PanelError> {
     let Value::Table(table) = entry else {
         return Err(PanelError::NotATable);
     };
-    if let Some(key) = table
-        .keys()
-        .find(|key| !matches!(key.as_str(), "id" | "title" | "icon" | "dock"))
-    {
+    if let Some(key) = table.keys().find(|key| {
+        !matches!(
+            key.as_str(),
+            "id" | "title" | "icon" | "dock" | "tick_ms" | "keys"
+        )
+    }) {
         return Err(PanelError::UnknownKey(key.clone()));
     }
     let string = |key: &'static str, default: Option<&str>| match table.get(key) {
@@ -354,11 +392,24 @@ fn panel_decl(entry: &Value) -> Result<PanelDecl, PanelError> {
         "bottom" => PanelLocation::Bottom,
         other => return Err(PanelError::BadDock(other.to_owned())),
     };
+    let tick_ms = match table.get("tick_ms") {
+        None => None,
+        Some(Value::Integer(ms)) if TICK_MS_RANGE.contains(ms) => Some(*ms as u32),
+        Some(Value::Integer(ms)) => return Err(PanelError::TickOutOfRange(*ms)),
+        Some(_) => return Err(PanelError::NotAnInteger("tick_ms")),
+    };
+    let keys = match table.get("keys") {
+        None => false,
+        Some(Value::Boolean(keys)) => *keys,
+        Some(_) => return Err(PanelError::NotABool("keys")),
+    };
     Ok(PanelDecl {
         id,
         title,
         icon,
         location,
+        tick_ms,
+        keys,
     })
 }
 
@@ -499,6 +550,16 @@ impl PluginManifest {
                 };
                 for item in items {
                     let panel = panel_decl(item).map_err(fail)?;
+                    // `panels` itself is checked at the call, not here, because
+                    // showing a panel is an operation. `tick_ms` and `keys` are
+                    // declarations that commit the host to a timer and to the
+                    // user's keystrokes before the plugin runs at all, so they
+                    // are refused while the manifest is read.
+                    if (panel.tick_ms.is_some() || panel.keys)
+                        && !capabilities.allows(&Capability::PanelsRealtime)
+                    {
+                        return Err(fail(PanelError::RealtimeWithoutCapability(panel.id)));
+                    }
                     if panels.iter().any(|other| other.id == panel.id) {
                         return Err(fail(PanelError::Duplicate(panel.id)));
                     }
@@ -645,6 +706,9 @@ mod panel_tests {
                 title: "TODOs".into(),
                 icon: "list-checks".into(),
                 location: PanelLocation::Bottom,
+                // The realtime half is off unless the panel asks for it.
+                tick_ms: None,
+                keys: false,
             }
         );
         // The dock defaults to the left.
