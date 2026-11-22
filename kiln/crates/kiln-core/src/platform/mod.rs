@@ -27,7 +27,7 @@ pub(crate) mod stdio;
 mod thread;
 
 pub use memory::{parse_meminfo, physical_ram_bytes};
-pub use process_tree::ProcessTree;
+pub use process_tree::{DirError, LaunchDir, ProcessTree};
 pub use stdio::{OutputDrain, OutputSource, StdinFeed, without_console_window};
 pub use thread::{BACKGROUND_NICE, lower_thread_priority};
 

@@ -170,6 +170,14 @@ impl State {
         self
     }
 
+    /// [`Self::with_roots`] for the roots preopened for the store, as `fs::configure_roots`
+    /// opened them: a `cwd` is resolved below their handles, so `process.start`'s authority is
+    /// exactly the WASI preopens.
+    pub fn with_preopened(mut self, roots: &[crate::fs::PreopenedRoot]) -> Self {
+        self.streams.set_preopened(roots);
+        self
+    }
+
     /// Records a suspension in `store` too, under `plugin`, so the next load asks again.
     pub fn recorded_in(mut self, store: GrantStore, plugin: &str) -> Self {
         let writer = SuspensionWriter::of(&store);

@@ -229,6 +229,141 @@ impl std::fmt::Debug for ProcessTree {
     }
 }
 
+/// Why [`LaunchDir::within`] found no directory.
+#[derive(Debug)]
+pub enum DirError {
+    /// The path leads out of the root, or its root is no longer the directory it was: through a
+    /// link, or by `..`.
+    Outside,
+    /// The path names nothing that can be opened as a directory.
+    Io(io::Error),
+}
+
+/// A directory to start a program in, resolved inside an open root.
+///
+/// - **Unix.** Resolved from the root's handle, one component at a time with `openat` and
+///   `O_DIRECTORY | O_NOFOLLOW`, so a link anywhere on the way is [`DirError::Outside`] and no
+///   path is looked up twice. [`ProcessTree::spawn_in`] starts the program there with `fchdir`
+///   on the open directory: whatever is put in its place afterwards changes nothing.
+/// - **Windows.** `CreateProcess` takes its directory as a path, so this is a path (the root's
+///   canonical path with the components, links resolved, inside the root's), and
+///   [`Self::unchanged`] checks it again just before the launch. A directory replaced after that
+///   check and before the program's `chdir` starts it elsewhere: a known limit.
+#[derive(Debug)]
+pub struct LaunchDir {
+    /// Held open: on Unix it is what the program starts in, on Windows it pins the directory's
+    /// identity for as long as this lives.
+    #[cfg_attr(windows, allow(dead_code))]
+    dir: std::fs::File,
+    path: std::path::PathBuf,
+    #[cfg(windows)]
+    identity: (u64, u64),
+    #[cfg(windows)]
+    root: (std::path::PathBuf, (u64, u64)),
+}
+
+impl LaunchDir {
+    /// The directory `rest`'s components name below `root`, an open directory at `root_path`
+    /// (its canonical path: what [`Self::path`] is made from, and what Windows resolves).
+    pub fn within(
+        root: &std::fs::File,
+        root_path: &std::path::Path,
+        rest: &[&str],
+    ) -> Result<LaunchDir, DirError> {
+        #[cfg(unix)]
+        {
+            let mut dir = root.try_clone().map_err(DirError::Io)?;
+            let mut path = root_path.to_path_buf();
+            for part in rest.iter().filter(|part| !part.is_empty() && **part != ".") {
+                if *part == ".." {
+                    return Err(DirError::Outside);
+                }
+                dir = unix::open_below(&dir, part)?;
+                path.push(part);
+            }
+            Ok(LaunchDir { dir, path })
+        }
+        #[cfg(windows)]
+        {
+            let root_identity = super::file_identity(root).map_err(DirError::Io)?;
+            if super::path_identity(root_path, true).ok() != Some(root_identity) {
+                return Err(DirError::Outside);
+            }
+            let mut candidate = root_path.to_path_buf();
+            candidate.extend(rest.iter().filter(|part| !part.is_empty()));
+            let path = super::canonicalize(&candidate).map_err(DirError::Io)?;
+            if !path.starts_with(root_path) {
+                return Err(DirError::Outside);
+            }
+            let dir = super::open_dir(&path).map_err(DirError::Io)?;
+            let identity = super::file_identity(&dir).map_err(DirError::Io)?;
+            Ok(LaunchDir {
+                dir,
+                path,
+                identity,
+                root: (root_path.to_path_buf(), root_identity),
+            })
+        }
+    }
+
+    /// The directory's path, as far as it is known: the root's with the components.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Whether the launch can still start where this was resolved: always on Unix, where the
+    /// program starts in the open directory; on Windows, whether the root and the path still
+    /// name the directories they did.
+    pub fn unchanged(&self) -> bool {
+        #[cfg(unix)]
+        {
+            true
+        }
+        #[cfg(windows)]
+        {
+            super::path_identity(&self.root.0, true).is_ok_and(|identity| identity == self.root.1)
+                && super::canonicalize(&self.path).is_ok_and(|path| path == self.path)
+                && super::path_identity(&self.path, true)
+                    .is_ok_and(|identity| identity == self.identity)
+        }
+    }
+}
+
+impl ProcessTree {
+    /// [`Self::spawn`], starting the program in `dir`: on Unix in the open directory itself
+    /// (`fchdir` before the exec), on Windows in its path. Replaces `command`'s own directory.
+    pub fn spawn_in(command: &mut Command, dir: &LaunchDir) -> io::Result<ProcessTree> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::CommandExt;
+            // The callback owns its own handle, so it stays valid whatever becomes of `dir`
+            // and of the command's later use.
+            let owned = dir.dir.try_clone()?;
+            // Rust chdirs to the command's own directory, by path, before `pre_exec` runs: one
+            // since removed would fail the spawn before `fchdir`. `/` always opens.
+            command.current_dir("/");
+            // SAFETY: runs in the forked child before the exec, and only calls `fchdir`, which
+            // is async-signal-safe, on a descriptor the callback itself keeps open.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::fchdir(owned.as_raw_fd()) == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                });
+            }
+            Self::spawn(command)
+        }
+        #[cfg(windows)]
+        {
+            command.current_dir(&dir.path);
+            Self::spawn(command)
+        }
+    }
+}
+
 #[cfg(unix)]
 mod unix {
     use std::io;
@@ -237,6 +372,50 @@ mod unix {
 
     pub(super) const TERM: libc::c_int = libc::SIGTERM;
     pub(super) const KILL: libc::c_int = libc::SIGKILL;
+
+    /// The directory `name` in `dir`, opened without following a link: one is
+    /// [`DirError::Outside`](super::DirError::Outside).
+    pub(super) fn open_below(
+        dir: &std::fs::File,
+        name: &str,
+    ) -> Result<std::fs::File, super::DirError> {
+        use super::DirError;
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let c_name = CString::new(name)
+            .map_err(|_| DirError::Io(io::Error::from(io::ErrorKind::InvalidInput)))?;
+        // SAFETY: `dir` is open and `c_name` is a NUL-terminated string.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                c_name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 {
+            // SAFETY: `fd` is a new descriptor that nothing else owns.
+            return Ok(unsafe { std::fs::File::from_raw_fd(fd) });
+        }
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
+            // A link on the way, or just not a directory.
+            // SAFETY: `stat` is written by `fstatat` before it is read.
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: as above, with a valid pointer to `stat`.
+            let seen = unsafe {
+                libc::fstatat(
+                    dir.as_raw_fd(),
+                    c_name.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if seen == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK {
+                return Err(DirError::Outside);
+            }
+        }
+        Err(DirError::Io(error))
+    }
 
     /// The process group a tree's program leads: its id is the program's pid. It is only
     /// signalled while the program is unreaped, which keeps that id the program's.
@@ -686,5 +865,31 @@ mod tests {
         stat(proc.path(), "777", b"777 (leader) S 1 777 777 0");
         stat(proc.path(), "5000", b"5000 (other) S 1 999 999 0");
         assert_eq!(others_in_proc(proc.path(), GROUP), Some(false));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod launch_dir_tests {
+    use std::process::{Command, Stdio};
+
+    use super::{LaunchDir, ProcessTree};
+
+    #[test]
+    fn spawn_in_ignores_a_command_directory_that_is_gone() {
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("target");
+        let gone = base.path().join("gone");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&gone).unwrap();
+        let canonical = crate::platform::canonicalize(&target).unwrap();
+        let root = std::fs::File::open(&canonical).unwrap();
+        let dir = LaunchDir::within(&root, &canonical, &[]).unwrap();
+        let mut command = Command::new("pwd");
+        command.arg("-P").current_dir(&gone).stdout(Stdio::piped());
+        std::fs::remove_dir(&gone).unwrap();
+        let mut tree = ProcessTree::spawn_in(&mut command, &dir).unwrap();
+        let mut out = String::new();
+        std::io::Read::read_to_string(&mut tree.take_stdout().unwrap(), &mut out).unwrap();
+        assert_eq!(out.trim(), canonical.to_str().unwrap());
     }
 }

@@ -25,21 +25,22 @@
 //! its process group on Unix (`setsid`) and still holds a stream keeps its thread, and its count,
 //! until it closes it; but `start` refuses past the cap rather than start more.
 //!
-//! A `cwd` must lie in one of the roots the store's preopens were made from, each pinned when the
-//! store is made (`Root::pin`): opened, held open, and resolved, so a root that is a link names
-//! the directory it named then, whatever it is pointed at later, and a root that can't be opened
-//! is none. The path is rebased onto that directory and resolved there, and checked again just
-//! before the launch.
+//! A `cwd` must lie in one of the roots the store's WASI preopens were made from: the directory
+//! handles `fs::configure_roots` opened for them, each opened once, before its preopen, and held,
+//! so a root whose preopen failed is none, and a root that is a link keeps the directory it named
+//! then, whatever it is pointed at later. wasmtime-wasi 48 preopens by path only, so the handle
+//! is checked against the preopen's path right after it (see `fs::configure_roots`). The `cwd` is
+//! resolved below that handle, a component at a time, without following links
+//! ([`kiln_core::platform::LaunchDir`]), and the program starts in that open directory.
 //!
-//! That makes `cwd` a convenience checked at start, not a security boundary: the granted program
-//! runs unsandboxed with the user's rights and can go anywhere itself. Two windows are known.
-//! The roots are pinned apart from the WASI preopens (`fs::configure` opens them by path again),
-//! so a root retargeted between the two opens names a different directory here than WASI holds,
-//! or stays a root here when its preopen failed; sharing the handle needs a preopen from an open
-//! directory in `fs.rs`. And the program starts in its directory by path, so one replaced between
-//! the last check and the launch starts it elsewhere; closing that needs a launch into an open
-//! directory (`fchdir` before the exec, Unix only) in `ProcessTree`. Windows has no such launch:
-//! `CreateProcess` takes the directory as a path.
+//! That makes `cwd` a convenience, not a security boundary: the granted program runs unsandboxed
+//! with the user's rights and can go anywhere itself. On Unix nothing is looked up twice by path
+//! (`fchdir` in the child before the exec), so no replacement of a directory after the
+//! resolution changes where the program starts. **Windows is a known limit:** `CreateProcess`
+//! takes its directory as a path, so there the path is launched and checked again just before
+//! ([`LaunchDir::unchanged`](kiln_core::platform::LaunchDir)); a directory replaced between that
+//! check and the program's own `chdir` starts it elsewhere. The same is recorded in
+//! `wit/process.wit`.
 //!
 //! `child.write` is linked by [`add_to_linker`], which lifts its bytes lazily: only what the stdin
 //! buffer takes is copied out of the guest's memory.
@@ -59,14 +60,14 @@ use std::time::{Duration, Instant};
 
 use kiln_command::Grants;
 use kiln_command::capability::{Capability, FsScope};
-use kiln_core::platform::ProcessTree;
+use kiln_core::platform::{DirError, LaunchDir, ProcessTree};
 use kiln_l10n::{tr, verbatim};
 use wasmtime::StoreContextMut;
 use wasmtime::component::{Linker, Resource, WasmList};
 
 use crate::bindings::kiln::extension::process::{Child, Chunk, Exit, HostChild};
 use crate::bindings::{Error, HostState};
-use crate::fs::Workspace;
+use crate::fs::{PreopenedRoot, Workspace};
 use crate::jobs::{self, JobControl, Stop};
 use crate::paths::{self, Rules};
 use crate::process::SpawnError;
@@ -166,67 +167,67 @@ struct WatchState {
     dropped: bool,
 }
 
-/// A root a `cwd` may lie in, pinned as it was when the store was made: what it named then is
-/// what it names, whatever its path names since.
+/// A root a `cwd` may lie in: the directory it was opened as for its preopen, held open, so what
+/// it named then is what it names, whatever its path names since.
 struct Root {
     /// As the app gave it: what its preopen's guest path is made from.
     given: String,
-    /// The directory it named, its links resolved.
+    /// The directory's canonical path when the store was made: where Windows resolves it, and
+    /// what a [`Cwd`]'s path is made from.
     canonical: PathBuf,
-    /// That directory's identity.
-    identity: (u64, u64),
-    /// That directory, held open so its identity can't pass to another.
-    _held: std::fs::File,
+    /// The open directory.
+    dir: Arc<std::fs::File>,
 }
 
 impl Root {
-    /// `root` pinned now: none, with a warning, if it can't be opened as a directory, as when its
-    /// preopen failed too, or it changed while it was pinned.
-    fn pin(root: &Path) -> Option<Self> {
-        let pinned = (|| {
-            let given = root
-                .to_str()
-                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
-            let held = kiln_core::platform::open_dir(root)?;
-            let identity = kiln_core::platform::file_identity(&held)?;
-            let canonical = kiln_core::platform::canonicalize(root)?;
-            if kiln_core::platform::path_identity(&canonical, true)? != identity {
-                return Err(io::Error::from(io::ErrorKind::NotFound));
-            }
-            Ok::<_, io::Error>(Self {
-                given: given.to_owned(),
-                canonical,
-                identity,
-                _held: held,
-            })
-        })();
-        pinned
-            .inspect_err(|error| {
-                log::warn!("no process.start in {}: {error}", root.display());
-            })
-            .ok()
+    /// The preopened root `root`: none if its path isn't text.
+    fn of(root: &PreopenedRoot) -> Option<Self> {
+        let given = root.path.to_str()?;
+        Some(Self {
+            given: given.to_owned(),
+            canonical: root.canonical.clone(),
+            dir: Arc::clone(&root.dir),
+        })
     }
 
-    /// Whether its path still names the directory it was pinned to.
-    fn unchanged(&self) -> bool {
-        kiln_core::platform::path_identity(&self.canonical, true)
-            .is_ok_and(|identity| identity == self.identity)
+    /// `root` opened now, by path: none, with a warning, if it can't be opened as a directory.
+    /// For roots given as paths alone ([`Streams::set_roots`]).
+    fn pin(root: &Path) -> Option<Self> {
+        match kiln_core::platform::open_dir(root) {
+            Ok(dir) => {
+                let Some(canonical) = crate::fs::verified_canonical(root, &dir) else {
+                    log::warn!("no process.start in {}: it changed", root.display());
+                    return None;
+                };
+                Self::of(&PreopenedRoot {
+                    path: root.to_path_buf(),
+                    canonical,
+                    dir: Arc::new(dir),
+                })
+            }
+            Err(error) => {
+                log::warn!("no process.start in {}: {error}", root.display());
+                None
+            }
+        }
     }
 }
 
-/// A `cwd` checked: the directory, its links resolved, inside root `root`, and its identity, to
-/// check again just before the launch.
+/// A `cwd` checked: the directory, resolved below its root's handle.
 struct Cwd {
     guest: String,
-    path: PathBuf,
-    identity: (u64, u64),
-    root: usize,
+    dir: LaunchDir,
 }
 
 impl Streams {
-    /// Pins `roots` (see [`Root::pin`]): each one that opens as a directory.
+    /// Opens `roots` now (see [`Root::pin`]): each one that opens as a directory.
     pub(crate) fn set_roots(&mut self, roots: Vec<PathBuf>) {
         self.roots = roots.iter().filter_map(|root| Root::pin(root)).collect();
+    }
+
+    /// Takes `roots`, the ones preopened for the store, as they were opened for it.
+    pub(crate) fn set_preopened(&mut self, roots: &[PreopenedRoot]) {
+        self.roots = roots.iter().filter_map(Root::of).collect();
     }
 
     /// How many children it holds.
@@ -270,34 +271,24 @@ impl Streams {
         }
         let (index, rest, _) = found.ok_or_else(denied)?;
         let root = &self.roots[index];
-        if !root.unchanged() {
-            return Err(denied());
-        }
-        let mut candidate = root.canonical.clone();
-        candidate.extend(rest.split('/').filter(|part| !part.is_empty()));
+        let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
         // The guest knows the path it named: the reason is the OS's.
-        let not_found = |error: io::Error| Error::NotFound(error.to_string());
-        let path = kiln_core::platform::canonicalize(&candidate).map_err(not_found)?;
-        if !path.starts_with(&root.canonical) {
-            return Err(denied());
-        }
-        let identity = kiln_core::platform::path_identity(&path, true).map_err(not_found)?;
+        let dir =
+            LaunchDir::within(&root.dir, &root.canonical, &parts).map_err(|error| match error {
+                DirError::Outside => denied(),
+                DirError::Io(error) => Error::NotFound(error.to_string()),
+            })?;
         Ok(Cwd {
             guest: guest.to_owned(),
-            path,
-            identity,
-            root: index,
+            dir,
         })
     }
 
-    /// Checks `cwd` again, just before the launch: its root and its path still name the
-    /// directories they named when it was checked, so nothing replaced since leads out.
+    /// Checks `cwd` again, just before the launch. On Unix it is the open directory the program
+    /// starts in, so there is nothing to check; on Windows its root and its path must still name
+    /// the directories they named.
     fn recheck(&self, cwd: &Cwd) -> Result<(), Error> {
-        let same = self.roots.get(cwd.root).is_some_and(Root::unchanged)
-            && kiln_core::platform::canonicalize(&cwd.path).is_ok_and(|path| path == cwd.path)
-            && kiln_core::platform::path_identity(&cwd.path, true)
-                .is_ok_and(|identity| identity == cwd.identity);
-        if same {
+        if cwd.dir.unchanged() {
             return Ok(());
         }
         let why = tr!(
@@ -829,10 +820,14 @@ pub(crate) fn start(
     // Checked again as late as can be: a directory replaced while the program was checked
     // doesn't lead out.
     if let Some(cwd) = &cwd {
+        crate::fs::hooks::run(&crate::fs::hooks::BEFORE_LAUNCH, cwd.dir.path());
         host.process.streams.recheck(cwd)?;
-        command.current_dir(&cwd.path);
     }
-    let mut tree = ProcessTree::spawn(&mut command).map_err(failed)?;
+    let mut tree = match &cwd {
+        Some(cwd) => ProcessTree::spawn_in(&mut command, &cwd.dir),
+        None => ProcessTree::spawn(&mut command),
+    }
+    .map_err(failed)?;
     // The command holds the program's ends of the pipes: they must close here for its output to
     // end.
     drop(command);
@@ -974,28 +969,17 @@ mod tests {
     }
 
     #[test]
-    fn cwd_replaced_before_the_launch_is_refused() {
-        let dir = scratch("replaced");
+    fn cwd_resolves_below_the_root_handle() {
+        let dir = scratch("below");
         let root = dir.join("root");
         let cwd = root.join("work");
         fs::create_dir_all(&cwd).unwrap();
         let mut streams = Streams::default();
         streams.set_roots(vec![root.clone()]);
         let checked = streams.cwd(&guest(&cwd)).unwrap();
-        assert_eq!(checked.path, cwd);
+        assert_eq!(checked.dir.path(), cwd);
         assert!(streams.recheck(&checked).is_ok());
 
-        // Another directory put in its place since it was checked.
-        fs::rename(&cwd, dir.join("moved")).unwrap();
-        fs::create_dir_all(&cwd).unwrap();
-        assert!(matches!(streams.recheck(&checked), Err(Error::Denied(_))));
-
-        // The root itself replaced: nothing in it is a place to start any more.
-        let checked = streams.cwd(&guest(&root)).unwrap();
-        fs::rename(&root, dir.join("old-root")).unwrap();
-        fs::create_dir_all(&root).unwrap();
-        assert!(matches!(streams.recheck(&checked), Err(Error::Denied(_))));
-        assert!(matches!(streams.cwd(&guest(&root)), Err(Error::Denied(_))));
         fs::remove_dir_all(&dir).ok();
     }
 }

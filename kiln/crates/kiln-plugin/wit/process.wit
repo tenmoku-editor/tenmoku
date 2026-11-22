@@ -81,17 +81,16 @@ interface process {
     ///
     /// `cwd` is the directory it starts in: a guest path inside a root the plugin's fs grant
     /// preopened, `invalid-argument` if it isn't absolute or has a `.` or `..` part, and `denied`
-    /// outside every root, links resolved; none starts it where the app runs. Each root names
-    /// the directory it named when the job started, and one that couldn't be opened then is
-    /// none. The directory is checked again just before the launch, and one replaced since is
-    /// `denied`.
+    /// outside every root, or when a link on the way leads out of it; none starts it where the
+    /// app runs. The roots are the preopens themselves: each is the directory its preopen holds,
+    /// whatever its path names later, and one whose preopen failed is none. The path is resolved
+    /// below the root's open directory, and on Unix the program starts in that open directory.
     ///
-    /// `cwd` is a convenience checked at start, not a security boundary: the granted program
-    /// runs unsandboxed with the user's rights and can change directory anywhere itself. Two
-    /// windows are known. The host opens each root apart from the preopen, so a root retargeted
-    /// between the two opens can name a different directory here than in the fs interface, or
-    /// stay a root here when the preopen failed. And the program starts in its directory by
-    /// path, so one replaced between the last check and the launch can start it elsewhere.
+    /// `cwd` is a convenience, not a security boundary: the granted program runs unsandboxed
+    /// with the user's rights and can change directory anywhere itself. **On Windows one window
+    /// stays open:** `CreateProcess` takes its directory as a path, so the host launches by path
+    /// after checking it again, and a directory replaced between that check and the program's
+    /// own `chdir` can start it elsewhere.
     ///
     /// Only in a background job: in any other call it fails with
     /// `denied("process.start runs only in a background job")`. A job has at most 8 children at

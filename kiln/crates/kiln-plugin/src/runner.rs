@@ -576,9 +576,17 @@ impl Drop for Plugin {
 /// A plugin's WASI context: no preopens beyond what [`fs::configure`] grants, no environment,
 /// no arguments, and stdio that reaches nothing of the host's.
 pub fn wasi_context(grants: &Grants, workspace: &Workspace) -> WasiCtx {
+    wasi_context_with_roots(grants, workspace).0
+}
+
+/// [`wasi_context`], and the roots it preopened, as [`fs::configure_roots`] opened them.
+pub fn wasi_context_with_roots(
+    grants: &Grants,
+    workspace: &Workspace,
+) -> (WasiCtx, Vec<fs::PreopenedRoot>) {
     let mut wasi = WasiCtxBuilder::new();
-    fs::configure(&mut wasi, grants, workspace);
-    wasi.build()
+    let roots = fs::configure_roots(&mut wasi, grants, workspace);
+    (wasi.build(), roots)
 }
 
 /// A linker of every import, the jobs interfaces only when the plugin `runs_jobs`.
@@ -924,14 +932,15 @@ impl Workers {
         };
         // A job's programs run as long as its wall time allows, not an interactive call's 10 s,
         // and those it starts may start in the roots preopened for it.
+        let (wasi, preopened) = wasi_context_with_roots(&self.grants, &workspace);
         host.process = mem::take(&mut host.process)
             .with_deadline(launch.wall)
-            .with_roots(process_stream::preopened(&self.grants, &workspace));
+            .with_preopened(&preopened);
         let mut store = Store::new(
             self.engine.engine(),
             Data {
                 host,
-                wasi: wasi_context(&self.grants, &workspace),
+                wasi,
                 table: ResourceTable::new(),
                 limiter: StoreLimiter::new(&limits),
                 deadline: None,
