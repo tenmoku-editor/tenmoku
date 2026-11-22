@@ -1255,6 +1255,13 @@ Mark each command the shell marks (OSC 133) with an edge at its left, green if i
 - Type: boolean
 - Default: `true`
 
+### `terminal.default_profile`
+
+The profile a new terminal starts, by name: one found on this machine ("PowerShell 7", "Command Prompt", "Git Bash", a WSL distro's name, "zsh") or one of `profiles`. Empty runs `shell`, else your login shell.
+
+- Type: string
+- Default: `""`
+
 ### `terminal.font_fallbacks`
 
 Fonts to take a character from when the terminal's font lacks it, in order: "Symbols Nerd Font Mono" gives Nerd Font icons with any font.
@@ -1303,6 +1310,56 @@ The shell's arguments. Ignored when `shell` is empty.
 
 - Type: array of string
 - Default: `[]`
+
+## `terminal.profiles`
+
+Your own terminal profiles, which the `+` button's menu lists with the ones found on this machine. One named as a found one replaces it.
+
+A list of these tables, `[[terminal.profiles]]`.
+
+Default: `[]`
+
+### `terminal.profiles.args`
+
+The program's arguments.
+
+- Type: array of string
+- Default: `[]`
+
+### `terminal.profiles.command`
+
+The program it runs.
+
+- Type: string
+- Default: `""`
+
+### `terminal.profiles.cwd`
+
+The folder it starts in. Unset starts where a new terminal would.
+
+- Type: string
+- Default: unset (the schema gives no default)
+
+### `terminal.profiles.env`
+
+What it adds to the program's environment.
+
+- Type: table of string
+- Default: `{}`
+
+### `terminal.profiles.icon`
+
+An icon's name from the app's icon set, such as "terminal" or "square-terminal". Unset uses the terminal's own.
+
+- Type: string
+- Default: unset (the schema gives no default)
+
+### `terminal.profiles.name`
+
+What the profile menu calls it, and `default_profile` names it by.
+
+- Type: string
+- Default: `""`
 
 ## `theme`
 
