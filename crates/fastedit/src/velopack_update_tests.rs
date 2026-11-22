@@ -14,6 +14,7 @@ use std::{
     },
 };
 
+use fe_config::settings::ReleaseChannel;
 use ring::digest::{SHA1_FOR_LEGACY_USE_ONLY, SHA256, digest};
 use velopack::{
     Error, UpdateCheck, UpdateInfo, UpdateManager, VelopackAsset, VelopackAssetFeed,
@@ -28,7 +29,7 @@ use crate::{
     update_signature::{PrivateKey, PublicKey, SignatureError, generate, sign},
     velopack_update::{
         Feed, Fetcher, Install, Os, Policy, Refusal, SignedSource, check_and_download,
-        check_package, download_checked, feed_file, release_channel, update_now,
+        check_package, choose_feed, download_checked, feed_file, release_channel, update_now,
     },
 };
 
@@ -707,6 +708,8 @@ fn excluded_launches_never_reach_the_check() {
     let install = Install {
         config: fixture.config.clone(),
         channel: None,
+        os: Os::Mac,
+        arch: "aarch64".into(),
     };
     let feed = fixture.feed_dir.to_str().unwrap();
     // A check writes velopack's staged-rollout id into the packages
@@ -719,6 +722,8 @@ fn excluded_launches_never_reach_the_check() {
             Some(&install),
             Some(feed),
             Some(&fixture.public),
+            None,
+            ReleaseChannel::Stable,
             perf,
             wait_launch,
         );
@@ -741,6 +746,8 @@ fn excluded_launches_never_reach_the_check() {
             Some(&install),
             Some(feed),
             Some(&fixture.public),
+            None,
+            ReleaseChannel::Stable,
             false,
             false
         ),
@@ -1010,7 +1017,8 @@ fn mac_install_keeps_the_packed_channel() {
 fn feed_url_per_os_and_arch() {
     let feed = Feed::Https("https://github.com/someone/tenmoku/releases/latest/download/".into());
     let url = |os: Os, arch: &str| {
-        release_channel(os, arch).map(|channel| feed.file_url(&feed_file(channel)))
+        release_channel(os, arch, ReleaseChannel::Stable)
+            .map(|channel| feed.file_url(&feed_file(channel)))
     };
     let base = "https://github.com/someone/tenmoku/releases/latest/download";
     assert_eq!(
@@ -1153,4 +1161,160 @@ fn unsigned_feed_is_refused_on_every_platform() {
             Err(error) => panic!("{platform}: the signed feed was refused: {error}"),
         }
     }
+}
+
+/// A Windows x64 install on stable, and a signed preview feed in its own
+/// folder offering `version` of the preview package.
+struct PreviewRig {
+    _dir: tempfile::TempDir,
+    install: Install,
+    stable: Feed,
+    preview: Feed,
+    feed_dir: PathBuf,
+    public: PublicKey,
+}
+
+fn preview_rig(version: &str, signer_is_the_key: bool) -> PreviewRig {
+    let (public, private) = generate();
+    let dir = tempfile::tempdir().unwrap();
+    let exe = windows_tree(&dir.path().join("app"), "windows-x64-stable");
+    let mut install = Install::locate_at(Os::Windows, "x86_64", &exe, None, None).unwrap();
+    install.config.PackagesDir = dir.path().join("packages");
+    let feed_dir = dir.path().join("preview");
+    let mut asset = channel_package(&feed_dir, "windows-x64-preview");
+    asset.Version = version.into();
+    let json = serde_json::to_vec(&VelopackAssetFeed {
+        Assets: vec![asset],
+    })
+    .unwrap();
+    let name = feed_file("windows-x64-preview");
+    std::fs::write(feed_dir.join(&name), &json).unwrap();
+    let signer = if signer_is_the_key {
+        PrivateKey::from_base64(&private).unwrap()
+    } else {
+        PrivateKey::from_base64(&generate().1).unwrap()
+    };
+    std::fs::write(feed_dir.join(format!("{name}.sig")), sign(&signer, &json)).unwrap();
+    PreviewRig {
+        install,
+        stable: Feed::Dir(dir.path().join("stable")),
+        preview: Feed::Dir(feed_dir.clone()),
+        feed_dir,
+        public: PublicKey::from_base64(&public).unwrap(),
+        _dir: dir,
+    }
+}
+
+#[test]
+fn preview_channel_names_per_os_and_arch() {
+    for (os, arch, stable, preview) in [
+        (
+            Os::Windows,
+            "x86_64",
+            "windows-x64-stable",
+            "windows-x64-preview",
+        ),
+        (
+            Os::Windows,
+            "aarch64",
+            "windows-arm64-stable",
+            "windows-arm64-preview",
+        ),
+        (
+            Os::Linux,
+            "x86_64",
+            "linux-x86_64-stable",
+            "linux-x86_64-preview",
+        ),
+    ] {
+        assert_eq!(
+            release_channel(os, arch, ReleaseChannel::Stable),
+            Some(stable)
+        );
+        assert_eq!(
+            release_channel(os, arch, ReleaseChannel::Preview),
+            Some(preview)
+        );
+    }
+    for (os, arch) in [(Os::Mac, "aarch64"), (Os::Linux, "aarch64")] {
+        assert_eq!(release_channel(os, arch, ReleaseChannel::Preview), None);
+    }
+    // The setting is read per check: one install follows it both ways.
+    let rig = preview_rig("2.0.0", true);
+    let (install, feed, why) = choose_feed(
+        &rig.install,
+        &rig.stable,
+        Some(&rig.preview),
+        ReleaseChannel::Preview,
+    );
+    assert_eq!(install.channel, Some("windows-x64-preview"));
+    assert_eq!(feed, rig.preview);
+    assert_eq!(why, None);
+    let (install, feed, _) = choose_feed(
+        &install,
+        &rig.stable,
+        Some(&rig.preview),
+        ReleaseChannel::Stable,
+    );
+    assert_eq!(install.channel, Some("windows-x64-stable"));
+    assert_eq!(feed, rig.stable);
+}
+
+#[test]
+fn preview_without_a_preview_feed_checks_stable() {
+    let rig = preview_rig("2.0.0", true);
+    let (install, feed, why) =
+        choose_feed(&rig.install, &rig.stable, None, ReleaseChannel::Preview);
+    assert_eq!(install.channel, Some("windows-x64-stable"));
+    assert_eq!(feed, rig.stable);
+    assert!(why.is_some_and(|why| why.contains("TENMOKU_UPDATE_FEED_PREVIEW")));
+}
+
+#[test]
+fn preview_feed_with_a_bad_signature_is_refused() {
+    let rig = preview_rig("2.0.0", false);
+    let (install, feed, _) = choose_feed(
+        &rig.install,
+        &rig.stable,
+        Some(&rig.preview),
+        ReleaseChannel::Preview,
+    );
+    let error = match install
+        .manager(&feed, &rig.public)
+        .unwrap()
+        .check_for_updates()
+    {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("a badly signed preview feed went through"),
+    };
+    assert!(
+        error.contains("signature check failed") && error.contains("windows-x64-preview"),
+        "{error}"
+    );
+    assert!(!install.config.PackagesDir.join("anything").exists());
+}
+
+#[test]
+fn preview_never_installs_an_older_version() {
+    // The install is 1.0.0; the preview feed only has 0.5.0.
+    let rig = preview_rig("0.5.0", true);
+    let (install, feed, _) = choose_feed(
+        &rig.install,
+        &rig.stable,
+        Some(&rig.preview),
+        ReleaseChannel::Preview,
+    );
+    assert!(!install.options().AllowVersionDowngrade);
+    match install
+        .manager(&feed, &rig.public)
+        .unwrap()
+        .check_for_updates()
+    {
+        Ok(UpdateCheck::UpdateAvailable(update)) => {
+            panic!("offered {}", update.TargetFullRelease.Version)
+        }
+        Ok(_) => {}
+        Err(error) => panic!("{error}"),
+    }
+    assert!(rig.feed_dir.exists());
 }

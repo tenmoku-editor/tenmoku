@@ -23,6 +23,7 @@ use std::{
     },
 };
 
+use fe_config::settings::ReleaseChannel;
 use fe_workbench::update_check::{UpdaterHook, set_updater_hook};
 use gpui::App;
 use velopack::{
@@ -38,6 +39,9 @@ use crate::update_signature::{PublicKey, SignatureError};
 /// The feed baked in at build time: an https URL, or an absolute local
 /// directory (the spike's).
 const FEED: Option<&str> = option_env!("TENMOKU_UPDATE_FEED");
+/// The preview channel's feed, baked in as the stable one is
+/// (`.../releases/download/preview`). A build without it checks stable.
+const FEED_PREVIEW: Option<&str> = option_env!("TENMOKU_UPDATE_FEED_PREVIEW");
 /// The base64 Ed25519 public key baked in at build time.
 const PUBLIC_KEY: Option<&str> = option_env!("TENMOKU_UPDATE_PUBLIC_KEY");
 /// Set to 1 to check, download and apply at once, headless, and exit.
@@ -149,13 +153,58 @@ impl Os {
 /// share one release's assets: `releases.<channel>.json` and the packages it
 /// lists. None where no release ships one: macOS stays on Sparkle, and its
 /// spike build reads the channel it was packed with.
-pub(crate) fn release_channel(os: Os, arch: &str) -> Option<&'static str> {
+pub(crate) fn release_channel(os: Os, arch: &str, channel: ReleaseChannel) -> Option<&'static str> {
+    let preview = channel == ReleaseChannel::Preview;
     match (os, arch) {
+        (Os::Windows, "x86_64") if preview => Some("windows-x64-preview"),
         (Os::Windows, "x86_64") => Some("windows-x64-stable"),
+        (Os::Windows, "aarch64") if preview => Some("windows-arm64-preview"),
         (Os::Windows, "aarch64") => Some("windows-arm64-stable"),
+        (Os::Linux, "x86_64") if preview => Some("linux-x86_64-preview"),
         (Os::Linux, "x86_64") => Some("linux-x86_64-stable"),
         _ => None,
     }
+}
+
+/// The feed to check for `channel`, and the install told its channel's name:
+/// the preview feed for preview, when this build has one and the install has a
+/// release channel; else the stable feed and channel, with the reason. A
+/// downgrade stays refused whichever it is.
+pub(crate) fn choose_feed(
+    install: &Install,
+    stable: &Feed,
+    preview: Option<&Feed>,
+    channel: ReleaseChannel,
+) -> (Install, Feed, Option<&'static str>) {
+    match (channel, preview) {
+        (ReleaseChannel::Preview, Some(preview)) if install.os_channel(channel).is_some() => {
+            (install.for_channel(channel), preview.clone(), None)
+        }
+        (ReleaseChannel::Preview, Some(_)) => (
+            install.for_channel(ReleaseChannel::Stable),
+            stable.clone(),
+            Some("this install has no preview channel"),
+        ),
+        (ReleaseChannel::Preview, None) => (
+            install.for_channel(ReleaseChannel::Stable),
+            stable.clone(),
+            Some("this build has no valid TENMOKU_UPDATE_FEED_PREVIEW"),
+        ),
+        (ReleaseChannel::Stable, _) => (install.for_channel(channel), stable.clone(), None),
+    }
+}
+
+/// The `update.channel` now: the service's, or before it is set, the user's
+/// file (a project file can't set it).
+fn current_channel(cx: &App) -> ReleaseChannel {
+    cx.try_global::<kiln::GlobalSettings<fe_config::Settings>>()
+        .map(|global| global.settings().update.channel)
+        .unwrap_or_else(|| {
+            fe_config::SettingsStore::load(fe_config::user_settings_path(), None)
+                .settings()
+                .update
+                .channel
+        })
 }
 
 /// What the updater does in this process.
@@ -401,6 +450,8 @@ pub(crate) struct Install {
     /// The channel checked, when this OS and arch has a release one; else the
     /// one the install was packed with.
     pub(crate) channel: Option<&'static str>,
+    pub(crate) os: Os,
+    pub(crate) arch: String,
 }
 
 impl Install {
@@ -442,8 +493,23 @@ impl Install {
         };
         Some(Install {
             config,
-            channel: release_channel(os, arch),
+            channel: release_channel(os, arch, ReleaseChannel::Stable),
+            os,
+            arch: arch.to_owned(),
         })
+    }
+
+    /// The release channel of `channel` on this OS and arch, if it has one.
+    fn os_channel(&self, channel: ReleaseChannel) -> Option<&'static str> {
+        release_channel(self.os, &self.arch, channel)
+    }
+
+    /// This install checking `channel`'s release channel.
+    pub(crate) fn for_channel(&self, channel: ReleaseChannel) -> Install {
+        Install {
+            channel: self.os_channel(channel),
+            ..self.clone()
+        }
     }
 
     /// What the update manager is told: this install's release channel, if
@@ -562,6 +628,11 @@ fn appimage_layout(exe: &Path, appimage: &Path) -> Option<VelopackLocatorConfig>
         CurrentBinaryDir: bin.to_owned(),
         IsPortable: true,
     })
+}
+
+/// The baked preview feed, if it is an https URL or an absolute path.
+fn preview_feed(text: Option<&str>) -> Option<Feed> {
+    text.and_then(Feed::parse)
 }
 
 /// The policy for this process, from the build's values.
@@ -699,10 +770,20 @@ pub(crate) fn update_now_if_asked(perf: bool, wait_launch: bool) {
             install.as_ref(),
             FEED,
             PUBLIC_KEY,
+            FEED_PREVIEW,
+            current_channel_headless(),
             perf,
             wait_launch,
         ));
     }
+}
+
+/// [`current_channel`] without an app: the user's file.
+fn current_channel_headless() -> ReleaseChannel {
+    fe_config::SettingsStore::load(fe_config::user_settings_path(), None)
+        .settings()
+        .update
+        .channel
 }
 
 /// The headless check: each step and the outcome on stderr. 0 when there's
@@ -711,6 +792,8 @@ pub(crate) fn update_now(
     install: Option<&Install>,
     feed: Option<&str>,
     key: Option<&str>,
+    preview: Option<&str>,
+    channel: ReleaseChannel,
     perf: bool,
     wait_launch: bool,
 ) -> i32 {
@@ -724,6 +807,11 @@ pub(crate) fn update_now(
         }
     };
     let Some(install) = install else { return 1 };
+    let (install, feed, why) = choose_feed(install, &feed, preview_feed(preview).as_ref(), channel);
+    if let Some(why) = why {
+        say(&format!("checking stable: {why}"));
+    }
+    let install = &install;
     let manager = match install.manager(&feed, &key) {
         Ok(manager) => manager,
         Err(error) => {
@@ -784,10 +872,17 @@ pub(crate) fn start(perf: bool, wait_launch: bool, under_test: bool, cx: &mut Ap
         Policy::Off(_) => return false,
     };
     let Some(install) = install else { return false };
+    let preview = preview_feed(FEED_PREVIEW);
     set_updater_hook(
         cx,
         UpdaterHook(Arc::new(move |cx| {
-            check_in_background(install.clone(), feed.clone(), key.clone(), cx);
+            // Read as the check starts, so a change applies to the next one.
+            let (install, feed, why) =
+                choose_feed(&install, &feed, preview.as_ref(), current_channel(cx));
+            if let Some(why) = why {
+                log::info!(target: "fastedit", "Velopack: checking stable: {why}");
+            }
+            check_in_background(install, feed, key.clone(), cx);
             true
         })),
     );
