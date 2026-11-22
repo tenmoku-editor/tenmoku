@@ -566,58 +566,84 @@ fn en_us_errors_and_prompt_text_are_unchanged() {
     }
     assert_eq!(CallError::Unloaded.to_string(), "the plugin is unloaded");
 
-    let described = [
-        (Capability::BufferRead, "read the text of your open files"),
-        (Capability::BufferWrite, "edit your open files"),
-        (Capability::Commands, "add commands, and run other commands"),
-        (
-            Capability::Decorations,
-            "mark up text and the gutter in your files",
-        ),
-        (Capability::Status, "show items in the status bar"),
-        (
-            Capability::FsRead(FsScope::Workspace),
-            "read any file in your workspace folders",
-        ),
-        (
-            Capability::FsWrite(FsScope::Workspace),
-            "write any file in your workspace folders",
-        ),
-        (
-            Capability::ProcessSpawn(Target::Named("rg".into())),
-            "run the program rg, outside the sandbox",
-        ),
-        (
-            Capability::ProcessSpawn(Target::Any),
-            "run any program, outside the sandbox",
-        ),
-        (
-            Capability::Net(Target::Named("a.test".into())),
-            "connect to a.test",
-        ),
-        (
-            Capability::Net(Target::Any),
-            "connect to any host on the internet",
-        ),
-        (Capability::Jobs, "run background jobs"),
-        (
-            Capability::Language,
-            "add completions, hovers and other language features",
-        ),
-        (Capability::Panels, "show panels"),
-        (
-            Capability::PanelsRealtime,
-            "run a timer and read keys while its panel is focused",
-        ),
-        (Capability::Tasks, "add tasks, and run them"),
-        (
-            Capability::Lsp("rust-analyzer".into()),
-            "send requests to the language server rust-analyzer",
-        ),
-    ];
-    for (capability, english) in described {
-        assert_eq!(describe(&capability), english);
+    // Every capability's description, pinned to its exact English. The match is
+    // EXHAUSTIVE with no wildcard arm, so a new `Capability` variant does not
+    // COMPILE until it is given its English here. The old form was a literal
+    // array, where a missing entry cost nothing - which is exactly how
+    // `panels.realtime` went unpinned until it was added by hand (T2096).
+    // `FsScope` and `Target` are matched by value too, so a new file scope or
+    // target shape also has to be considered rather than silently absorbed.
+    fn pinned_english(capability: &Capability) -> String {
+        match capability {
+            Capability::BufferRead => "read the text of your open files".into(),
+            Capability::BufferWrite => "edit your open files".into(),
+            Capability::Commands => "add commands, and run other commands".into(),
+            Capability::Decorations => "mark up text and the gutter in your files".into(),
+            Capability::Status => "show items in the status bar".into(),
+            Capability::FsRead(FsScope::Workspace) => {
+                "read any file in your workspace folders".into()
+            }
+            Capability::FsWrite(FsScope::Workspace) => {
+                "write any file in your workspace folders".into()
+            }
+            Capability::ProcessSpawn(Target::Named(program)) => {
+                format!("run the program {program}, outside the sandbox")
+            }
+            Capability::ProcessSpawn(Target::Any) => "run any program, outside the sandbox".into(),
+            Capability::Net(Target::Named(host)) => format!("connect to {host}"),
+            Capability::Net(Target::Any) => "connect to any host on the internet".into(),
+            Capability::Jobs => "run background jobs".into(),
+            Capability::Language => "add completions, hovers and other language features".into(),
+            Capability::Panels => "show panels".into(),
+            Capability::PanelsRealtime => {
+                "run a timer and read keys while its panel is focused".into()
+            }
+            Capability::Tasks => "add tasks, and run them".into(),
+            Capability::Lsp(server) => format!("send requests to the language server {server}"),
+        }
     }
+
+    // One instance per arm above, keeping both `Target` shapes and the one
+    // `FsScope`, so every arm is reached by a real call rather than only
+    // type-checked.
+    let described = [
+        Capability::BufferRead,
+        Capability::BufferWrite,
+        Capability::Commands,
+        Capability::Decorations,
+        Capability::Status,
+        Capability::FsRead(FsScope::Workspace),
+        Capability::FsWrite(FsScope::Workspace),
+        Capability::ProcessSpawn(Target::Named("rg".into())),
+        Capability::ProcessSpawn(Target::Any),
+        Capability::Net(Target::Named("a.test".into())),
+        Capability::Net(Target::Any),
+        Capability::Jobs,
+        Capability::Language,
+        Capability::Panels,
+        Capability::PanelsRealtime,
+        Capability::Tasks,
+        Capability::Lsp("rust-analyzer".into()),
+    ];
+    let mut seen: Vec<String> = Vec::new();
+    for capability in described {
+        let pinned = pinned_english(&capability);
+        assert_eq!(describe(&capability), pinned, "{capability}");
+        assert!(!pinned.is_empty(), "{capability} has no description");
+        // Two capabilities describing themselves identically would make a
+        // copy-pasted ftl entry invisible, since both sides of the assertion
+        // above would be the same wrong string.
+        assert!(
+            !seen.contains(&pinned),
+            "{capability} repeats a description already used: {pinned:?}"
+        );
+        seen.push(pinned);
+    }
+    assert_eq!(
+        seen.len(),
+        17,
+        "every arm of pinned_english must be exercised"
+    );
     let warnings = [
         (
             Warning::SendsCode {

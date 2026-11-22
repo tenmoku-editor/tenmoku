@@ -73,6 +73,12 @@ in a prompt, and nothing is granted until they accept:
 | `fs.write:workspace` | write files in the open workspace |
 | `process.spawn:<program>` | run the named program |
 | `net:<host>` | make requests to the named host |
+| `jobs` | run background jobs |
+| `language` | add completions, hovers and other language features |
+| `panels` | show panels |
+| `panels.realtime` | run a timer and read keys while its panel is focused |
+| `tasks` | add tasks, and run them |
+| `lsp:<server>` | send requests to the named language server |
 
 Some combinations carry an extra warning, such as `buffer.read` with `net:`
 (your text could leave the machine). `process.spawn:*` and `net:*` are
@@ -81,6 +87,37 @@ full-access wildcards: they show as full access and need a second acceptance.
 An update that asks for new or wider capabilities stops and asks again; the old
 version stays loaded until you answer. You can revoke a grant, or uninstall the
 plugin, from the extensions list; uninstalling deletes the plugin's secrets.
+
+### Panels that tick or read keys
+
+A panel is declared in `[[contributes.plugin.panels]]`. Two of its keys ask the
+editor for more than somewhere to draw:
+
+```toml
+[[contributes.plugin.panels]]
+id = "counts"
+title = "Counts"
+icon = "hash"
+dock = "right"       # left, right or bottom; defaults to left
+tick_ms = 200        # integer, 50 to 1000 inclusive; absent means no ticks
+keys = true          # boolean, defaults to false
+```
+
+`tick_ms` is a whole number of milliseconds between 50 and 1000 inclusive.
+Leave it out and the panel is never ticked. `keys` is a boolean and defaults to
+`false`.
+
+Both of them need the `panels.realtime` capability, and that one is checked
+**when your manifest is read** — at install or load — not when your plugin
+calls the host. A panel declaring `tick_ms` or `keys` is asking the editor to
+run a timer for it and to hand it the user's keystrokes, and both are promised
+before your code runs at all, so a manifest asking for either without
+`panels.realtime` is refused at install, naming the panel and the capability it
+needs. `panels` itself is checked at the call instead, because showing a panel
+is something your plugin does rather than something it declares.
+
+Some keys never reach a panel even with `keys = true`: `escape`, `tab`, and
+anything carrying the secondary modifier stay with the editor.
 
 ## Trust
 
