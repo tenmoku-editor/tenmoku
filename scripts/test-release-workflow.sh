@@ -297,12 +297,12 @@ for c in windows-x64-stable windows-arm64-stable linux-x86_64-stable; do
 	grep -q -F "Some(\"$c\")" "$rs" || fail "velopack_update.rs does not read channel $c"
 done
 ps1="$here/velopack-pack.ps1"
-for word in '$channel = "windows-$Arch-stable"' "'--packId', 'Tenmoku'" "'--runtime', \"win-\$Arch\"" \
+for word in "'--channel', \"windows-\$Arch-\$kind\"" "'--packId', 'Tenmoku'" "'--runtime', \"win-\$Arch\"" \
 	"'--shortcuts', 'StartMenuRoot'" "'--noPortable'" "'--delta', 'None'" 'Remove-Item Env:TENMOKU_UPDATE_PRIVATE_KEY' \
-	'$private | & $Signer sign $feed' 'if ($signed -ne $public)' '"Tenmoku-$Version-windows-$Arch-Setup.exe"'; do
+	'$private | & $Signer sign $feed' 'if ($signed -cne $public)' '"Tenmoku-$Version-windows-$Arch-Setup.exe"'; do
 	grep -q -F -- "$word" "$ps1" || fail "velopack-pack.ps1 lacks $word"
 done
-ok "velopack-pack.ps1 packs Tenmoku per user with a Start menu shortcut on windows-<arch>-stable, the key on stdin only"
+ok "velopack-pack.ps1 packs Tenmoku per user with a Start menu shortcut on windows-<arch>-<kind>, the key on stdin only (channel sets: test-velopack-pack.sh)"
 
 # velopack-pack.sh --linux, dry: its vpk and signer commands, and its key checks.
 mkdir -p "$t/appdir/Licenses"

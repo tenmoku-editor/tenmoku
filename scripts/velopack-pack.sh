@@ -11,17 +11,23 @@ usage() {
 	cat <<'EOF'
 Usage: scripts/velopack-pack.sh --version X.Y.Z --feed DIR|URL --out DIR
                                 [--channel NAME] [--pack-id ID] [--dry-run]
-       scripts/velopack-pack.sh --linux --pack-dir DIR --version X.Y.Z --out DIR
-                                [--signer FILE] [--dry-run]
+       scripts/velopack-pack.sh --linux --pack-dir DIR --version V --out DIR
+                                [--channel-set stable|preview|both] [--signer FILE] [--dry-run]
 
 --linux: the release's AppImage (T1909). DIR is the unpacked linux-x86_64 tar.gz
 folder, whose tenmoku was built with TENMOKU_UPDATE_FEED (and TENMOKU_UPDATE_PUBLIC_KEY,
-when set) baked in; its tenmoku and Licenses/ are packed. No cargo run. vpk packs on
-channel linux-x86_64-stable, pack id Tenmoku, and the script leaves in --out:
-  Tenmoku-<v>-linux-x86_64.AppImage and its .sha256,
-  releases.linux-x86_64-stable.json, the full .nupkg it lists, and the feed's .sig when
-  signed: with TENMOKU_UPDATE_PRIVATE_KEY (or _FILE) and TENMOKU_UPDATE_PUBLIC_KEY set,
-  --signer (sign_update_feed) signs the feed. Without a private key the feed is left
+when set) baked in; its tenmoku and Licenses/ are packed. No cargo run. V is X.Y.Z or
+X.Y.Z-preview.N. vpk packs with pack id Tenmoku, once per channel of --channel-set:
+  stable (the default)  linux-x86_64-stable; a preview version is refused
+  preview               linux-x86_64-preview
+  both                  a stable version on both channels, so the preview feed carries
+                        it too; a preview version on linux-x86_64-preview only
+(what the release workflow passes). A preview version never reaches the stable channel.
+The script leaves in --out:
+  Tenmoku-<v>-linux-x86_64.AppImage and its .sha256, from the stable pack when there is one,
+  and per channel releases.<channel>.json, the full .nupkg it lists, and the feed's .sig
+  when signed: with TENMOKU_UPDATE_PRIVATE_KEY (or _FILE) and TENMOKU_UPDATE_PUBLIC_KEY set,
+  --signer (sign_update_feed) signs each feed. Without a private key the feeds are left
   unsigned, which the app refuses; a private key without the public one is refused.
 
 Builds Tenmoku with the feed and public key baked in, bundles it with
@@ -83,12 +89,17 @@ private_key_source() {
 	fi
 }
 
-# Signs feed file $2 with signer $1, the key on its stdin only, and checks its public half is
-# TENMOKU_UPDATE_PUBLIC_KEY: no .sig is left otherwise. Unsets the key variables first.
-sign_feed() {
+# Reads the private key named by key_from into private_key or private_key_file and takes both
+# key variables out of the environment, so only the signer ever sees the key.
+take_private_key() {
 	private_key=${TENMOKU_UPDATE_PRIVATE_KEY:-}
 	private_key_file=${TENMOKU_UPDATE_PRIVATE_KEY_FILE:-}
 	unset TENMOKU_UPDATE_PRIVATE_KEY TENMOKU_UPDATE_PRIVATE_KEY_FILE
+}
+
+# Signs feed file $2 with signer $1, the key (take_private_key's) on its stdin only, and checks
+# its public half is TENMOKU_UPDATE_PUBLIC_KEY: no .sig is left otherwise.
+sign_feed() {
 	rm -f "$2.sig"
 	if [ "$key_from" = TENMOKU_UPDATE_PRIVATE_KEY ]; then
 		# printf is a builtin: the key reaches the signer's stdin and no argv.
@@ -124,14 +135,61 @@ find_vpk() {
 		die "vpk is '${vpk_version:-unknown}', not $pin as the velopack crate is pinned; install it with: $install_hint"
 }
 
-# --linux: the release's AppImage and feed from an unpacked tar.gz folder.
+# The channels (stable, preview or both, in that order) a --channel-set $1 packs version $2
+# on. A preview version (X.Y.Z-preview.N) goes on preview only; dies on a bad set or version.
+channels_for() {
+	case "$2" in
+	*-preview.*)
+		base=${2%%-preview.*}
+		n=${2#*-preview.}
+		case "$n" in
+		"" | *[!0-9]* | 0?*) die "version must be X.Y.Z or X.Y.Z-preview.N, got '$2'" ;;
+		esac
+		version_preview=1
+		;;
+	*) base=$2 version_preview="" ;;
+	esac
+	case "$base" in
+	"" | *[!0-9.]* | .* | *. | *..*) die "version must be X.Y.Z or X.Y.Z-preview.N, got '$2'" ;;
+	esac
+	case "$1" in
+	stable)
+		[ -z "$version_preview" ] ||
+			die "a preview version goes on the preview channel only, not stable: pass --channel-set preview or both ('$2')"
+		echo stable
+		;;
+	preview) echo preview ;;
+	both) if [ -n "$version_preview" ]; then echo preview; else echo stable preview; fi ;;
+	*) die "--channel-set must be stable, preview or both, got '$1'" ;;
+	esac
+}
+
+# Runs vpk pack (or, dry, prints it) for channel $1 into $work/vpk-$1.
+vpk_pack() {
+	c=$1
+	# vpk cross-packs for Linux from another OS only with its [linux] directive.
+	set -- "$vpk"
+	[ "$(uname -s)" = Linux ] || set -- "$@" "[linux]"
+	set -- "$@" pack --packId Tenmoku --packVersion "$version" --packDir "$work/app" \
+		--mainExe tenmoku --channel "linux-x86_64-$c" --runtime linux-x64 --packTitle Tenmoku \
+		--packAuthors Tenmoku --icon "$root/crates/fastedit/assets/icon/fastedit-1024.png" \
+		--categories 'Development;TextEditor;' --delta None --outputDir "$work/vpk-$c"
+	if [ -n "$dry_run" ]; then
+		show "$@"
+	else
+		"$@" || die "vpk pack failed for linux-x86_64-$c"
+	fi
+}
+
+# --linux: the release's AppImage and feeds from an unpacked tar.gz folder.
 pack_linux() {
-	version="" pack_dir="" out="" signer="" dry_run=""
+	version="" pack_dir="" out="" signer="" dry_run="" channel_set=stable
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--version) need_arg "$@"; version=$2; shift 2 ;;
 		--pack-dir) need_arg "$@"; pack_dir=$2; shift 2 ;;
 		--out) need_arg "$@"; out=$2; shift 2 ;;
+		--channel-set) need_arg "$@"; channel_set=$2; shift 2 ;;
 		--signer) need_arg "$@"; signer=$2; shift 2 ;;
 		--dry-run) dry_run=1; shift ;;
 		-h | --help) usage; exit 0 ;;
@@ -141,14 +199,10 @@ pack_linux() {
 	[ -n "$version" ] || die "--version is required (see --help)"
 	[ -n "$pack_dir" ] || die "--pack-dir is required (see --help)"
 	[ -n "$out" ] || die "--out is required (see --help)"
-	case "$version" in
-	*[!0-9.]* | .* | *. | *..*) die "version must be dotted numbers, got '$version'" ;;
-	esac
+	channels=$(channels_for "$channel_set" "$version") || exit 1
 	[ -f "$pack_dir/tenmoku" ] || die "no tenmoku in $pack_dir"
 	[ -d "$pack_dir/Licenses" ] || die "no Licenses/ in $pack_dir"
 
-	channel=linux-x86_64-stable
-	feed_file="releases.$channel.json"
 	private_key_source
 	public_key=${TENMOKU_UPDATE_PUBLIC_KEY:-}
 	case "$public_key" in
@@ -161,24 +215,21 @@ pack_linux() {
 		[ -n "$signer" ] || die "--signer is required to sign the feed"
 		[ -n "$dry_run" ] || [ -x "$signer" ] || die "no signer at $signer"
 	fi
+	take_private_key
 	find_vpk "$dry_run"
 
 	work=$(mktemp -d)
-	# vpk cross-packs for Linux from another OS only with its [linux] directive.
-	set -- "$vpk"
-	[ "$(uname -s)" = Linux ] || set -- "$@" "[linux]"
-	set -- "$@" pack --packId Tenmoku --packVersion "$version" --packDir "$work/app" \
-		--mainExe tenmoku --channel "$channel" --runtime linux-x64 --packTitle Tenmoku \
-		--packAuthors Tenmoku --icon "$root/crates/fastedit/assets/icon/fastedit-1024.png" \
-		--categories 'Development;TextEditor;' --delta None --outputDir "$work/vpk"
 	if [ -n "$dry_run" ]; then
+		for c in $channels; do
+			vpk_pack "$c"
+			feed_file="releases.linux-x86_64-$c.json"
+			if [ -n "$key_from" ]; then
+				printf '%s | %s\n' "<private key from $key_from>" "$(show "$signer" sign "$out/$feed_file")"
+			else
+				echo "velopack-pack: note: no private key, so $feed_file is left unsigned" >&2
+			fi
+		done
 		rm -rf "$work"
-		show "$@"
-		if [ -n "$key_from" ]; then
-			printf '%s | %s\n' "<private key from $key_from>" "$(show "$signer" sign "$out/$feed_file")"
-		else
-			echo "velopack-pack: note: no private key, so $feed_file is left unsigned" >&2
-		fi
 		exit 0
 	fi
 	trap 'rm -rf "$work"' EXIT
@@ -186,34 +237,42 @@ pack_linux() {
 	cp "$pack_dir/tenmoku" "$work/app/tenmoku"
 	chmod 755 "$work/app/tenmoku"
 	cp -R "$pack_dir/Licenses" "$work/app/Licenses"
-	"$@" || die "vpk pack failed"
-
-	appimages=$(find "$work/vpk" -maxdepth 1 -name '*.AppImage')
-	[ "$(printf '%s\n' "$appimages" | grep -c .)" -eq 1 ] || die "vpk did not write one AppImage: $appimages"
-	nupkg="Tenmoku-$version-$channel-full.nupkg"
-	[ -f "$work/vpk/$feed_file" ] || die "vpk wrote no $feed_file"
-	[ -f "$work/vpk/$nupkg" ] || die "vpk wrote no $nupkg"
 	name="Tenmoku-$version-linux-x86_64.AppImage"
-	mv "$appimages" "$out/$name"
-	chmod 755 "$out/$name"
-	if command -v sha256sum >/dev/null 2>&1; then
-		(cd "$out" && sha256sum "$name" >"$name.sha256")
-	else
-		(cd "$out" && shasum -a 256 "$name" >"$name.sha256")
-	fi
-	cp "$work/vpk/$feed_file" "$work/vpk/$nupkg" "$out/"
-	if [ -n "$key_from" ]; then
-		sign_feed "$signer" "$out/$feed_file"
-	else
-		rm -f "$out/$feed_file.sig"
-		if [ -n "$public_key" ]; then
-			echo "velopack-pack: warning: no private key: $feed_file is unsigned, and this build's key refuses it" >&2
-		else
-			echo "velopack-pack: no private key or public key: $feed_file is unsigned, and the app has no key to take it with" >&2
+	files="$name $name.sha256"
+	for c in $channels; do
+		vpk_pack "$c"
+		channel="linux-x86_64-$c"
+		feed_file="releases.$channel.json"
+		nupkg="Tenmoku-$version-$channel-full.nupkg"
+		[ -f "$work/vpk-$c/$feed_file" ] || die "vpk wrote no $feed_file"
+		[ -f "$work/vpk-$c/$nupkg" ] || die "vpk wrote no $nupkg"
+		appimages=$(find "$work/vpk-$c" -maxdepth 1 -name '*.AppImage')
+		[ "$(printf '%s\n' "$appimages" | grep -c .)" -eq 1 ] || die "vpk did not write one AppImage: $appimages"
+		# One AppImage per release: the first channel's, stable when the version is on it.
+		if [ "$c" = "${channels%% *}" ]; then
+			mv "$appimages" "$out/$name"
+			chmod 755 "$out/$name"
+			if command -v sha256sum >/dev/null 2>&1; then
+				(cd "$out" && sha256sum "$name" >"$name.sha256")
+			else
+				(cd "$out" && shasum -a 256 "$name" >"$name.sha256")
+			fi
 		fi
-	fi
-	for f in "$name" "$name.sha256" "$feed_file" "$nupkg"; do echo "$out/$f"; done
-	[ ! -f "$out/$feed_file.sig" ] || echo "$out/$feed_file.sig"
+		cp "$work/vpk-$c/$feed_file" "$work/vpk-$c/$nupkg" "$out/"
+		files="$files $feed_file $nupkg"
+		if [ -n "$key_from" ]; then
+			sign_feed "$signer" "$out/$feed_file"
+			files="$files $feed_file.sig"
+		else
+			rm -f "$out/$feed_file.sig"
+			if [ -n "$public_key" ]; then
+				echo "velopack-pack: warning: no private key: $feed_file is unsigned, and this build's key refuses it" >&2
+			else
+				echo "velopack-pack: no private key or public key: $feed_file is unsigned, and the app has no key to take it with" >&2
+			fi
+		fi
+	done
+	for f in $files; do echo "$out/$f"; done
 	exit 0
 }
 

@@ -8,7 +8,7 @@ root=$(cd "$here/.." && pwd)
 
 usage() {
 	cat <<EOF
-Usage: scripts/package-linux.sh [--binary PATH] [--version X.Y.Z] [--arch ARCH] [--out DIR]
+Usage: scripts/package-linux.sh [--binary PATH] [--version V] [--arch ARCH] [--out DIR]
 
 Writes DIR/Tenmoku-<version>-linux-<arch>.tar.gz and its .sha256. It does not run cargo:
 build first with 'cargo build --release -p fastedit'. The archive holds one folder,
@@ -22,7 +22,8 @@ Tenmoku-<version>-linux-<arch>/, with:
 
   --binary PATH     the tenmoku executable (default: target/release/tenmoku, under
                     CARGO_TARGET_DIR when that is set)
-  --version X.Y.Z   the version in the names (default: Cargo.toml's [workspace.package])
+  --version V       the version in the names, X.Y.Z or X.Y.Z-preview.N (default:
+                    Cargo.toml's [workspace.package])
   --arch ARCH       the architecture in the names (default: x86_64)
   --out DIR         where the archive goes (default: dist)
   -h, --help        this text
@@ -63,8 +64,16 @@ if [ -z "$version" ]; then
 	' "$root/Cargo.toml")
 	[ -n "$version" ] || die "no [workspace.package] version in $root/Cargo.toml"
 fi
+# X.Y.Z, or X.Y.Z-preview.N (N without a leading zero), as check-release-version.sh takes.
 case "$version" in
-*[!0-9.]* | .* | *. | *..*) die "version must be dotted numbers, got '$version'" ;;
+*-preview.*) base=${version%%-preview.*} n=${version#*-preview.} ;;
+*) base=$version n=0 ;;
+esac
+case "$base" in
+"" | *[!0-9.]* | .* | *. | *..*) die "version must be X.Y.Z or X.Y.Z-preview.N, got '$version'" ;;
+esac
+case "$n" in
+"" | *[!0-9]* | 0?*) die "version must be X.Y.Z or X.Y.Z-preview.N, got '$version'" ;;
 esac
 [ -f "$binary" ] && [ -x "$binary" ] || die "no executable binary at $binary (run cargo build --release -p fastedit)"
 

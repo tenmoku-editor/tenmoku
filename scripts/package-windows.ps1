@@ -17,7 +17,8 @@ The architecture in the names: x64 or arm64.
 The tenmoku.exe to pack (default: target\release\tenmoku.exe, under CARGO_TARGET_DIR when set).
 
 .PARAMETER Version
-The version in the names (default: Cargo.toml's [workspace.package] version).
+The version in the names, X.Y.Z or X.Y.Z-preview.N (default: Cargo.toml's
+[workspace.package] version).
 
 .PARAMETER Out
 Where the zip goes (default: dist).
@@ -46,7 +47,10 @@ if (-not $Version) {
     }
     if (-not $Version) { Die 'no [workspace.package] version in Cargo.toml' }
 }
-if ($Version -notmatch '^[0-9]+(\.[0-9]+)*$') { Die "version must be dotted numbers, got '$Version'" }
+# X.Y.Z, or X.Y.Z-preview.N as check-release-version.sh takes it (-c: case-sensitive).
+if ($Version -cnotmatch '^[0-9]+(\.[0-9]+)*(-preview\.(0|[1-9][0-9]*))?$') {
+    Die "version must be X.Y.Z or X.Y.Z-preview.N, got '$Version'"
+}
 if (-not (Test-Path -PathType Leaf $Binary)) { Die "no binary at $Binary (run cargo build --release -p fastedit)" }
 
 $name = "Tenmoku-$Version-windows-$Arch"
