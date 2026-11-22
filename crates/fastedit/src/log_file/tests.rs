@@ -101,9 +101,22 @@ fn install_child() {
 
 #[test]
 fn install_follows_the_real_stderr() {
+    use std::os::unix::io::FromRawFd as _;
     use std::process::{Command, Stdio};
-    let run = |stderr: Stdio| {
+    // Runs the child with the given stderr and a log optionally prepared
+    // first; returns the child's output, its log path and its home.
+    let run = |stderr: Stdio, existing: Option<&str>| {
         let home = tempfile::tempdir().unwrap();
+        let log = log_path(|name| match name {
+            "HOME" => Some(home.path().to_owned()),
+            "XDG_STATE_HOME" => Some(home.path().join("state")),
+            _ => None,
+        })
+        .unwrap();
+        if let Some(text) = existing {
+            fs::create_dir_all(log.parent().unwrap()).unwrap();
+            fs::write(&log, text).unwrap();
+        }
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "log_file::tests::install_child", "--nocapture"])
             .env("TENMOKU_LOG_CHILD", "1")
@@ -113,24 +126,75 @@ fn install_follows_the_real_stderr() {
             .stderr(stderr)
             .output()
             .unwrap();
-        let log = log_path(|name| match name {
-            "HOME" => Some(home.path().to_owned()),
-            "XDG_STATE_HOME" => Some(home.path().join("state")),
-            _ => None,
-        })
-        .unwrap();
+        assert!(output.status.success(), "child failed: {output:?}");
         (output, log, home)
     };
 
     // Null stderr: the launch line and the record land in the log.
-    let (_, log, _home) = run(Stdio::null());
+    let (_, log, _home) = run(Stdio::null(), None);
     let text = fs::read_to_string(&log).unwrap();
     let mut lines = text.lines();
     assert!(lines.next().unwrap().contains("launch: version"));
     assert!(lines.next().unwrap().contains("record"));
 
+    // Null stderr with a log already there: it is appended to, not replaced.
+    let (_, log, _home) = run(Stdio::null(), Some("earlier line\n"));
+    let text = fs::read_to_string(&log).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("earlier line"));
+    assert!(lines.next().unwrap().contains("launch: version"));
+    assert!(lines.next().unwrap().contains("record"));
+    assert_eq!(lines.next(), None);
+
     // A pipe stays the pipe: the record comes through it, and no log is made.
-    let (output, log, _home) = run(Stdio::piped());
+    let (output, log, _home) = run(Stdio::piped(), None);
     assert!(String::from_utf8_lossy(&output.stderr).contains("record"));
     assert!(!log.exists());
+
+    // A regular file the user redirected to stays: the record is in it.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("mine.log");
+    let file = File::create(&target).unwrap();
+    let (_, log, _home) = run(Stdio::from(file), None);
+    assert!(fs::read_to_string(&target).unwrap().contains("record"));
+    assert!(!log.exists());
+
+    // A terminal stays the terminal: the record is read from the pty master.
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: valid out-pointers; the null name/termios/winsize are allowed.
+    let made = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(made, 0);
+    // SAFETY: both descriptors are open and owned here.
+    let (master, slave) = unsafe {
+        (
+            File::from_raw_fd(master),
+            Stdio::from(File::from_raw_fd(slave)),
+        )
+    };
+    // Read concurrently: a pty may drop unread output when the slave closes.
+    let reader = std::thread::spawn(move || {
+        let mut master = master;
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 512];
+        while let Ok(n) = std::io::Read::read(&mut master, &mut buf) {
+            if n == 0 {
+                break;
+            }
+            seen.extend_from_slice(&buf[..n]);
+        }
+        seen
+    });
+    let (_, log, _home) = run(slave, None);
+    assert!(!log.exists());
+    // The slave is closed once the child exits, which ends the read.
+    let seen = reader.join().unwrap();
+    assert!(String::from_utf8_lossy(&seen).contains("record"));
 }
