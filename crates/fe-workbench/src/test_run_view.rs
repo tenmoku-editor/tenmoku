@@ -1032,7 +1032,7 @@ impl TestRunView {
                 id,
                 title: run.title.clone().into(),
                 status: run.status,
-                summary: run.summary,
+                summary: run.summary.clone(),
             };
             Some((shown, workbench.test_results(id, cx).unwrap_or_default()))
         });
@@ -1166,8 +1166,8 @@ impl TestRunView {
         let ended = (self.results.iter())
             .filter(|result| result.outcome != TestOutcome::Ignored)
             .count();
-        let (passed, failed, total) = match self.shown.as_ref().map(|shown| shown.summary) {
-            Some(RunSummary::Tests {
+        let (passed, failed, total) = match self.shown.as_ref().map(|shown| &shown.summary) {
+            Some(&RunSummary::Tests {
                 passed,
                 failed,
                 total,
@@ -1552,7 +1552,7 @@ impl Render for TestRunView {
                             .text_size(UI_SMALL.size)
                             .line_height(UI_SMALL.line_height)
                             .text_color(c.text.muted)
-                            .child(summary_text(shown.status, shown.summary)),
+                            .child(summary_text(shown.status, &shown.summary)),
                     ),
             )
             .child(split)

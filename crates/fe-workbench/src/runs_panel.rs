@@ -22,6 +22,15 @@
 //!
 //! A click on a row, or Enter on the selected one, shows the terminal tab of
 //! the task that made the run, if it's still open ([`Workbench::open_run`]).
+//!
+//! A plugin's background job (`docs/decisions/dqsjfernkt-plugins-stage-3.md`
+//! §3.5) shows as a run too: queued, with the muted `ellipsis` and "Waiting
+//! for another job" or "Waiting for memory", until it starts; the progress
+//! text it reports as its summary, as plain text; and "Timed out" once it
+//! ran past its wall time. One that may be cancelled has a Cancel button
+//! (the `square`, named "Cancel <title>", in the tab order) at its row's
+//! right while it's queued or running, which asks its plugin to cancel it
+//! ([`Runs::cancel`]).
 //! The list is kiln-ui's [`List`], so the arrow keys move the selection, and
 //! each row is a list option named "<title>, <status>, <age>" to a screen
 //! reader ([`Row::name`]). With no runs, a centred empty state names the
@@ -45,8 +54,8 @@ use std::{
 };
 
 use fe_ui::{
-    ActiveTheme as _, CODE_SMALL, FamilySlot, FontFamilies, Icon, List, ListDelegate, ListEvent,
-    ListRow, RowState, Tokens, UI_HEADING, UI_SMALL,
+    ActiveTheme as _, CODE_SMALL, FamilySlot, FontFamilies, Icon, IconButton, List, ListDelegate,
+    ListEvent, ListRow, RowState, Tokens, UI_HEADING, UI_SMALL,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Hsla,
@@ -59,7 +68,7 @@ use kiln_l10n::tr;
 use crate::{
     Workbench,
     build_timeline_view::BuildTimelineView,
-    runs::{DebugPhase, Run, RunId, RunKind, RunStatus, RunSummary, Runs},
+    runs::{DebugPhase, FailReason, Run, RunId, RunKind, RunStatus, RunSummary, Runs, Waiting},
     test_run_view::TestRunView,
 };
 
@@ -118,15 +127,24 @@ const DAY: u64 = 24 * HOUR;
 /// Under this a run's age reads `now`.
 const NOW: u64 = 5;
 
-/// The test selectors: the empty state, and a row and its progress line,
-/// with the row's index after a colon.
+/// The test selectors: the empty state, and a row, its progress line and its
+/// Cancel button, with the row's index after a colon.
 pub(crate) const EMPTY_SELECTOR: &str = "runs-empty";
 pub(crate) const ROW_SELECTOR: &str = "runs-row";
 pub(crate) const PROGRESS_SELECTOR: &str = "runs-progress";
+pub(crate) const CANCEL_SELECTOR: &str = "runs-cancel";
+
+/// A Cancel button's element id, with its row's index after a dash.
+const CANCEL_ID: &str = "run-cancel";
 
 /// Row `ix`'s test selector.
 pub(crate) fn row_selector(ix: usize) -> String {
     format!("{ROW_SELECTOR}:{ix}")
+}
+
+/// Row `ix`'s Cancel button's test selector.
+pub(crate) fn cancel_selector(ix: usize) -> String {
+    format!("{CANCEL_SELECTOR}:{ix}")
 }
 
 /// Row `ix`'s progress line's test selector.
@@ -137,6 +155,8 @@ pub(crate) fn progress_selector(ix: usize) -> String {
 /// A run's status icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StatusIcon {
+    /// One waiting to start: the `ellipsis`, muted.
+    Queued,
     Spinner,
     Passed,
     Failed,
@@ -150,6 +170,7 @@ pub(crate) enum StatusIcon {
 impl StatusIcon {
     pub(crate) fn of(status: RunStatus) -> Self {
         match status {
+            RunStatus::Queued { .. } => Self::Queued,
             RunStatus::Running { .. } => Self::Spinner,
             RunStatus::Passed => Self::Passed,
             RunStatus::Failed { .. } => Self::Failed,
@@ -159,11 +180,13 @@ impl StatusIcon {
 
     /// The icon of a run of `kind` that `status` and `summary` say where
     /// it is: a debug session that hasn't ended has its own.
-    pub(crate) fn of_run(kind: RunKind, status: RunStatus, summary: RunSummary) -> Self {
+    pub(crate) fn of_run(kind: RunKind, status: RunStatus, summary: &RunSummary) -> Self {
         match (kind, status, summary) {
-            (RunKind::Debug, RunStatus::Running { .. }, RunSummary::Debug(DebugPhase::Stopped)) => {
-                Self::Paused
-            }
+            (
+                RunKind::Debug,
+                RunStatus::Running { .. },
+                &RunSummary::Debug(DebugPhase::Stopped),
+            ) => Self::Paused,
             (RunKind::Debug, RunStatus::Running { .. }, _) => Self::Debugging,
             _ => Self::of(status),
         }
@@ -171,6 +194,7 @@ impl StatusIcon {
 
     pub(crate) fn icon(self) -> Icon {
         match self {
+            Self::Queued => Icon::Ellipsis,
             Self::Debugging => Icon::Bug,
             Self::Paused => Icon::Pause,
             Self::Spinner => Icon::LoaderCircle,
@@ -188,7 +212,7 @@ impl StatusIcon {
             Self::Paused => c.accent.base,
             Self::Passed => c.status.success,
             Self::Failed => c.status.error,
-            Self::Cancelled => c.text.muted,
+            Self::Queued | Self::Cancelled => c.text.muted,
         }
     }
 }
@@ -239,6 +263,7 @@ pub(crate) fn status_name(status: RunStatus) -> SharedString {
             let percent = (progress.clamp(0., 1.) * 100.).round() as u32;
             tr!("workbench-runs-status-running-progress", percent = percent)
         }
+        RunStatus::Queued { waiting } => waiting_text(waiting),
         RunStatus::Running { progress: None } => tr!("workbench-runs-status-running"),
         RunStatus::Passed => tr!("workbench-runs-status-passed"),
         RunStatus::Failed { .. } => tr!("workbench-runs-status-failed"),
@@ -246,10 +271,19 @@ pub(crate) fn status_name(status: RunStatus) -> SharedString {
     }
 }
 
+/// What a queued run waits for, in words.
+fn waiting_text(waiting: Waiting) -> SharedString {
+    match waiting {
+        Waiting::Concurrency => tr!("workbench-runs-waiting-concurrency"),
+        Waiting::Memory => tr!("workbench-runs-waiting-memory"),
+    }
+}
+
 /// A run's one line: what its summary says, else what its status does.
-pub(crate) fn summary_text(status: RunStatus, summary: RunSummary) -> SharedString {
-    match summary {
+pub(crate) fn summary_text(status: RunStatus, summary: &RunSummary) -> SharedString {
+    match *summary {
         RunSummary::None => match status {
+            RunStatus::Queued { waiting } => waiting_text(waiting),
             RunStatus::Running { .. } => tr!("workbench-runs-summary-running"),
             RunStatus::Passed => tr!("workbench-runs-summary-passed"),
             RunStatus::Failed { code: Some(code) } => {
@@ -291,6 +325,8 @@ pub(crate) fn summary_text(status: RunStatus, summary: RunSummary) -> SharedStri
             warnings = warnings,
             errors = errors
         ),
+        // What the run said of itself: data, shown as it is.
+        RunSummary::Text(ref text) => SharedString::from(text.clone()),
     }
 }
 
@@ -306,7 +342,13 @@ pub(crate) struct Row {
     pub(crate) icon: StatusIcon,
     /// Where it is, if it's a debug session that hasn't ended.
     phase: Option<DebugPhase>,
-    /// What its age counts from: when it ended, else when it began.
+    /// Why it failed, beyond its exit code.
+    pub(crate) reason: Option<FailReason>,
+    /// Whether it shows a Cancel button: it may be cancelled and hasn't
+    /// ended.
+    pub(crate) cancellable: bool,
+    /// What its age counts from: when it ended, else when it began, else
+    /// when it was queued.
     since: Instant,
 }
 
@@ -317,14 +359,19 @@ impl Row {
             kind: run.kind,
             title: run.title.clone().into(),
             status: run.status,
-            summary: (run.note.clone().map(SharedString::from))
-                .unwrap_or_else(|| summary_text(run.status, run.summary)),
-            icon: StatusIcon::of_run(run.kind, run.status, run.summary),
-            phase: match (run.status, run.summary) {
-                (RunStatus::Running { .. }, RunSummary::Debug(phase)) => Some(phase),
+            summary: match (&run.note, run.reason) {
+                (Some(note), _) => SharedString::from(note.clone()),
+                (None, Some(FailReason::TimedOut)) => tr!("workbench-runs-summary-timed-out"),
+                (None, None) => summary_text(run.status, &run.summary),
+            },
+            icon: StatusIcon::of_run(run.kind, run.status, &run.summary),
+            phase: match (run.status, &run.summary) {
+                (RunStatus::Running { .. }, &RunSummary::Debug(phase)) => Some(phase),
                 _ => None,
             },
-            since: run.finished.unwrap_or(run.started),
+            reason: run.reason,
+            cancellable: run.cancellable && run.status.is_active(),
+            since: run.since(),
         }
     }
 
@@ -339,16 +386,20 @@ impl Row {
                 "workbench-debug-run-row-name",
                 title = &self.title,
                 status = match self.phase {
-                    Some(phase) => summary_text(self.status, RunSummary::Debug(phase)),
+                    Some(phase) => summary_text(self.status, &RunSummary::Debug(phase)),
                     None => status_name(self.status),
                 },
                 age = age_name(self.age(now))
             );
         }
+        let status = match self.reason {
+            Some(FailReason::TimedOut) => tr!("workbench-runs-status-timed-out"),
+            None => status_name(self.status),
+        };
         tr!(
             "workbench-runs-row-name",
             title = &self.title,
-            status = status_name(self.status),
+            status = status,
             age = age_name(self.age(now))
         )
     }
@@ -358,10 +409,14 @@ impl Row {
 /// that asked is over.
 type Opener = Rc<dyn Fn(RunId, &mut Window, &mut App)>;
 
+/// What a row's Cancel button runs: [`Runs::cancel`].
+type Canceller = Rc<dyn Fn(RunId, &mut App)>;
+
 /// The list's rows, newest first.
 pub(crate) struct RunRows {
     rows: Vec<Row>,
     open: Opener,
+    cancel: Canceller,
     /// What the spinners' angle counts from, so all turn together.
     epoch: Instant,
     /// Each drawn row's progress line, by row: the fraction it fills and
@@ -442,6 +497,20 @@ impl ListDelegate for RunRows {
         #[cfg(test)]
         self.drawn_icons.insert(ix, (icon.icon(), icon.colour(&c)));
         let (id, open) = (row.id, self.open.clone());
+        let cancel = row.cancellable.then(|| {
+            let cancel = self.cancel.clone();
+            IconButton::new(
+                SharedString::from(format!("{CANCEL_ID}-{ix}")),
+                Icon::Square,
+                tr!("workbench-runs-cancel", title = &row.title),
+                &fe_ui::ui_theme(cx),
+            )
+            .on_click(move |_, _, cx| {
+                // The row's own click opens it: this one only cancels.
+                cx.stop_propagation();
+                cancel(id, cx);
+            })
+        });
         let body = ListRow::new(state)
             .relative()
             .gap_2()
@@ -486,6 +555,14 @@ impl ListDelegate for RunRows {
                     .text_color(c.text.muted)
                     .child(age_label(row.age(Instant::now()))),
             )
+            .when_some(cancel, |body, cancel| {
+                body.child(
+                    div()
+                        .flex_none()
+                        .debug_selector(move || cancel_selector(ix))
+                        .child(cancel),
+                )
+            })
             .when_some(line, |body, (fill, colour)| {
                 body.child(
                     div()
@@ -554,9 +631,14 @@ impl RunsPanel {
                 opened.ok();
             });
         });
+        let for_cancel = runs.downgrade();
+        let cancel: Canceller = Rc::new(move |run: RunId, cx: &mut App| {
+            (for_cancel.update(cx, |runs, cx| runs.cancel(run, cx))).ok();
+        });
         let rows = RunRows {
             rows: Vec::new(),
             open,
+            cancel,
             epoch: Instant::now(),
             #[cfg(test)]
             drawn_lines: Default::default(),

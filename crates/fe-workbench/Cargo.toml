@@ -132,6 +132,9 @@ tempfile.workspace = true
 ttf-parser = "0.25"
 # The plugin host's tests build kiln-plugin's WAT fixtures.
 wasmtime = { workspace = true, features = ["wat"] }
+# A plugin that runs jobs must be a binary component: the jobs tests' fixture
+# is parsed to one.
+wat = "1.262.0"
 
 [lints]
 workspace = true

@@ -554,7 +554,7 @@ fn age_buckets_read_now_12s_3m_2h_4d() {
     );
     // A summary with nothing counted says what the status does.
     assert_eq!(
-        summary_text(RunStatus::Failed { code: None }, RunSummary::None),
+        summary_text(RunStatus::Failed { code: None }, &RunSummary::None),
         tr!("workbench-runs-summary-no-code")
     );
 }

@@ -481,6 +481,8 @@ impl PreCommitChecks {
             return;
         }
         let status = match runs.read(cx).get(id).map(|run| run.status) {
+            // Queued hasn't started, so it hasn't ended either.
+            Some(RunStatus::Queued { .. }) => return,
             Some(RunStatus::Running { .. }) => return,
             Some(RunStatus::Passed) => CheckStatus::Passed,
             Some(RunStatus::Failed { .. }) => CheckStatus::Failed,

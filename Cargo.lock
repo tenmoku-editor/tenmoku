@@ -2839,6 +2839,7 @@ dependencies = [
  "unicode-width",
  "wasmtime",
  "wasmtime-wasi",
+ "wat",
  "windows-sys 0.61.2",
  "zip",
 ]

@@ -244,7 +244,7 @@ fn the_summary_follows_artifacts(cx: &mut TestAppContext) {
 
     project.run("runs.build");
     project.wait_until("the first artifacts", |project| {
-        let summary = project.runs().first().map(|run| run.summary);
+        let summary = project.runs().first().map(|run| run.summary.clone());
         summary == Some(build(2, 0, 0))
     });
     let run = project.runs().remove(0);

@@ -40,6 +40,10 @@
 //! - **Commands.** A plugin's commands, `<id>.<name>`, are listed in the
 //!   command palette while its load runs, and a workbench runs them
 //!   ([`dispatch`]) off the main thread. Unloading withdraws them.
+//! - **Jobs.** A plugin with the `jobs` capability runs background jobs
+//!   in worker stores of its component, shown in each window's Runs list
+//!   ([`plugin_jobs`]); unloading, reloading or disabling it, or the app
+//!   quitting, cancels them.
 //! - **Log.** What a plugin's `log` import writes goes to the app's log and
 //!   to its own ([`crate::plugin_log`]), with what the host says of it:
 //!   loaded or reloaded, failed, stopped, its shutdown failed and shut
@@ -125,7 +129,7 @@ pub use kiln_plugin::manifest::plugin_kind;
 
 use crate::{
     KEY_CONTEXT, PendingPluginGrant, PluginAnswer, PluginAsk, RootChanged, TrustChanged, Workbench,
-    plugin_bridge::{Bridge, CallDeadline},
+    plugin_bridge::{Bridge, CallDeadline, Cancelled},
     plugin_diagnostics,
     plugin_events::{self, Inbox},
     plugin_format::{self, PluginFormatting},
@@ -601,6 +605,7 @@ pub(crate) fn set_workspace_roots(cx: &mut App, roots: Vec<PathBuf>) {
         return;
     }
     host.workspace = roots.clone();
+    host.jobs.set_roots(roots.clone());
     // What reaches files is wanted on the new roots now, not once decided
     // again: a load on the old ones is cancelled, and none starts.
     for slot in host.slots.values_mut() {
@@ -783,6 +788,8 @@ pub(crate) struct PluginHost {
     logs: PluginLogs,
     /// The trusted roots of the open windows.
     workspace: Vec<PathBuf>,
+    /// The plugins' background jobs: their queue and their runs.
+    pub(crate) jobs: plugin_jobs::JobsHub,
     evaluating: Option<Task<()>>,
     /// The palette entries listed so far, by load: each is listed once.
     listed: HashSet<u64>,
@@ -937,6 +944,8 @@ struct Loaded {
     commands: Vec<PluginCommand>,
     /// Its events.
     inbox: Inbox,
+    /// Its background jobs, with the `jobs` capability.
+    jobs: Option<plugin_jobs::JobsLoad>,
 }
 
 impl Loaded {
@@ -965,6 +974,7 @@ fn host_mut(cx: &mut App) -> &mut PluginHost {
             limits: Limits::default(),
             logs,
             workspace: Vec::new(),
+            jobs: plugin_jobs::JobsHub::default(),
             evaluating: None,
             listed: HashSet::new(),
             answering: HashSet::new(),
@@ -990,6 +1000,11 @@ fn host_mut(cx: &mut App) -> &mut PluginHost {
         // settings, an extension, its themes, keymaps or menus.
         cx.observe_global::<kiln::platform::config::ChangedFiles>(plugin_events::config_reloaded)
             .detach();
+        // Quitting cancels every plugin's jobs.
+        cx.on_app_quit(plugin_jobs::quit).detach();
+        // The Runs lists follow the jobs, from the first one started.
+        let hub = cx.global::<PluginHost>().jobs.clone();
+        plugin_jobs::serve(&hub, cx);
         // A closed window's buffers may be open nowhere else now, whoever
         // still holds its workbench.
         cx.on_window_closed(|cx, _| {
@@ -1465,6 +1480,10 @@ fn withdraw(id: &str, host: &mut PluginHost) -> Option<Loaded> {
         commands.unload(id);
     }
     loaded.inbox.close();
+    // Its jobs are cancelled now: their runs end as their workers do.
+    if let Some(jobs) = &loaded.jobs {
+        jobs.detach();
+    }
     // A request waiting on a language server is dropped now: the plugin's
     // mutex is held by the call that waits, so shutdown can't do it first.
     lsp_requests().unload(id);
@@ -1601,6 +1620,7 @@ fn start_load(id: &str, cx: &mut App) {
     let grants = identity.grants.clone();
     let identity_world = identity.world;
     let loading_artifact = artifact.clone();
+    let hub = host.jobs.clone();
     let loading = cx.background_spawn(async move {
         #[cfg(test)]
         if let Some(gate) = gate {
@@ -1616,21 +1636,28 @@ fn start_load(id: &str, cx: &mut App) {
             &cancel,
             &formatting,
             background.data_quota(),
+            Some((&hub, background)),
         );
-        if let Ok((plugin, ..)) = &started {
-            lock(plugin).background = background;
-        }
-        started
+        let jobs = match &started {
+            Ok((plugin, ..)) => {
+                let mut plugin = lock(plugin);
+                plugin.background = background;
+                plugin.jobs.clone()
+            }
+            Err(_) => None,
+        };
+        (started, jobs)
     });
     let id = id.to_owned();
     cx.spawn(async move |cx| {
-        let loaded = loading.await;
+        let (loaded, jobs) = loading.await;
         let loaded = Finished {
             load,
             identity,
             artifact,
             reload,
             loaded,
+            jobs,
         };
         cx.update(|cx| loaded_plugin(&id, loaded, cx));
     })
@@ -1655,6 +1682,8 @@ struct Finished {
     artifact: Arc<Artifact>,
     reload: bool,
     loaded: Result<Started, LoadFailure>,
+    /// Its background jobs, if it runs them.
+    jobs: Option<plugin_jobs::JobsLoad>,
 }
 
 /// What a load finished with: its plugin running, or why it stopped, which
@@ -1667,6 +1696,7 @@ fn loaded_plugin(id: &str, finished: Finished, cx: &mut App) {
         artifact,
         reload,
         loaded,
+        jobs,
     } = finished;
     let version = identity.version;
     let mut diagnostic = None;
@@ -1697,6 +1727,7 @@ fn loaded_plugin(id: &str, finished: Finished, cx: &mut App) {
                 plugin,
                 commands,
                 inbox: events,
+                jobs,
             };
             if wanted && host.listed.insert(load) {
                 let flag = ContextPredicate::identifier(loaded.flag());
@@ -1867,13 +1898,25 @@ impl LoadContext {
     ) -> Result<Started, LoadFailure> {
         let formatting = PluginFormatting::default();
         let quota = artifact.manifest.background.data_quota();
-        self.load_with(artifact, World::CURRENT, grants, cancel, &formatting, quota)
+        let hub = plugin_jobs::JobsHub::default();
+        let background = Some((&hub, artifact.manifest.background));
+        self.load_with(
+            artifact,
+            World::CURRENT,
+            grants,
+            cancel,
+            &formatting,
+            quota,
+            background,
+        )
     }
 
     /// Compiles and starts `artifact`'s plugin against `world` with
     /// `grants`, its formatters registered on `formatting` and its data
     /// store held to `data_quota` bytes, unless `cancel` is set first:
-    /// blocking, for the background executor.
+    /// blocking, for the background executor. With the `jobs` capability,
+    /// its jobs go to `jobs`'s hub under its background limits.
+    #[allow(clippy::too_many_arguments)]
     fn load_with(
         &self,
         artifact: &Artifact,
@@ -1882,6 +1925,7 @@ impl LoadContext {
         cancel: &Arc<AtomicBool>,
         formatting: &PluginFormatting,
         data_quota: u64,
+        jobs: Option<(&plugin_jobs::JobsHub, BackgroundLimits)>,
     ) -> Result<Started, LoadFailure> {
         let cancelled = || cancel.load(Ordering::Acquire);
         let failed = |message: String| {
@@ -1923,6 +1967,9 @@ impl LoadContext {
             Some(store) => process.recorded_in(store.clone(), id),
             None => process,
         };
+        // Its workers' commands and data counter are this load's.
+        let job_commands = jobs.is_some().then(|| kiln.commands.for_jobs());
+        let job_data = kiln.data.clone();
         // The buffers' wait doesn't count the time the call's program runs
         // took either.
         let deadline = CallDeadline::new(kiln.program_runs.clone());
@@ -1953,6 +2000,19 @@ impl LoadContext {
                 )
             },
         };
+        // Its workers' slices are made as these are, sharing this load's data counter and its
+        // attachments: what they publish is this load's.
+        let jobs = jobs.zip(job_commands).map(|((hub, background), commands)| {
+            let shared = LoadShared {
+                commands,
+                data: job_data,
+                decorations: host.decorations.shared(),
+                diagnostics: host.diagnostics.shared(),
+                status: host.status.shared(),
+            };
+            let workers = self.worker_data(id, grants, limits, &artifact.record, shared);
+            (hub.clone(), background, workers)
+        });
         let unloader = host.lsp.unloader();
         let inbox = Inbox::new(&limits);
         let plugin = HostedPlugin::load(
@@ -1971,6 +2031,7 @@ impl LoadContext {
             self.record.clone(),
             self.ticker,
             cancel.clone(),
+            jobs,
         )
         .map_err(|error| {
             // Whatever its `init` set before it failed goes with it.
@@ -1986,6 +2047,108 @@ impl LoadContext {
         let commands = self.commands.commands(id, &handle);
         Ok((plugin, commands, inbox))
     }
+
+    /// What each of plugin `id`'s worker stores runs against: its kiln
+    /// slices as its interactive store's are made, under `grants`, with what
+    /// it shares with its load (`shared`): the commands' worker slice, the
+    /// data store's counter, and the load's own decorations, diagnostics and
+    /// status items, so what it publishes is the load's; the buffers as the
+    /// editor's are, its waits there cut short as the job is stopped; no
+    /// formatters or language servers. Its program runs may take the job's
+    /// wall time, and its memory is the job's.
+    fn worker_data(
+        &self,
+        id: &str,
+        grants: &fe_command::Grants,
+        limits: Limits,
+        record: &GrantRecord,
+        shared: LoadShared,
+    ) -> plugin_jobs::WorkerData {
+        let (id, grants, record) = (id.to_owned(), grants.clone(), record.clone());
+        let (secrets, secrets_index) = (self.secrets.clone(), self.secrets_index.clone());
+        let (store, lines) = (self.store.clone(), self.record.clone());
+        let (bridge, paint) = (self.bridge.clone(), self.paint.clone());
+        Arc::new(move |launch: &kiln_plugin::jobs::Launch| {
+            let mut kiln = bindings::HostState::new(guest_log(&id, lines.clone()));
+            kiln.commands = shared.commands.state();
+            if let Some(index) = &secrets_index {
+                let service = fe_config::paths::app_id().reverse_dns;
+                let secrets = PluginSecrets::new(secrets.clone(), service, id.clone(), index);
+                kiln.secrets = kiln_plugin::secrets::State::new(secrets);
+            }
+            kiln.data = shared.data.clone();
+            kiln.net =
+                kiln_plugin::net::State::new(&grants, &limits, Box::new(FeNet::new(&grants)));
+            let workspace = Workspace {
+                roots: launch.roots.clone(),
+            };
+            let process = kiln_plugin::process::State::new(record.clone(), &limits);
+            let process = match &store {
+                Some(store) => process.recorded_in(store.clone(), &id),
+                None => process,
+            };
+            // Its programs run as long as its wall time allows, and may start in the roots
+            // preopened for it, as kiln-plugin's runner has them.
+            let roots = kiln_plugin::process_stream::preopened(&grants, &workspace);
+            kiln.process = process.with_deadline(launch.wall).with_roots(roots);
+            kiln.jobs = kiln_plugin::jobs::State::worker(launch.control.clone());
+            let deadline = CallDeadline::new(kiln.program_runs.clone());
+            // A cancelled job stops waiting on the main thread at once, and what it handed
+            // there and wasn't started never runs.
+            let control = launch.control.clone();
+            let cancelled: Cancelled = Arc::new(move || control.is_cancelled());
+            let buffers = || {
+                let deadline = deadline.clone();
+                bridge.buffers_unless(deadline, limits.call_deadline, cancelled.clone())
+            };
+            let versions = || paint.versions(buffers());
+            let host = fe_plugin::HostState {
+                kiln,
+                editor: fe_plugin::editor::State::new(&id, &grants, &limits, buffers()),
+                decorations: (shared.decorations.as_ref())
+                    .map(|load| fe_plugin::decorations::State::worker(load, versions()))
+                    .unwrap_or_default(),
+                diagnostics: (shared.diagnostics.as_ref())
+                    .map(|load| fe_plugin::diagnostics::State::worker(load, versions()))
+                    .unwrap_or_default(),
+                formatting: fe_plugin::formatting::State::default(),
+                status: (shared.status.as_ref())
+                    .map(fe_plugin::status::State::worker)
+                    .unwrap_or_default(),
+                lsp: fe_plugin::lsp::State::default(),
+            };
+            let memory = Limits {
+                memory_bytes: usize::try_from(launch.memory_bytes).unwrap_or(usize::MAX),
+                ..limits
+            };
+            Data {
+                host,
+                inbox: Inbox::new(&limits),
+                wasi: kiln_plugin::runner::wasi_context(&grants, &workspace),
+                table: ResourceTable::new(),
+                limiter: StoreLimiter::new(&memory),
+                deadline: None,
+                call_deadline: deadline,
+                timed_out: false,
+                paint: paint.clone(),
+                painted: false,
+                imported: false,
+                worker: None,
+                jobs: None,
+            }
+        })
+    }
+}
+
+/// What a load's worker stores share with it: its commands' worker slice, its data store's
+/// counter, and its decorations, diagnostics and status attachments, none for a slice the load
+/// doesn't have.
+struct LoadShared {
+    commands: kiln_plugin::commands::JobCommands,
+    data: kiln_plugin::data::State,
+    decorations: Option<fe_plugin::decorations::SharedLoad>,
+    diagnostics: Option<fe_plugin::diagnostics::SharedLoad>,
+    status: Option<fe_plugin::status::SharedLoad>,
 }
 
 /// Every plugin's waiting language-server requests, which the plugins' lsp slices share.
@@ -2050,6 +2213,12 @@ fn guest_log(id: &str, record: Record) -> LogSink {
         let thread = thread::current().name().unwrap_or_default().to_owned();
         record.push(format!("log {id} on {thread}: {message}"));
     })
+}
+
+/// The name of plugin `id`'s threads, its own and its jobs' workers: shown
+/// only in debuggers.
+fn thread_name(id: &str) -> String {
+    format!("plugin {id}")
 }
 
 fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -2432,6 +2601,8 @@ pub(crate) struct HostedPlugin {
     /// What its background jobs may use: its manifest's, then the user's
     /// `plugin_limits`, held to this computer's ceilings.
     pub(crate) background: BackgroundLimits,
+    /// Its jobs, with the `jobs` capability: detached as it stops.
+    pub(crate) jobs: Option<plugin_jobs::JobsLoad>,
 }
 
 /// The caller's ends of the plugin thread's channels.
@@ -2446,12 +2617,16 @@ pub(crate) enum Work {
     Call(Call),
     /// Events wait in its inbox.
     Events,
+    /// Its jobs' ends wait for delivery to `job-finished`.
+    Jobs,
 }
 
 impl HostedPlugin {
     /// Compiles `component` (through `cache`), links it against the editor
     /// world of `world`'s minor, and starts plugin `id` on its thread,
-    /// calling its `init`. It
+    /// calling its `init`. With the `jobs` capability it links the jobs
+    /// world too, and is attached to `jobs`'s hub first, so `init` may
+    /// start jobs, each run in a worker store of the same component. It
     /// refuses to when `ticker` can't enforce the call deadline, and stops
     /// before compiling, instantiating or `init` once `cancel` is set.
     #[allow(clippy::too_many_arguments)]
@@ -2471,6 +2646,11 @@ impl HostedPlugin {
         record: Record,
         ticker: fn(&PluginEngine) -> Result<(), String>,
         cancel: Arc<AtomicBool>,
+        jobs: Option<(
+            plugin_jobs::JobsHub,
+            BackgroundLimits,
+            plugin_jobs::WorkerData,
+        )>,
     ) -> Result<Self, LoadError> {
         ticker(engine).map_err(|message| LoadError::Thread {
             plugin: id.to_owned(),
@@ -2499,19 +2679,47 @@ impl HostedPlugin {
             )
             .into(),
         };
+        let runs_jobs = world >= World::V1_1 && grants.allows(&Capability::Jobs);
+        // A job's result is read in place, checked and charged before it is
+        // copied: its strings must be UTF-8.
+        if runs_jobs && !kiln_plugin::jobs::lifts_utf8(component) {
+            return Err(LoadError::Invalid {
+                plugin: id.to_owned(),
+                message: kiln_plugin::jobs::NOT_UTF8.to_owned(),
+            });
+        }
         let component = match cache {
             Some(cache) => cache.load(engine.engine(), component),
             None => Component::new(engine.engine(), component),
         }
         .map_err(invalid)?;
-        let pre = linker(engine)
+        // The jobs interfaces link only with the `jobs` capability, so a
+        // component importing them without it fails here.
+        let pre = linker(engine, runs_jobs)
             .map_err(invalid)?
             .instantiate_pre(&component)
             .map_err(unlinked)?;
         fe_plugin::check(world, &pre).map_err(unlinked)?;
+        if runs_jobs {
+            fe_plugin::check_jobs(&pre).map_err(unlinked)?;
+        }
         if cancel.load(Ordering::Acquire) {
             return Err(cancelled());
         }
+        // Its workers are instances of this component, compiled once.
+        let jobs = jobs.filter(|_| runs_jobs).map(|(hub, background, data)| {
+            let workers = plugin_jobs::Workers {
+                id: id.to_owned(),
+                engine: engine.clone(),
+                pre: pre.clone(),
+                world,
+                data,
+            };
+            hub.attach(id, grants, background, workers)
+        });
+        let detach = |jobs: &Option<plugin_jobs::JobsLoad>| {
+            jobs.iter().for_each(plugin_jobs::JobsLoad::detach);
+        };
         let data = Data {
             host,
             inbox: inbox.clone(),
@@ -2523,6 +2731,9 @@ impl HostedPlugin {
             timed_out: false,
             paint,
             painted: false,
+            imported: false,
+            worker: None,
+            jobs: jobs.clone(),
         };
         let guest = Guest {
             id: id.to_owned(),
@@ -2536,11 +2747,14 @@ impl HostedPlugin {
         let (calls, received) = mpsc::sync_channel(1);
         let (reply, replies) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
-            .name(format!("plugin {id}"))
+            .name(thread_name(id))
             .spawn(move || guest.run(&pre, &started, &received, &reply))
-            .map_err(|error| LoadError::Thread {
-                plugin: id.to_owned(),
-                error,
+            .map_err(|error| {
+                detach(&jobs);
+                LoadError::Thread {
+                    plugin: id.to_owned(),
+                    error,
+                }
             })?;
         let started = start.recv().unwrap_or_else(|_| {
             Err(LoadError::Unloaded(Diagnostic {
@@ -2550,11 +2764,17 @@ impl HostedPlugin {
             }))
         });
         if let Err(error) = started {
+            detach(&jobs);
             drop(thread.join());
             inbox.close();
             return Err(error);
         }
         inbox.set_wake(calls.clone());
+        if let Some(jobs) = &jobs {
+            jobs.set_wake(calls.clone());
+            // A job `init` started may have ended before there was a wake.
+            drop(calls.try_send(Work::Jobs));
+        }
         Ok(Self {
             id: id.to_owned(),
             state: kiln_plugin::runner::PluginState::Running,
@@ -2563,6 +2783,7 @@ impl HostedPlugin {
             inbox,
             lsp: None,
             background: BackgroundLimits::default(),
+            jobs,
         })
     }
 
@@ -2589,6 +2810,10 @@ impl HostedPlugin {
         });
         replied.map_err(|diagnostic| {
             log::warn!("{diagnostic}");
+            // Its jobs go with it.
+            if let Some(jobs) = &self.jobs {
+                jobs.detach();
+            }
             // The host is told whoever called, a command or a formatter, and
             // even once the caller stopped waiting: it stops the load.
             self.inbox.stop(diagnostic.clone());
@@ -2608,6 +2833,9 @@ impl HostedPlugin {
         // shut the plugin down.
         if let Some(lsp) = &self.lsp {
             lsp.unload();
+        }
+        if let Some(jobs) = &self.jobs {
+            jobs.detach();
         }
         self.inbox.close();
         self.channel = None;
@@ -2659,41 +2887,75 @@ impl Drop for HostedPlugin {
     }
 }
 
-/// The editor world's imports and WASI's, against [`Data`].
-fn linker(engine: &PluginEngine) -> wasmtime::Result<Linker<Data>> {
+/// The editor world's imports and WASI's, against [`Data`], and, for a
+/// plugin that `runs_jobs`, the jobs world's ([`plugin_jobs::link`]). Each
+/// notes that the store entered an import, for a worker's slice.
+fn linker(engine: &PluginEngine, runs_jobs: bool) -> wasmtime::Result<Linker<Data>> {
     use fe_plugin::fastedit::editor::{buffer, decorations, diagnostics, formatting, lsp, status};
     let mut linker = Linker::<Data>::new(engine.engine());
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-    bindings::add_to_linker(&mut linker, |data| &mut data.host.kiln)?;
-    buffer::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, |data| &mut data.host)?;
+    bindings::add_to_linker(&mut linker, |data| {
+        data.imported = true;
+        &mut data.host.kiln
+    })?;
+    // `child.write` lifts its bytes lazily, as kiln-plugin's runner has it: only what the
+    // program's stdin takes is copied out of the guest, never the whole list it passes.
+    kiln_plugin::process_stream::add_to_linker(&mut linker, |data| {
+        data.imported = true;
+        &mut data.host.kiln
+    })?;
+    buffer::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, imported)?;
     // A call that reaches the decorations or the status items repaints
     // them once it returns.
     decorations::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, |data| {
         data.painted = true;
-        &mut data.host
+        imported(data)
     })?;
-    diagnostics::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, |data| {
-        &mut data.host
-    })?;
-    formatting::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, |data| {
-        &mut data.host
-    })?;
-    lsp::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, |data| &mut data.host)?;
+    diagnostics::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, imported)?;
+    formatting::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, imported)?;
+    lsp::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, imported)?;
     status::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, |data| {
         data.painted = true;
-        &mut data.host
+        imported(data)
     })?;
+    if runs_jobs {
+        plugin_jobs::link(&mut linker)?;
+    }
     // kiln-plugin's `subscribe` can't reach the plugin's queue: this host's
     // can, in its store. It replaces the one `add_to_linker` defined, by its
-    // name: every minor's plugins reach that one.
+    // name: every minor's plugins reach that one. A worker store has no
+    // queue: it subscribes to nothing.
     linker.allow_shadowing(true);
     linker
         .instance(&World::CURRENT.interface("events"))?
         .func_wrap(
             "subscribe",
-            |store: StoreContextMut<'_, Data>, (kinds,): (EventKinds,)| {
-                store.data().inbox.subscribe(kinds);
+            |mut store: StoreContextMut<'_, Data>, (kinds,): (EventKinds,)| {
+                let data = store.data_mut();
+                data.imported = true;
+                if data.worker.is_some() {
+                    return Ok((Err(not_in_a_job()),));
+                }
+                data.inbox.subscribe(kinds);
                 Ok((Ok::<(), bindings::Error>(()),))
+            },
+        )?;
+    // A worker store registers no formatter.
+    linker
+        .instance(&fe_plugin_interface("formatting"))?
+        .func_wrap(
+            "register",
+            |mut store: StoreContextMut<'_, Data>, (languages, command): (Vec<String>, String)| {
+                let data = store.data_mut();
+                data.imported = true;
+                if data.worker.is_some() {
+                    return Ok((Err(not_in_a_job()),));
+                }
+                Ok((formatting::Host::register(
+                    &mut data.host,
+                    languages,
+                    command,
+                ),))
             },
         )?;
     linker.allow_shadowing(false);
@@ -2701,8 +2963,25 @@ fn linker(engine: &PluginEngine) -> wasmtime::Result<Linker<Data>> {
     Ok(linker)
 }
 
-/// A plugin's store data.
-struct Data {
+/// The editor's state a store's import runs against, noted as entered.
+fn imported(data: &mut Data) -> &mut fe_plugin::HostState {
+    data.imported = true;
+    &mut data.host
+}
+
+/// What an import that registers something answers in a worker store.
+fn not_in_a_job() -> bindings::Error {
+    bindings::Error::Denied(kiln_plugin::jobs::NOT_IN_A_JOB.to_owned())
+}
+
+/// fe-plugin's `interface` of the current editor world, as the linker
+/// names it.
+fn fe_plugin_interface(interface: &str) -> String {
+    ["fastedit:editor/", interface, "@1.1.0"].concat()
+}
+
+/// A plugin's store data: its interactive store's, or a worker store's.
+pub(crate) struct Data {
     host: fe_plugin::HostState,
     /// Its events, which `subscribe` subscribes it to.
     inbox: Inbox,
@@ -2719,10 +2998,20 @@ struct Data {
     paint: Paint,
     /// Whether the running call reached them.
     painted: bool,
+    /// Whether an import was entered since the store last entered the
+    /// host: wasmtime enters the host for its own calls as well, which
+    /// renew no worker's slice.
+    imported: bool,
+    /// In a worker store, the job it runs.
+    worker: Option<plugin_jobs::Worker>,
+    /// In the interactive store of a plugin with the `jobs` capability, its
+    /// jobs.
+    jobs: Option<plugin_jobs::JobsLoad>,
 }
 
 impl WasiView for Data {
     fn ctx(&mut self) -> WasiCtxView<'_> {
+        self.imported = true;
         WasiCtxView {
             ctx: &mut self.wasi,
             table: &mut self.table,
@@ -2737,11 +3026,19 @@ struct Exports {
     shutdown: TypedFunc<(), ()>,
     run_command: TypedFunc<(String, String), (Result<(), bindings::Error>,)>,
     handle_events: TypedFunc<(Vec<Event>,), ()>,
+    /// With the `jobs` capability.
+    job_finished: Option<TypedFunc<(plugin_jobs::JobId, kiln_plugin::jobs::JobState), ()>>,
 }
 
 impl Exports {
-    /// `instance`'s exports, named as `world` names them.
-    fn new(store: &mut Store<Data>, instance: &Instance, world: World) -> wasmtime::Result<Self> {
+    /// `instance`'s exports, named as `world` names them; `job-finished`
+    /// too for a plugin that `runs_jobs`.
+    fn new(
+        store: &mut Store<Data>,
+        instance: &Instance,
+        world: World,
+        runs_jobs: bool,
+    ) -> wasmtime::Result<Self> {
         let mut export = |interface: &str, name: &str| {
             instance
                 .get_export_index(&mut *store, None, interface)
@@ -2759,11 +3056,18 @@ impl Exports {
         };
         let run_command = export(&world.interface("command-handler"), "run-command")?;
         let handle_events = export(&world.interface("event-handler"), "handle-events")?;
+        let job_finished = match runs_jobs {
+            true => Some(export(&world.interface("job-handler"), "job-finished")?),
+            false => None,
+        };
         Ok(Self {
             init: instance.get_typed_func(&mut *store, "init")?,
             shutdown: instance.get_typed_func(&mut *store, "shutdown")?,
             run_command: instance.get_typed_func(&mut *store, run_command)?,
             handle_events: instance.get_typed_func(&mut *store, handle_events)?,
+            job_finished: job_finished
+                .map(|at| instance.get_typed_func(&mut *store, at))
+                .transpose()?,
         })
     }
 }
@@ -2779,6 +3083,11 @@ enum Delivered {
     /// A call failed, unloading the plugin.
     Failed,
 }
+
+/// How many job ends a plugin's thread hands `job-finished` before it looks
+/// for calls and events again: a chain of jobs that end as fast as they are
+/// started doesn't hold them up.
+const DELIVERED_PER_BATCH: usize = 8;
 
 /// The plugin thread's side.
 struct Guest {
@@ -2815,9 +3124,17 @@ impl Guest {
             return;
         }
         let mut next = None;
+        // Job ends the last batch left undelivered.
+        let mut jobs_left = false;
         loop {
             let work = match next.take() {
                 Some(work) => work,
+                // A call or an event waiting goes before the rest of them.
+                None if jobs_left => match calls.try_recv() {
+                    Ok(work) => work,
+                    Err(TryRecvError::Empty) => Work::Jobs,
+                    Err(TryRecvError::Disconnected) => break,
+                },
                 None => match calls.recv() {
                     Ok(work) => work,
                     Err(_) => break,
@@ -2830,11 +3147,19 @@ impl Guest {
                     return;
                 }
             }
+            if self.deliver_jobs(&exports).is_err() {
+                return;
+            }
             match self.deliver(&exports, calls) {
                 Delivered::All => {}
                 Delivered::Until(work) => next = Some(work),
                 Delivered::Closed => break,
                 Delivered::Failed => return,
+            }
+            // A wake for them may have come in among the events.
+            match self.deliver_jobs(&exports) {
+                Ok(left) => jobs_left = left,
+                Err(()) => return,
             }
         }
         if let Err(diagnostic) =
@@ -2883,11 +3208,38 @@ impl Guest {
             inbox.delivered(event);
             match calls.try_recv() {
                 Ok(Work::Call(call)) => return Delivered::Until(Work::Call(call)),
-                Ok(Work::Events) | Err(TryRecvError::Empty) => {}
+                Ok(Work::Events | Work::Jobs) | Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => return Delivered::Closed,
             }
         }
         Delivered::All
+    }
+
+    /// Hands the plugin's jobs that ended to its `job-finished`, one per
+    /// call, in the order they ended, at most [`DELIVERED_PER_BATCH`]: true
+    /// if more may wait, which go after the calls and events waiting. One
+    /// whose call fails unloads the plugin, the host told why: an error then.
+    fn deliver_jobs(&mut self, exports: &Exports) -> Result<bool, ()> {
+        let (Some(jobs), Some(finished)) = (self.store.data().jobs.clone(), &exports.job_finished)
+        else {
+            return Ok(false);
+        };
+        for _ in 0..DELIVERED_PER_BATCH {
+            let Some((job, ended)) = jobs.take_ended() else {
+                return Ok(false);
+            };
+            let state = ended.into_state();
+            let delivered =
+                self.guarded(async |store| finished.call_async(store, (job, state)).await);
+            if let Err(diagnostic) = delivered {
+                log::warn!("{diagnostic}");
+                jobs.detach();
+                self.store.data().inbox.stop(diagnostic);
+                return Err(());
+            }
+        }
+        // Perhaps more: a `job-finished` may start jobs that end while it runs.
+        Ok(true)
     }
 
     fn start(&mut self, pre: &InstancePre<Data>) -> Result<Exports, LoadError> {
@@ -2912,9 +3264,11 @@ impl Guest {
         let instance = self
             .guarded(async |store| pre.instantiate_async(store).await)
             .map_err(LoadError::Unloaded)?;
-        let exports = Exports::new(&mut self.store, &instance, self.world).map_err(|error| {
-            LoadError::Unloaded(self.diagnosis(Reason::Protocol, format!("{error:?}")))
-        })?;
+        let runs_jobs = self.store.data().jobs.is_some();
+        let exports =
+            Exports::new(&mut self.store, &instance, self.world, runs_jobs).map_err(|error| {
+                LoadError::Unloaded(self.diagnosis(Reason::Protocol, format!("{error:?}")))
+            })?;
         if let Some(cancelled) = cancelled(self) {
             return Err(cancelled);
         }
@@ -3106,6 +3460,9 @@ fn wake_on_tick(waker: &Waker) {
         waiting.push(waker.clone());
     }
 }
+
+#[path = "plugin_jobs.rs"]
+pub(crate) mod plugin_jobs;
 
 #[cfg(test)]
 #[path = "plugin_host_paint_tests.rs"]

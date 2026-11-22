@@ -10,7 +10,10 @@ use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestCo
 
 use crate::{
     Launch, TerminalPanel, Workbench,
-    runs::{MAX_FINISHED, RunEnd, RunId, RunKind, RunStatus, RunSummary, Runs, RunsEvent},
+    runs::{
+        FailReason, MAX_FINISHED, MAX_TEXT_CHARS, RunEnd, RunId, RunKind, RunOwner, RunStatus,
+        RunSummary, Runs, RunsEvent, Waiting,
+    },
     task_defs::{Group, Source, Task, TaskCommand},
     tests::open,
 };
@@ -93,7 +96,7 @@ fn listed(
 ) -> Vec<(String, RunKind, RunStatus, RunSummary)> {
     runs(workbench, cx).read_with(cx, |runs, _| {
         (runs.list())
-            .map(|run| (run.title.clone(), run.kind, run.status, run.summary))
+            .map(|run| (run.title.clone(), run.kind, run.status, run.summary.clone()))
             .collect()
     })
 }
@@ -140,7 +143,11 @@ fn a_task_run_appears_running_and_finishes_from_its_exit_code(cx: &mut TestAppCo
     );
     let finished =
         runs(&workbench, cx).read_with(cx, |runs, _| runs.get(first.id).unwrap().clone());
-    assert!(finished.finished.is_some_and(|at| at >= finished.started));
+    assert!(
+        finished
+            .finished
+            .is_some_and(|at| Some(at) >= finished.started)
+    );
     assert_eq!(heard.borrow().len(), 2, "told it finished");
 
     // Told once: a second exit changes nothing.
@@ -307,7 +314,7 @@ fn finished_runs_are_capped_at_100_and_running_ones_stay(cx: &mut TestAppContext
             failed: 1,
             total: Some(10),
         };
-        assert!(runs.update(oldest, Some(1.5), summary, cx));
+        assert!(runs.update(oldest, Some(1.5), summary.clone(), cx));
         let run = runs.get(oldest).unwrap();
         assert_eq!(
             run.status,
@@ -316,7 +323,7 @@ fn finished_runs_are_capped_at_100_and_running_ones_stay(cx: &mut TestAppContext
             }
         );
         assert_eq!(run.summary, summary);
-        assert!(runs.update(oldest, Some(f32::NAN), summary, cx));
+        assert!(runs.update(oldest, Some(f32::NAN), summary.clone(), cx));
         assert_eq!(runs.get(oldest).unwrap().status, RUNNING);
 
         // Finishing it keeps its summary, and drops the one that finished
@@ -354,4 +361,68 @@ fn the_list_is_newest_first(cx: &mut TestAppContext) {
         runs.list().map(|run| run.title.clone()).collect()
     });
     assert_eq!(titles, ["three", "two", "one"]);
+}
+
+#[gpui::test]
+fn a_queued_run_starts_or_ends_without_starting(cx: &mut TestAppContext) {
+    let model = cx.new(|_| Runs::default());
+    model.update(cx, |runs, cx| {
+        let owner = RunOwner::Plugin {
+            id: "acme.jobs".to_owned(),
+            job: 7,
+        };
+        let waits = Waiting::Concurrency;
+        let queued = runs.queue(RunKind::Script, "index", owner.clone(), true, waits, cx);
+        let run = runs.get(queued).unwrap();
+        assert_eq!(run.status, RunStatus::Queued { waiting: waits });
+        assert_eq!((run.started, run.finished), (None, None));
+        assert_eq!(run.since(), run.queued_at.unwrap());
+        // It can't say how far along it is before it starts.
+        assert!(!runs.update(queued, Some(0.5), RunSummary::None, cx));
+        assert!(runs.wait(queued, Waiting::Memory, cx));
+        let memory = RunStatus::Queued {
+            waiting: Waiting::Memory,
+        };
+        assert_eq!(runs.get(queued).unwrap().status, memory);
+
+        // Started, it runs from now.
+        assert!(runs.start(queued, cx));
+        let run = runs.get(queued).unwrap();
+        assert_eq!(run.status, RUNNING);
+        assert!(run.started.is_some_and(|at| Some(at) >= run.queued_at));
+        assert!(!runs.start(queued, cx), "started once");
+        assert!(
+            !runs.wait(queued, Waiting::Concurrency, cx),
+            "no longer waits"
+        );
+
+        // One that ends while queued never started.
+        let never = runs.queue(RunKind::Build, "check", owner, true, waits, cx);
+        assert!(runs.finish(never, RunEnd::Cancelled, None, cx));
+        let run = runs.get(never).unwrap();
+        assert_eq!(run.status, RunStatus::Cancelled);
+        assert_eq!(run.started, None);
+        assert!(run.finished.is_some());
+        assert!(!runs.start(never, cx));
+    });
+}
+
+#[gpui::test]
+fn a_runs_text_is_cut_and_a_timed_out_one_says_why(cx: &mut TestAppContext) {
+    let model = cx.new(|_| Runs::default());
+    model.update(cx, |runs, cx| {
+        let id = runs.begin(RunKind::Script, "index", cx);
+        assert_eq!(runs.get(id).unwrap().owner, RunOwner::Host);
+        // A host's run is cancelled by closing its tab, not here.
+        assert!(!runs.cancel(id, cx));
+        let long = "ü".repeat(MAX_TEXT_CHARS + 50);
+        assert!(runs.update(id, None, RunSummary::Text(long), cx));
+        let cut = "ü".repeat(MAX_TEXT_CHARS);
+        assert_eq!(runs.get(id).unwrap().summary, RunSummary::Text(cut));
+        assert!(runs.finish_because(id, None, FailReason::TimedOut, None, cx));
+        let run = runs.get(id).unwrap();
+        assert_eq!(run.status, RunStatus::Failed { code: None });
+        assert_eq!(run.reason, Some(FailReason::TimedOut));
+        assert!(!runs.finish_because(id, None, FailReason::TimedOut, None, cx));
+    });
 }

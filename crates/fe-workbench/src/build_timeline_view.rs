@@ -234,14 +234,68 @@ pub(crate) fn tick_step(length: Duration) -> Duration {
 /// crate's end (a second if that's nothing); each crate's mark is placed
 /// and sized by its span in proportion, kept on the track. The crates are
 /// in the order they started, those that started together as cargo first
-/// named them.
+/// named them. The view lays a build out with [`layout_at`], which knows
+/// one that ended too.
+#[cfg(test)]
 pub(crate) fn layout(timeline: &BuildTimeline, elapsed: Option<Duration>, width: Pixels) -> Layout {
-    let end = |span: &fe_runlog::CrateSpan| match (span.running, elapsed) {
-        (true, Some(elapsed)) => span.end.max(elapsed),
+    layout_at(timeline, elapsed.map(Clock::Running), width)
+}
+
+/// How long a build shown has taken.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Clock {
+    /// It's running, this long so far.
+    Running(Duration),
+    /// It ended (passed, failed or cancelled) this long after it started.
+    Ended(Duration),
+}
+
+impl Clock {
+    fn at(self) -> Duration {
+        match self {
+            Clock::Running(at) | Clock::Ended(at) => at,
+        }
+    }
+}
+
+/// The clock of a build run with `status`, started at `started` and ended
+/// at `finished`, as of `now`: none for one that's queued.
+pub(crate) fn clock(
+    status: RunStatus,
+    started: Option<Instant>,
+    finished: Option<Instant>,
+    now: Instant,
+) -> Option<Clock> {
+    let started = started?;
+    match (status.is_running(), finished) {
+        (true, _) => Some(Clock::Running(now.saturating_duration_since(started))),
+        (false, Some(finished)) => Some(Clock::Ended(finished.saturating_duration_since(started))),
+        (false, None) => None,
+    }
+}
+
+/// Whether `span` was cut short by its build's end: it was still being
+/// compiled in the last snapshot read, or it was compiled (not fresh) but
+/// never got an artifact, which a finished timeline leaves ending where it
+/// started, a compiled crate's artifact coming only after its `Compiling`
+/// line.
+fn cut_short(span: &fe_runlog::CrateSpan) -> bool {
+    span.running || (!span.fresh && span.end <= span.start)
+}
+
+/// [`layout`] at `clock`: a running build's crates being compiled end at
+/// its elapsed time, as there; an ended one's crates that it cut short end
+/// where it ended, so a failed or cancelled build keeps the time they took,
+/// though none of its crates is running.
+pub(crate) fn layout_at(timeline: &BuildTimeline, clock: Option<Clock>, width: Pixels) -> Layout {
+    let end = |span: &fe_runlog::CrateSpan| match clock {
+        Some(Clock::Running(elapsed)) if span.running => span.end.max(elapsed),
+        Some(Clock::Ended(ended)) if cut_short(span) => span.end.max(ended),
         _ => span.end,
     };
+    let live = matches!(clock, Some(Clock::Running(_)));
     let last = (timeline.spans.iter()).map(end).max().unwrap_or_default();
-    let mut length = last.max(elapsed.unwrap_or_default());
+    let mut length = last.max(clock.map(Clock::at).unwrap_or_default());
     if length.is_zero() {
         length = Duration::from_secs(1);
     }
@@ -278,7 +332,7 @@ pub(crate) fn layout(timeline: &BuildTimeline, elapsed: Option<Duration>, width:
                 mark,
                 tone,
                 duration,
-                running: span.running && elapsed.is_some(),
+                running: span.running && live,
             }
         })
         .collect();
@@ -534,7 +588,8 @@ struct Shown {
     title: SharedString,
     status: RunStatus,
     summary: RunSummary,
-    started: Instant,
+    started: Option<Instant>,
+    finished: Option<Instant>,
 }
 
 /// A build run's detail: see the module docs.
@@ -671,8 +726,9 @@ impl BuildTimelineView {
                 id,
                 title: run.title.clone().into(),
                 status: run.status,
-                summary: run.summary,
+                summary: run.summary.clone(),
                 started: run.started,
+                finished: run.finished,
             })
         });
         let Some(shown) = found else {
@@ -708,18 +764,24 @@ impl BuildTimelineView {
         self.rebuild(cx);
     }
 
-    /// How long the build shown has been running, if it is.
-    fn elapsed(&self) -> Option<Duration> {
+    /// How long the build shown has taken: so far while it runs, else from
+    /// its start to its end.
+    fn clock(&self) -> Option<Clock> {
         let shown = self.shown.as_ref()?;
-        shown.status.is_running().then(|| shown.started.elapsed())
+        clock(shown.status, shown.started, shown.finished, Instant::now())
+    }
+
+    /// Whether the build shown is running.
+    fn live(&self) -> bool {
+        matches!(self.clock(), Some(Clock::Running(_)))
     }
 
     /// Lays the waterfall out again at the track's width and the time, and
     /// makes the rows; while the build runs, does it again in a
     /// [`LIVE_TICK`].
     fn rebuild(&mut self, cx: &mut Context<Self>) {
-        let elapsed = self.elapsed();
-        let layout = layout(&self.timeline, elapsed, self.width.get());
+        let clock = self.clock();
+        let layout = layout_at(&self.timeline, clock, self.width.get());
         let rows: Vec<CrateRow> = (layout.rows.iter().cloned())
             .map(|row| {
                 let counts = self.counts.get(row.span).copied().unwrap_or_default();
@@ -734,7 +796,8 @@ impl BuildTimelineView {
             list.rows_changed(cx);
         });
         self.layout = Some(layout);
-        self.tick = elapsed.map(|_| {
+        let live = matches!(clock, Some(Clock::Running(_)));
+        self.tick = live.then(|| {
             cx.spawn(async move |view, cx| {
                 cx.background_executor().timer(LIVE_TICK).await;
                 view.update(cx, |view, cx| view.rebuild(cx)).ok();
@@ -858,9 +921,9 @@ impl BuildTimelineView {
             return div().into_any_element();
         };
         if layout.rows.is_empty() {
-            let empty = match self.elapsed() {
-                Some(_) => tr!("workbench-build-runs-no-crates-yet"),
-                None => tr!("workbench-build-runs-no-crates"),
+            let empty = match self.live() {
+                true => tr!("workbench-build-runs-no-crates-yet"),
+                false => tr!("workbench-build-runs-no-crates"),
             };
             return div()
                 .px_3()
@@ -990,11 +1053,108 @@ impl Render for BuildTimelineView {
                             .text_size(UI_SMALL.size)
                             .line_height(UI_SMALL.line_height)
                             .text_color(c.text.muted)
-                            .child(summary_text(shown.status, shown.summary)),
+                            .child(summary_text(shown.status, &shown.summary)),
                     )
                     .child(div().flex_none().child(switch)),
             )
             .child(body)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod ended_tests {
+    //! A build that ended keeps the time the crates it cut short took
+    //! (T1580 F2): one that failed without an artifact, and one cancelled
+    //! while a crate was being compiled, its last snapshot read.
+
+    use std::time::{Duration, Instant};
+
+    use fe_runlog::{BuildTimeline, CrateSpan};
+    use gpui::px;
+
+    use super::{Clock, Mark, clock, layout_at};
+    use crate::runs::RunStatus;
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    fn span(name: &str, start: Duration, end: Duration, running: bool) -> CrateSpan {
+        CrateSpan {
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+            start,
+            end,
+            fresh: false,
+            local: false,
+            dir: None,
+            running,
+        }
+    }
+
+    /// The width of row `ix`'s bar, and the time its row says it took.
+    fn bar(timeline: &BuildTimeline, clock: Clock, ix: usize) -> (f32, Option<Duration>) {
+        let laid = layout_at(timeline, Some(clock), px(100.));
+        let row = laid.rows.iter().find(|row| row.span == ix).unwrap();
+        assert!(!row.running, "an ended build compiles nothing");
+        match row.mark {
+            Mark::Bar { width, .. } => (width.as_f32(), row.duration),
+            Mark::Line { .. } => panic!("a compiled crate has a bar"),
+        }
+    }
+
+    #[test]
+    fn an_ended_builds_clock_runs_from_its_start_to_its_end() {
+        let started = Instant::now();
+        let (finished, now) = (started + secs(8), started + secs(60));
+        let failed = RunStatus::Failed { code: Some(101) };
+        assert_eq!(
+            clock(failed, Some(started), Some(finished), now),
+            Some(Clock::Ended(secs(8)))
+        );
+        assert_eq!(
+            clock(RunStatus::Cancelled, Some(started), Some(finished), now),
+            Some(Clock::Ended(secs(8)))
+        );
+        let running = RunStatus::Running { progress: None };
+        assert_eq!(
+            clock(running, Some(started), None, now),
+            Some(Clock::Running(secs(60)))
+        );
+    }
+
+    #[test]
+    fn a_failed_crate_without_an_artifact_keeps_its_time() {
+        // `app` started at 2 s and failed with no artifact, so the finished
+        // timeline left it ending where it started; the build failed at 8 s.
+        let timeline = BuildTimeline {
+            spans: vec![
+                span("dep", secs(0), secs(2), false),
+                span("app", secs(2), secs(2), false),
+            ],
+            ..BuildTimeline::default()
+        };
+        let (width, took) = bar(&timeline, Clock::Ended(secs(8)), 1);
+        assert_eq!(took, Some(secs(6)));
+        assert_eq!(width, 75.);
+        // A crate that got its artifact keeps its own end.
+        assert_eq!(bar(&timeline, Clock::Ended(secs(8)), 0).1, Some(secs(2)));
+    }
+
+    #[test]
+    fn a_cancelled_build_keeps_the_bar_its_crate_had_grown() {
+        // The last snapshot read had `app` being compiled from 1 s; the
+        // build was cancelled at 5 s.
+        let timeline = BuildTimeline {
+            spans: vec![span("app", secs(1), secs(1), true)],
+            ..BuildTimeline::default()
+        };
+        let live = layout_at(&timeline, Some(Clock::Running(secs(4))), px(100.));
+        assert!(live.rows[0].running);
+        assert_eq!(live.rows[0].duration, Some(secs(3)));
+        let (width, took) = bar(&timeline, Clock::Ended(secs(5)), 0);
+        assert_eq!(took, Some(secs(4)));
+        assert_eq!(width, 80.);
     }
 }

@@ -103,11 +103,29 @@ impl Bridge {
             bridge: self.clone(),
             deadline,
             fallback,
+            cancelled: None,
+        })
+    }
+
+    /// As [`Self::buffers`], for a plugin's background job, which stops waiting at once when
+    /// `cancelled` turns true: what it handed the main thread and wasn't started then never runs.
+    pub(crate) fn buffers_unless(
+        &self,
+        deadline: CallDeadline,
+        fallback: Duration,
+        cancelled: Cancelled,
+    ) -> Box<dyn BufferAccess> {
+        Box::new(Buffers {
+            bridge: self.clone(),
+            deadline,
+            fallback,
+            cancelled: Some(cancelled),
         })
     }
 
     /// Runs `job` on the main thread and waits for what it returns, until
     /// `deadline` ([`Handoff`]).
+    #[cfg(test)]
     fn on_main<R: Send + 'static>(
         &self,
         deadline: Instant,
@@ -116,8 +134,9 @@ impl Bridge {
         self.on_main_unless(deadline, None, job)
     }
 
-    /// As [`Self::on_main`], and a plugin whose `cancelled` turns true stops waiting at once: a
-    /// job the main thread hasn't started then never runs.
+    /// Runs `job` on the main thread and waits for what it returns, until
+    /// `deadline` ([`Handoff`]). A plugin whose `cancelled` turns true stops
+    /// waiting at once: a job the main thread hasn't started then never runs.
     fn on_main_unless<R: Send + 'static>(
         &self,
         deadline: Instant,
@@ -125,18 +144,37 @@ impl Bridge {
         job: impl FnOnce(&Served, &mut App) -> R + Send + 'static,
     ) -> Result<R, Error> {
         let handoff = Handoff::new(deadline);
-        let theirs = Arc::clone(&handoff);
+        self.hand(&handoff, job)?;
+        handoff.wait_unless(cancelled)
+    }
+
+    /// As [`Self::on_main_unless`], for a background job's `cancelled`: the main thread looks at
+    /// it too, as it comes to the job, so a job handed over before the job was stopped never
+    /// starts after, whether or not the plugin has looked since.
+    fn on_main_cancelled_by<R: Send + 'static>(
+        &self,
+        deadline: Instant,
+        cancelled: Cancelled,
+        job: impl FnOnce(&Served, &mut App) -> R + Send + 'static,
+    ) -> Result<R, Error> {
+        let handoff = Handoff::cancelled_by(deadline, Some(Arc::clone(&cancelled)));
+        self.hand(&handoff, job)?;
+        handoff.wait_unless(Some(&*cancelled))
+    }
+
+    /// Hands `job` to the main thread, to run if `handoff` [starts](Handoff::start).
+    fn hand<R: Send + 'static>(
+        &self,
+        handoff: &Arc<Handoff<R>>,
+        job: impl FnOnce(&Served, &mut App) -> R + Send + 'static,
+    ) -> Result<(), Error> {
+        let theirs = Arc::clone(handoff);
         let sent = self.jobs.try_send(Box::new(move |served, cx| {
             if theirs.start() {
                 theirs.finish(job(served, cx));
             }
         }));
-        if sent.is_err() {
-            return Err(Error::Failed(
-                tr!("workbench-extensions-bridge-closed").into(),
-            ));
-        }
-        handoff.wait_unless(cancelled)
+        sent.map_err(|_| Error::Failed(tr!("workbench-extensions-bridge-closed").into()))
     }
 }
 
@@ -148,9 +186,12 @@ const CANCEL_CHECK: Duration = Duration::from_millis(25);
 /// The main thread doesn't start it once the deadline has passed or the
 /// plugin has stopped waiting; one it started before then runs to its end,
 /// as nothing on the main thread stops halfway, and what it returns is
-/// dropped if the plugin has stopped waiting.
+/// dropped if the plugin has stopped waiting. A background job's isn't started
+/// once the job is being stopped either.
 struct Handoff<R> {
     deadline: Instant,
+    /// A background job's: whether it is being stopped.
+    cancelled: Option<Cancelled>,
     slot: Mutex<Slot<R>>,
     done: Condvar,
 }
@@ -165,20 +206,28 @@ enum Slot<R> {
 
 impl<R> Handoff<R> {
     fn new(deadline: Instant) -> Arc<Self> {
+        Self::cancelled_by(deadline, None)
+    }
+
+    /// One the main thread doesn't start once `cancelled` turns true.
+    fn cancelled_by(deadline: Instant, cancelled: Option<Cancelled>) -> Arc<Self> {
         Arc::new(Self {
             deadline,
+            cancelled,
             slot: Mutex::new(Slot::Waiting),
             done: Condvar::new(),
         })
     }
 
     /// The main thread's side: whether to run the job, then to [`finish`]
-    /// it. Not once the plugin has stopped waiting or the deadline passed.
+    /// it. Not once the plugin has stopped waiting, the deadline passed, or
+    /// the background job it is for is being stopped.
     ///
     /// [`finish`]: Handoff::finish
     fn start(&self) -> bool {
         let mut slot = lock(&self.slot);
-        if !matches!(*slot, Slot::Waiting) || Instant::now() >= self.deadline {
+        let stopped = self.cancelled.as_ref().is_some_and(|stopped| stopped());
+        if !matches!(*slot, Slot::Waiting) || Instant::now() >= self.deadline || stopped {
             *slot = Slot::Abandoned;
             return false;
         }
@@ -499,11 +548,17 @@ impl Dispatcher for EditorCommands {
     }
 }
 
+/// Whether a plugin's background job is being stopped, which a wait on the main thread for it
+/// looks at.
+pub(crate) type Cancelled = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// One plugin's way to the open buffers.
 struct Buffers {
     bridge: Bridge,
     deadline: CallDeadline,
     fallback: Duration,
+    /// A background job's: the wait stops once it is being stopped.
+    cancelled: Option<Cancelled>,
 }
 
 impl Buffers {
@@ -512,7 +567,13 @@ impl Buffers {
         job: impl FnOnce(&mut App) -> R + Send + 'static,
     ) -> Result<R, Error> {
         let deadline = (self.deadline.get()).unwrap_or_else(|| Instant::now() + self.fallback);
-        self.bridge.on_main(deadline, move |_, cx| job(cx))
+        match &self.cancelled {
+            Some(cancelled) => {
+                (self.bridge)
+                    .on_main_cancelled_by(deadline, cancelled.clone(), move |_, cx| job(cx))
+            }
+            None => (self.bridge).on_main_unless(deadline, None, move |_, cx| job(cx)),
+        }
     }
 }
 
@@ -736,3 +797,40 @@ mod plugin_lsp;
 #[cfg(test)]
 #[path = "plugin_bridge_tests.rs"]
 mod plugin_bridge_tests;
+
+#[cfg(test)]
+mod cancelled_handoff_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    /// A background job's handoff, and the flag that stops the job.
+    fn handoff() -> (Arc<Handoff<()>>, Arc<AtomicBool>) {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stopped);
+        let cancelled: Cancelled = Arc::new(move || flag.load(Ordering::SeqCst));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        (Handoff::cancelled_by(deadline, Some(cancelled)), stopped)
+    }
+
+    #[test]
+    fn a_job_stopped_before_the_main_thread_comes_to_its_handoff_never_starts() {
+        // The job is stopped as its edit waits, and the main thread comes to the edit before
+        // the job's wait has looked again: the edit doesn't run.
+        let (handoff, stopped) = handoff();
+        stopped.store(true, Ordering::SeqCst);
+        assert!(!handoff.start(), "a stopped job's edit started");
+        // The job's wait then gives up, the edit unrun.
+        let flag = Arc::clone(&stopped);
+        let stopped = move || flag.load(Ordering::SeqCst);
+        assert!(handoff.wait_unless(Some(&stopped)).is_err());
+    }
+
+    #[test]
+    fn a_job_not_stopped_starts_its_handoff() {
+        let (handoff, _stopped) = handoff();
+        assert!(handoff.start());
+        handoff.finish(());
+        assert!(handoff.wait_unless(None).is_ok());
+    }
+}

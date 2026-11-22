@@ -309,7 +309,7 @@ fn a_file_run_reports_live_counts_and_finishes(cx: &mut TestAppContext) {
     project.run("runs.test_file");
     project.wait_until("the first result", |project| {
         let runs = project.runs();
-        let summary = runs.first().map(|run| run.summary);
+        let summary = runs.first().map(|run| run.summary.clone());
         summary
             == Some(RunSummary::Tests {
                 passed: 1,

@@ -276,6 +276,16 @@ pub struct State {
     attached: Option<Attached>,
 }
 
+/// One load of a plugin's diagnostics slice, which its interactive store and its worker stores
+/// share ([`State::shared`]). Clones share it.
+#[derive(Clone)]
+pub struct SharedLoad {
+    plugin: String,
+    grants: Grants,
+    store: DiagnosticStore,
+    load: u64,
+}
+
 struct Attached {
     plugin: String,
     grants: Grants,
@@ -300,6 +310,33 @@ impl State {
                 grants: grants.clone(),
                 load: store.attach(plugin),
                 store: store.clone(),
+                buffers,
+            }),
+        }
+    }
+
+    /// This load, as its worker stores' slices share it ([`State::worker`]); none for the
+    /// default.
+    pub fn shared(&self) -> Option<SharedLoad> {
+        let attached = self.attached.as_ref()?;
+        Some(SharedLoad {
+            plugin: attached.plugin.clone(),
+            grants: attached.grants.clone(),
+            store: attached.store.clone(),
+            load: attached.load,
+        })
+    }
+
+    /// A worker store's slice of `shared`'s load, over `buffers`. It attaches nothing: it
+    /// publishes and clears the load's sets as the load's own slice does, and nothing once the
+    /// plugin is unloaded or another load attached.
+    pub fn worker(shared: &SharedLoad, buffers: Box<dyn BufferVersions>) -> Self {
+        Self {
+            attached: Some(Attached {
+                plugin: shared.plugin.clone(),
+                grants: shared.grants.clone(),
+                store: shared.store.clone(),
+                load: shared.load,
                 buffers,
             }),
         }

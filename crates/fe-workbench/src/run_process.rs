@@ -97,7 +97,7 @@ pub enum Stream {
 }
 
 /// What a [`LineSink`] says of its run.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RunUpdate {
     /// How far along it is, from 0 to 1, if that's known.
     Progress(Option<f32>),
@@ -535,7 +535,7 @@ impl RunProcess {
                             }
                         }
                     }
-                    let (run, progress, summary) = (self.run, self.progress, self.summary);
+                    let (run, progress, summary) = (self.run, self.progress, self.summary.clone());
                     (self.runs)
                         .update(cx, |runs, cx| runs.update(run, progress, summary, cx))
                         .ok();

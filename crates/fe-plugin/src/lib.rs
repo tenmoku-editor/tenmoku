@@ -8,6 +8,9 @@
 //! and runs kiln's imports against kiln's own [`kiln_plugin::bindings::HostState`] and the
 //! `Host` impls its slices hold.
 //!
+//! A plugin with the `jobs` capability is checked against [`jobs_world`] instead: the editor
+//! world with kiln's jobs interfaces, its job handlers exported.
+//!
 //! As kiln does, it keeps one generated world per supported API minor: each released minor's
 //! frozen in `wit/released/<minor>/` beside kiln's, its world in a module of its own ([`v1_0`])
 //! over the current types. [`check`] checks a component against the world of the minor it needs.
@@ -50,6 +53,38 @@ pub mod v1_0 {
             "fastedit:editor": crate::fastedit::editor,
         },
     });
+}
+
+/// The `jobs-editor-extension` world of `wit/`: the current editor world with kiln's jobs
+/// interfaces, which a plugin with the `jobs` capability links and is checked against
+/// ([`check_jobs`]). Every interface but the jobs world's exports is the current one's.
+pub mod jobs_world {
+    wasmtime::component::bindgen!({
+        world: "fastedit:editor/jobs-editor-extension",
+        path: ["../../kiln/crates/kiln-plugin/wit", "wit"],
+        with: {
+            "kiln:extension/types": kiln_plugin::bindings::kiln::extension::types,
+            "kiln:extension/log": kiln_plugin::bindings::kiln::extension::log,
+            "kiln:extension/commands": kiln_plugin::bindings::kiln::extension::commands,
+            "kiln:extension/events": kiln_plugin::bindings::kiln::extension::events,
+            "kiln:extension/fs": kiln_plugin::bindings::kiln::extension::fs,
+            "kiln:extension/process": kiln_plugin::bindings::kiln::extension::process,
+            "kiln:extension/net": kiln_plugin::bindings::kiln::extension::net,
+            "kiln:extension/secrets": kiln_plugin::bindings::kiln::extension::secrets,
+            "kiln:extension/data": kiln_plugin::bindings::kiln::extension::data,
+            "kiln:extension/jobs": kiln_plugin::bindings::jobs_world::kiln::extension::jobs,
+            "kiln:extension/job-context":
+                kiln_plugin::bindings::jobs_world::kiln::extension::job_context,
+            "fastedit:editor": crate::fastedit::editor,
+        },
+    });
+}
+
+/// Checks that `pre`'s component, a plugin with the `jobs` capability, has every export the
+/// jobs editor world asks for, typed as it types them: those of [`check`]'s current world, and
+/// the jobs handlers. Only the current minor has jobs.
+pub fn check_jobs<T: 'static>(pre: &InstancePre<T>) -> wasmtime::Result<()> {
+    jobs_world::JobsEditorExtensionPre::new(pre.clone()).map(drop)
 }
 
 /// Checks that `pre`'s component has every export the editor world of `world`'s minor asks for,
@@ -96,7 +131,7 @@ mod tests {
     use wasmtime::component::{Component, Linker};
     use wasmtime::{Config, Engine};
 
-    use super::{HostState, add_to_linker, check};
+    use super::{HostState, add_to_linker, check, check_jobs};
 
     /// `wit/released/1.0/`'s digest, as 1.0 was released. It never changes.
     const FROZEN_1_0: &str = "87f7ae02c9c4a753f23e2432d9543d38c2d26037275022f9c567f5234f99224f";
@@ -153,5 +188,28 @@ mod tests {
         assert!(built_for_1_0.contains(export));
         let unhandled = built_for_1_0.replace(export, "(export \"unrelated\"");
         assert_eq!(checked(&unhandled), [false, false]);
+    }
+
+    #[test]
+    fn the_jobs_world_checks_a_jobs_plugins_exports() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../kiln/crates/kiln-plugin/tests/fixtures/jobs.wat");
+        let jobs = std::fs::read_to_string(path).unwrap();
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        let engine = Engine::new(&config).unwrap();
+        let mut linker = Linker::<HostState>::new(&engine);
+        add_to_linker(&mut linker).unwrap();
+        kiln_plugin::bindings::add_jobs_to_linker(&mut linker, |state| &mut state.kiln).unwrap();
+        let checks = |wat: &str| {
+            let component = Component::new(&engine, wat).unwrap();
+            let pre = linker.instantiate_pre(&component).unwrap();
+            check_jobs(&pre).is_ok()
+        };
+        assert!(checks(&jobs));
+        // Without its job handler it isn't a jobs plugin.
+        let export = "(export \"kiln:extension/job-handler@1.1.0\"";
+        assert!(jobs.contains(export));
+        assert!(!checks(&jobs.replace(export, "(export \"unrelated\"")));
     }
 }

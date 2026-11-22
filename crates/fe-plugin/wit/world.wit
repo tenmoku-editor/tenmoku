@@ -16,3 +16,18 @@ world editor-extension {
     import lsp;
     import status;
 }
+
+/// An editor plugin that runs background jobs: the editor world, with kiln's jobs interfaces, as
+/// `kiln:extension`'s `jobs-extension` adds them to `extension`. Its imports link only for a
+/// plugin with the `jobs` capability, and a plugin with it is checked against this world, so it
+/// exports both handlers. A job runs in a worker store, a second instance without `init`, whose
+/// editor imports work under the plugin's grants as the interactive instance's do.
+world jobs-editor-extension {
+    include editor-extension;
+
+    import kiln:extension/jobs@1.1.0;
+    import kiln:extension/job-context@1.1.0;
+
+    export kiln:extension/job-runner@1.1.0;
+    export kiln:extension/job-handler@1.1.0;
+}

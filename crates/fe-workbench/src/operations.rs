@@ -284,7 +284,7 @@ fn running(runs: &Runs) -> Vec<Operation> {
                 detail: None,
                 fraction: clamp(progress),
                 source: OperationSource::Run(run.id),
-                started: run.started,
+                started: run.since(),
             })
         })
         .collect();

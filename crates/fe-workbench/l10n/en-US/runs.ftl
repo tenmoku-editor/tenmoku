@@ -25,6 +25,15 @@ workbench-runs-status-running-progress = Running, { $percent }% done
 workbench-runs-status-passed = Passed
 workbench-runs-status-failed = Failed
 workbench-runs-status-cancelled = Cancelled
+# A plugin's background job that ran past its time limit and was stopped.
+workbench-runs-status-timed-out = Timed out
+
+## What a queued run waits for: its status, and its summary until it starts
+
+# A plugin's background job waits for one of the jobs running to end.
+workbench-runs-waiting-concurrency = Waiting for another job
+# It waits for the jobs running to free memory.
+workbench-runs-waiting-memory = Waiting for memory
 
 ## A run's one-line summary
 
@@ -35,6 +44,8 @@ workbench-runs-summary-passed = Done
 # It ended with no exit code: a signal stopped it, or it couldn't start.
 workbench-runs-summary-no-code = Stopped without an exit code
 workbench-runs-summary-cancelled = Cancelled
+# A plugin's background job ran past its time limit and was stopped.
+workbench-runs-summary-timed-out = Timed out
 # $code is the exit code it ended with.
 workbench-runs-summary-exit = Exited with code { $code }
 # A test run's counts so far, before the total's known.
@@ -87,3 +98,8 @@ workbench-runs-age-name-days = { $count ->
 # A row's accessible name: the run's title, its status and its age, each
 # as above.
 workbench-runs-row-name = { $title }, { $status }, { $age }
+
+## A queued or running run's Cancel button, at its row's right
+
+# Its accessible name and tooltip. $title is the run's title.
+workbench-runs-cancel = Cancel { $title }
