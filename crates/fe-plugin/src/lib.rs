@@ -16,7 +16,7 @@
 //! over the current types. [`check`] checks a component against the world of the minor it needs.
 //!
 //! [`HostState`] wraps that state with one `State` per editor slice, each defined in its module
-//! (`editor`, `decorations`, `diagnostics`, `formatting`, `lsp`, `status`) beside its `Host` impl. A slice whose card has not landed
+//! (`editor`, `decorations`, `diagnostics`, `formatting`, `lsp`, `panels`, `status`) beside its `Host` impl. A slice whose card has not landed
 //! answers every call with [`kiln_plugin::bindings::unimplemented`].
 
 pub mod decorations;
@@ -25,6 +25,7 @@ pub mod editor;
 pub mod formatting;
 pub mod lsp;
 pub mod net;
+pub mod panels;
 pub mod status;
 
 use kiln_plugin::compat::World;
@@ -106,6 +107,7 @@ pub struct HostState {
     pub diagnostics: diagnostics::State,
     pub formatting: formatting::State,
     pub lsp: lsp::State,
+    pub panels: panels::State,
     pub status: status::State,
 }
 
@@ -117,6 +119,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     fastedit::editor::diagnostics::add_to_linker::<_, HasSelf<HostState>>(linker, |state| state)?;
     fastedit::editor::formatting::add_to_linker::<_, HasSelf<HostState>>(linker, |state| state)?;
     fastedit::editor::lsp::add_to_linker::<_, HasSelf<HostState>>(linker, |state| state)?;
+    fastedit::editor::panels::add_to_linker::<_, HasSelf<HostState>>(linker, |state| state)?;
     fastedit::editor::status::add_to_linker::<_, HasSelf<HostState>>(linker, |state| state)
 }
 

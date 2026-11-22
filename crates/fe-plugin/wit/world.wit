@@ -14,6 +14,7 @@ world editor-extension {
     import diagnostics;
     import formatting;
     import lsp;
+    import panels;
     import status;
 }
 

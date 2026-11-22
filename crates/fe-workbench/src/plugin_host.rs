@@ -1988,6 +1988,7 @@ impl LoadContext {
             diagnostics: self.paint.diagnostics(id, grants, checked),
             formatting: formatters,
             status: self.paint.status(id, grants),
+            panels: fe_plugin::panels::State::default(),
             lsp: {
                 let (dir, declared) = own_servers(id);
                 fe_plugin::lsp::State::new(
@@ -2112,6 +2113,7 @@ impl LoadContext {
                     .map(|load| fe_plugin::diagnostics::State::worker(load, versions()))
                     .unwrap_or_default(),
                 formatting: fe_plugin::formatting::State::default(),
+                panels: fe_plugin::panels::State::default(),
                 status: (shared.status.as_ref())
                     .map(fe_plugin::status::State::worker)
                     .unwrap_or_default(),

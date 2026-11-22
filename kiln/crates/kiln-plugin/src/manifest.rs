@@ -37,6 +37,7 @@ pub fn plugin_kind() -> AppKind {
                 "wasm": { "type": "string" },
                 "capabilities": { "type": "array", "items": { "type": "string" } },
                 "signature": { "type": "string" },
+                "panels": { "type": "array", "items": { "type": "object" } },
                 "background": {
                     "type": "object",
                     "properties": {
@@ -98,6 +99,10 @@ pub enum PluginManifestError {
         path: String,
         reason: WasmPathError,
     },
+    Panel {
+        id: String,
+        reason: PanelError,
+    },
 }
 
 /// In the active locale.
@@ -132,6 +137,11 @@ impl std::fmt::Display for PluginManifestError {
                 "kiln-plugin-manifest-capability",
                 id = id,
                 reason = source.to_string()
+            ),
+            Self::Panel { id, reason } => tr!(
+                "kiln-plugin-manifest-panel",
+                id = id,
+                reason = reason.to_string()
             ),
             Self::WasmPath { id, path, reason } => tr!(
                 "kiln-plugin-manifest-wasm-path",
@@ -238,6 +248,101 @@ impl std::fmt::Display for WasmPathError {
     }
 }
 
+/// Panels one plugin may declare.
+pub const MAX_PANELS: usize = 8;
+
+/// Where a panel's dock is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelLocation {
+    Left,
+    Right,
+    Bottom,
+}
+
+/// A panel a plugin declares in `[[contributes.plugin.panels]]`: the panel is
+/// `<plugin id>.<id>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PanelDecl {
+    /// Unique among the plugin's panels: ASCII letters, digits, `-` and `_`.
+    pub id: String,
+    /// The title the dock shows.
+    pub title: String,
+    /// A name in the app's icon set.
+    pub icon: String,
+    /// The `dock` key: `left`, `right` or `bottom`.
+    pub location: PanelLocation,
+}
+
+/// Why a `[[contributes.plugin.panels]]` entry is refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PanelError {
+    NotATable,
+    Missing(&'static str),
+    NotAString(&'static str),
+    Empty(&'static str),
+    UnknownKey(String),
+    BadId(String),
+    BadDock(String),
+    Duplicate(String),
+    TooMany,
+}
+
+/// In the active locale.
+impl std::fmt::Display for PanelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&match self {
+            Self::NotATable => tr!("kiln-plugin-panel-not-a-table"),
+            Self::Missing(key) => tr!("kiln-plugin-panel-missing", key = *key),
+            Self::NotAString(key) => tr!("kiln-plugin-panel-not-a-string", key = *key),
+            Self::Empty(key) => tr!("kiln-plugin-panel-empty", key = *key),
+            Self::UnknownKey(key) => tr!("kiln-plugin-panel-unknown-key", key = key.as_str()),
+            Self::BadId(id) => tr!("kiln-plugin-panel-bad-id", panel = format!("{id:?}")),
+            Self::BadDock(dock) => tr!("kiln-plugin-panel-bad-dock", dock = format!("{dock:?}")),
+            Self::Duplicate(id) => tr!("kiln-plugin-panel-duplicate", panel = format!("{id:?}")),
+            Self::TooMany => tr!("kiln-plugin-panel-too-many", max = MAX_PANELS),
+        })
+    }
+}
+
+fn panel_decl(entry: &Value) -> Result<PanelDecl, PanelError> {
+    let Value::Table(table) = entry else {
+        return Err(PanelError::NotATable);
+    };
+    if let Some(key) = table
+        .keys()
+        .find(|key| !matches!(key.as_str(), "id" | "title" | "icon" | "dock"))
+    {
+        return Err(PanelError::UnknownKey(key.clone()));
+    }
+    let string = |key: &'static str, default: Option<&str>| match table.get(key) {
+        Some(Value::String(text)) if text.trim().is_empty() => Err(PanelError::Empty(key)),
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(_) => Err(PanelError::NotAString(key)),
+        None => default.map(str::to_owned).ok_or(PanelError::Missing(key)),
+    };
+    let id = string("id", None)?;
+    if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(PanelError::BadId(id));
+    }
+    let title = string("title", None)?;
+    let icon = string("icon", None)?;
+    let location = match string("dock", Some("left"))?.as_str() {
+        "left" => PanelLocation::Left,
+        "right" => PanelLocation::Right,
+        "bottom" => PanelLocation::Bottom,
+        other => return Err(PanelError::BadDock(other.to_owned())),
+    };
+    Ok(PanelDecl {
+        id,
+        title,
+        icon,
+        location,
+    })
+}
+
 /// A plugin's checked manifest entry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginManifest {
@@ -254,6 +359,8 @@ pub struct PluginManifest {
     /// What `[contributes.plugin.background]` declares, over the defaults. As declared: the
     /// host's [`Ceilings`] clamp it where it is used.
     pub background: BackgroundLimits,
+    /// The panels `[[contributes.plugin.panels]]` declares, in order.
+    pub panels: Vec<PanelDecl>,
     /// Notes on capabilities that were accepted but are better written
     /// another way, such as `process.spawn:rg.exe`.
     pub warnings: Vec<String>,
@@ -361,6 +468,32 @@ impl PluginManifest {
                 });
             }
         }
+        let mut panels: Vec<PanelDecl> = Vec::new();
+        match entry.get("panels") {
+            None => {}
+            Some(Value::Array(items)) => {
+                let fail = |reason| PluginManifestError::Panel {
+                    id: id.clone(),
+                    reason,
+                };
+                for item in items {
+                    let panel = panel_decl(item).map_err(fail)?;
+                    if panels.iter().any(|other| other.id == panel.id) {
+                        return Err(fail(PanelError::Duplicate(panel.id)));
+                    }
+                    panels.push(panel);
+                }
+                if panels.len() > MAX_PANELS {
+                    return Err(fail(PanelError::TooMany));
+                }
+            }
+            Some(_) => {
+                return Err(PluginManifestError::Panel {
+                    id: id.clone(),
+                    reason: PanelError::NotATable,
+                });
+            }
+        }
         Ok(Some(Self {
             id: manifest.id.clone(),
             name: manifest.name.clone(),
@@ -369,6 +502,7 @@ impl PluginManifest {
             capabilities,
             signature,
             background,
+            panels,
             warnings,
         }))
     }
@@ -447,4 +581,56 @@ fn wasm_file(dir: &Path, entry: &str) -> Result<PathBuf, WasmPathError> {
         return Err(WasmPathError::NotAFile);
     }
     Ok(canonical)
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+
+    fn parse(text: &str) -> Result<PanelDecl, PanelError> {
+        panel_decl(&Value::Table(text.parse::<toml::Table>().unwrap()))
+    }
+
+    #[test]
+    fn a_panel_declares_id_title_icon_and_location() {
+        let panel =
+            parse("id = \"todos\"\ntitle = \"TODOs\"\nicon = \"list-checks\"\ndock = \"bottom\"")
+                .unwrap();
+        assert_eq!(
+            panel,
+            PanelDecl {
+                id: "todos".into(),
+                title: "TODOs".into(),
+                icon: "list-checks".into(),
+                location: PanelLocation::Bottom,
+            }
+        );
+        // The dock defaults to the left.
+        let panel = parse("id = \"a_b-1\"\ntitle = \"A\"\nicon = \"x\"").unwrap();
+        assert_eq!(panel.location, PanelLocation::Left);
+    }
+
+    #[test]
+    fn a_malformed_panel_is_refused() {
+        assert_eq!(
+            parse("title = \"T\"\nicon = \"x\""),
+            Err(PanelError::Missing("id"))
+        );
+        assert_eq!(
+            parse("id = \"a b\"\ntitle = \"T\"\nicon = \"x\""),
+            Err(PanelError::BadId("a b".into()))
+        );
+        assert_eq!(
+            parse("id = \"a\"\ntitle = \"T\"\nicon = \"x\"\ndock = \"top\""),
+            Err(PanelError::BadDock("top".into()))
+        );
+        assert_eq!(
+            parse("id = \"a\"\ntitle = \"T\"\nicon = \"x\"\nsize = 3"),
+            Err(PanelError::UnknownKey("size".into()))
+        );
+        assert_eq!(
+            parse("id = \"a\"\ntitle = \" \"\nicon = \"x\""),
+            Err(PanelError::Empty("title"))
+        );
+    }
 }

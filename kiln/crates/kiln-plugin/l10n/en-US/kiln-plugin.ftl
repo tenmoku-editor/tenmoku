@@ -95,6 +95,20 @@ kiln-plugin-background-memory-clamped = { $id }: background memory of { $declare
 # `$declared` and `$ceiling` are whole minutes.
 kiln-plugin-background-wall-clamped = { $id }: background wall time of { $declared } min is past what this computer allows, so jobs get { $ceiling } min
 kiln-plugin-manifest-capability = { $id }: { $reason }
+# `$reason` is one of the kiln-plugin-panel-* messages below.
+kiln-plugin-manifest-panel = { $id }: [[contributes.plugin.panels]]: { $reason }
+kiln-plugin-panel-not-a-table = each entry must be a table
+# `$key` is a key of a panel entry.
+kiln-plugin-panel-missing = a panel needs a `{ $key }`
+kiln-plugin-panel-not-a-string = panel `{ $key }` must be a string
+kiln-plugin-panel-empty = panel `{ $key }` must not be empty
+kiln-plugin-panel-unknown-key = unknown key `{ $key }`
+# `$panel` is the panel id, quoted.
+kiln-plugin-panel-bad-id = panel id { $panel } must be ASCII letters, digits, `-` and `_`
+# `$dock` is the value, quoted.
+kiln-plugin-panel-bad-dock = panel dock { $dock } must be left, right or bottom
+kiln-plugin-panel-duplicate = panel { $panel } is declared twice
+kiln-plugin-panel-too-many = a plugin may declare at most { $max } panels
 # `$path` is the `wasm` path, quoted; `$reason` one of the messages below.
 kiln-plugin-manifest-wasm-path = { $id }: wasm path { $path }: { $reason }
 kiln-plugin-wasm-path-empty = the path is empty
