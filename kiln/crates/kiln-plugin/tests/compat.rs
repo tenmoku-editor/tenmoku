@@ -7,6 +7,7 @@ use std::sync::{
     Arc,
     mpsc::{self, Receiver},
 };
+use std::time::Duration;
 
 use kiln_command::{Capability, Grants};
 use kiln_core::ApiVersion;
@@ -169,7 +170,10 @@ fn load(
         component.as_bytes(),
         PLUGIN,
         &grants,
-        Limits::default(),
+        Limits {
+            call_deadline: Duration::from_secs(10),
+            ..Limits::default()
+        },
         state,
         compat,
         needed,
