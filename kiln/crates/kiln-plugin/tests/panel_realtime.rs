@@ -7,7 +7,7 @@
 //! The refusal is a *manifest* refusal, not a runtime one. That is deliberate
 //! and worth saying out loud, because it differs from `panels` itself:
 //! `Capability::Panels` is checked when the guest calls the host
-//! (`fe_plugin::panels`), not when the manifest is read, since showing a panel
+//! (by the app's panel host), not when the manifest is read, since showing a panel
 //! is an operation. `tick_ms` and `keys` are not operations - they are static
 //! declarations that commit the host to running a timer and routing keys - so
 //! a manifest that asks for them without the capability is wrong on its face
