@@ -64,6 +64,9 @@ fn variables_events(harness: &Harness) -> Vec<(crate::session::StopRef, Vec<Stri
 fn a_step_without_continued_runs_on_its_response() {
     let script = Script {
         continued_events: false,
+        // The `next` is answered, and the new stop sent, only when the
+        // test lets it go, so the Resuming reads below can't race them.
+        faults: vec![Fault::new("next", FaultKind::ReplyAfter(Trigger::Manual))],
         ..Script::default()
     };
     let mut harness = start_stopped(script);
@@ -86,6 +89,15 @@ fn a_step_without_continued_runs_on_its_response() {
         async_io::block_on(harness.session.variables(old_locals)),
         Err(stale("variables"))
     );
+    // Still Resuming: the adapter has not answered.
+    wait_requests(&fake, "next", 1);
+    round_trip(&harness);
+    assert_eq!(harness.session.state(), SessionState::Resuming);
+    assert_eq!(
+        harness.session.controls().step,
+        Control::Disabled(Disabled::Resuming)
+    );
+    fake.release();
 
     harness.wait_state_times("the step's stop", 2, |state| {
         *state == SessionState::Stopped
