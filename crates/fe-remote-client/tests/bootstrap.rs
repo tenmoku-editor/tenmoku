@@ -108,6 +108,7 @@ fn earlier_builds(host: &Host, dirs: &[&str]) {
 fn earlier_builds_aged(host: &Host, dirs: &[&str], hours: &[u64]) {
     let now = SystemTime::now();
     for (dir, &age) in dirs.iter().zip(hours) {
+        let dir = &host.unique(dir);
         host.install(dir, SERVER);
         let server = host.server(dir);
         std::fs::write(server.with_file_name("build"), format!("{dir}\n")).unwrap();
@@ -120,7 +121,7 @@ fn earlier_builds_aged(host: &Host, dirs: &[&str], hours: &[u64]) {
 /// Holds `build`'s daemon lock under HOME, as its daemon would, with `pid`
 /// written in it.
 fn hold_lock(host: &Host, build: &str, pid: Option<u32>) -> std::fs::File {
-    let paths = tenmoku_server::Paths::new(build, None, Some(&host.home())).unwrap();
+    let paths = tenmoku_server::Paths::new(&host.unique(build), None, Some(&host.home())).unwrap();
     paths.secure().unwrap();
     let mut lock = paths.take_lock().unwrap().unwrap();
     if let Some(pid) = pid {
@@ -142,6 +143,9 @@ fn install(host: &Host, new: &str, env: &[(&str, OsString)]) {
 
 fn installs(host: &Host) -> Vec<String> {
     entries(&host.cache().join("tenmoku-server"))
+        .iter()
+        .map(|name| host.plain(name).to_string())
+        .collect()
 }
 
 #[test]
@@ -274,7 +278,7 @@ fn pruning_skips_a_build_whose_daemon_lock_is_held_in_the_runtime_dir() {
     let runtime = host.dir.path().join("run");
     std::fs::create_dir(&runtime).unwrap();
     set_mode(&runtime, 0o700);
-    let paths = tenmoku_server::Paths::new("old-2", Some(&runtime), None).unwrap();
+    let paths = tenmoku_server::Paths::new(&host.unique("old-2"), Some(&runtime), None).unwrap();
     paths.secure().unwrap();
     let mut lock = paths.take_lock().unwrap().unwrap();
     writeln!(lock, "{}", std::process::id()).unwrap();
@@ -290,7 +294,8 @@ fn pruning_keeps_a_build_whose_lock_file_is_left() {
     // A lock left by a daemon that has exited: nothing sh can see shows it
     // free, so it may be a daemon's on its way up.
     let pid = dead_pid();
-    let paths = tenmoku_server::Paths::new("old-1", None, Some(&host.home())).unwrap();
+    let paths =
+        tenmoku_server::Paths::new(&host.unique("old-1"), None, Some(&host.home())).unwrap();
     paths.secure().unwrap();
     std::fs::write(&paths.lock, format!("{pid}\n")).unwrap();
     install(&host, "new", &[]);
@@ -304,7 +309,7 @@ fn pruning_removes_a_build_once_its_runtime_dir_is_cleared() {
     let runtime = host.dir.path().join("run");
     std::fs::create_dir(&runtime).unwrap();
     set_mode(&runtime, 0o700);
-    let paths = tenmoku_server::Paths::new("old-1", Some(&runtime), None).unwrap();
+    let paths = tenmoku_server::Paths::new(&host.unique("old-1"), Some(&runtime), None).unwrap();
     paths.secure().unwrap();
     std::fs::write(&paths.lock, "1\n").unwrap();
     // The user's last session ended: the runtime dir goes, locks and all.
@@ -338,8 +343,9 @@ fn pruning_keeps_a_build_whose_held_lock_names_a_dead_pid() {
 fn a_dev_install_is_pruned_by_the_build_its_daemon_has() {
     let host = Host::new();
     earlier_builds(&host, &["dev-0123456789ab", "old-2", "old-3", "old-4"]);
-    let dev = host.cache().join("tenmoku-server/dev-0123456789ab/build");
-    std::fs::write(dev, "1.0.0+abc-dirty\n").unwrap();
+    let dev = host.server(&host.unique("dev-0123456789ab"));
+    let dirty = host.unique("1.0.0+abc-dirty");
+    std::fs::write(dev.with_file_name("build"), format!("{dirty}\n")).unwrap();
     let lock = hold_lock(&host, "1.0.0+abc-dirty", Some(std::process::id()));
     install(&host, "new", &[]);
     assert_eq!(
@@ -378,7 +384,7 @@ fn pruning_keeps_a_build_whose_held_lock_has_no_pid_yet() {
 fn pruning_keeps_an_install_whose_build_is_unknown() {
     let host = Host::new();
     earlier_builds(&host, &["old-1", "old-2", "old-3", "old-4"]);
-    std::fs::remove_file(host.server("old-1").with_file_name("build")).unwrap();
+    std::fs::remove_file(host.server(&host.unique("old-1")).with_file_name("build")).unwrap();
     install(&host, "new", &[]);
     assert_eq!(installs(&host), ["new", "old-1", "old-3", "old-4"]);
 }

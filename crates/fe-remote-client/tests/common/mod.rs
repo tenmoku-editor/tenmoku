@@ -40,12 +40,33 @@ pub struct Host {
 impl Host {
     pub fn new() -> Host {
         let host = Host {
-            dir: tempfile::tempdir().unwrap(),
+            // Under /tmp, not TMPDIR: a long TMPDIR (macOS's) would push the
+            // daemon's socket past SOCKET_PATH_MAX and the lock files onto
+            // the shared /tmp/tenmoku-server-<uid>/ fallback.
+            dir: tempfile::Builder::new().tempdir_in("/tmp").unwrap(),
         };
         for dir in [host.home(), host.cache(), host.askpass_dir()] {
             std::fs::create_dir_all(dir).unwrap();
         }
         host
+    }
+
+    /// `name` made unique to this host: the daemon lock the script looks
+    /// for is named by build, and a build's name must not meet another
+    /// test's (or an earlier run's) lock.
+    pub fn unique(&self, name: &str) -> String {
+        format!("{name}-{}", self.tag())
+    }
+
+    /// Strips what `unique` added.
+    pub fn plain<'a>(&self, name: &'a str) -> &'a str {
+        name.strip_suffix(&format!("-{}", self.tag()))
+            .unwrap_or(name)
+    }
+
+    fn tag(&self) -> String {
+        let name = self.dir.path().file_name().unwrap().to_string_lossy();
+        name.trim_start_matches('.').to_string()
     }
 
     pub fn home(&self) -> PathBuf {

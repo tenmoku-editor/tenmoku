@@ -24,7 +24,10 @@ use tenmoku_server::{Config, FS_WORKERS, Hosts, serve};
 /// A client of a server run in this process, and a project folder.
 struct Fixture {
     client: Mux,
-    dir: TempDir,
+    _dir: TempDir,
+    /// `dir`'s canonical path: the project opens roots without following
+    /// symlinks, and a temp dir may sit behind one (macOS's /var).
+    root: PathBuf,
 }
 
 impl Fixture {
@@ -36,14 +39,17 @@ impl Fixture {
         let (client_end, server_end) = Link::pipe().unwrap();
         thread::spawn(move || serve(server_end, config));
         let (client, _) = common::handshake(client_end, common::client_config(), None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
         Fixture {
             client,
-            dir: tempfile::tempdir().unwrap(),
+            _dir: dir,
+            root,
         }
     }
 
     fn root(&self) -> &Path {
-        self.dir.path()
+        &self.root
     }
 
     fn at(&self, rel: &str) -> PathBuf {
@@ -172,7 +178,9 @@ fn a_read_of_a_missing_file_ends_with_not_found() {
 fn a_plain_read_outside_the_project_is_served() {
     let fx = Fixture::new();
     let elsewhere = tempfile::tempdir().unwrap();
-    let path = elsewhere.path().join("notes.txt");
+    let path = std::fs::canonicalize(elsewhere.path())
+        .unwrap()
+        .join("notes.txt");
     std::fs::write(&path, "outside").unwrap();
     let (data, status) = fx.call(&FsOp::Read { path: wire(&path) });
     assert_eq!(status, Status::Ok);

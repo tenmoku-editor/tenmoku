@@ -39,6 +39,7 @@ fn only(dir: &Path, tools: &[&str]) -> PathBuf {
 /// three earlier builds so it prunes: stdout, and whether it succeeded.
 fn install_with_path(host: &Host, path: &Path) -> (String, bool) {
     for (i, old) in ["old-1", "old-2", "old-3"].iter().enumerate() {
+        let old = &host.unique(old);
         host.install(old, b"#!/bin/sh\n");
         std::fs::write(host.server(old).with_file_name("build"), format!("{old}\n")).unwrap();
         let file = std::fs::File::options()
@@ -82,6 +83,7 @@ fn installs(host: &Host) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(host.cache().join("tenmoku-server"))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .map(|name| host.plain(&name).to_string())
         .collect();
     names.sort();
     names
