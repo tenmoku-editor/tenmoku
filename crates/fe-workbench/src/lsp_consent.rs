@@ -283,7 +283,26 @@ pub(crate) fn package_hash_limited(
     max_file_bytes: u64,
 ) -> String {
     package_hash_of(dir, max_entries, max_bytes, max_file_bytes)
-        .unwrap_or_else(|| PACKAGE_INCOMPLETE.to_owned())
+        .unwrap_or_else(|_| PACKAGE_INCOMPLETE.to_owned())
+}
+
+/// [`package_hash`], or why the package can't be read whole: the path and
+/// what stopped the walk there.
+pub(crate) fn package_hash_or_why(dir: &Path) -> io::Result<String> {
+    package_hash_of(
+        dir,
+        PACKAGE_MAX_FILES,
+        PACKAGE_MAX_BYTES,
+        PACKAGE_MAX_FILE_BYTES,
+    )
+}
+
+/// `error` on `path`, as an error naming the path; its kind kept.
+pub(crate) fn on_path(path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{}{}{error}", path.display(), verbatim!(": ")),
+    )
 }
 
 fn package_hash_of(
@@ -291,15 +310,15 @@ fn package_hash_of(
     max_entries: usize,
     max_bytes: u64,
     max_file_bytes: u64,
-) -> Option<String> {
+) -> io::Result<String> {
+    let past = |path: &Path, limit: &str| on_path(path, io::Error::other(limit.to_owned()));
     let mut hasher = Sha256::new();
     let (mut seen, mut bytes) = (0usize, 0u64);
     let mut stack = vec![(dir.to_path_buf(), PathBuf::new())];
     while let Some((path, rel)) = stack.pop() {
         let mut entries = fs::read_dir(&path)
-            .ok()?
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?;
+            .and_then(|entries| entries.collect::<Result<Vec<_>, _>>())
+            .map_err(|error| on_path(&path, error))?;
         entries.sort_by_key(|entry| os_bytes(&entry.file_name()));
         // Pushed in reverse so the walk visits them in sorted order.
         let mut subdirs = Vec::new();
@@ -308,14 +327,18 @@ fn package_hash_of(
             // package it truncates is one that's refused here.
             seen += 1;
             if seen > max_entries {
-                return None;
+                return Err(past(
+                    &path,
+                    verbatim!("past the most entries a package may have"),
+                ));
             }
+            let at = entry.path();
             let rel = rel.join(entry.file_name());
             let rel_bytes = os_bytes(rel.as_os_str());
-            let meta = fs::symlink_metadata(entry.path()).ok()?;
+            let meta = fs::symlink_metadata(&at).map_err(|error| on_path(&at, error))?;
             let kind = meta.file_type();
             if kind.is_symlink() {
-                let target = fs::read_link(entry.path()).ok()?;
+                let target = fs::read_link(&at).map_err(|error| on_path(&at, error))?;
                 feed(
                     &mut hasher,
                     b'l',
@@ -323,13 +346,22 @@ fn package_hash_of(
                 );
             } else if kind.is_dir() {
                 feed(&mut hasher, b'd', &[&rel_bytes]);
-                subdirs.push((entry.path(), rel));
+                subdirs.push((at, rel));
             } else if kind.is_file() {
                 bytes = bytes.saturating_add(meta.len());
-                if meta.len() > max_file_bytes || bytes > max_bytes {
-                    return None;
+                if meta.len() > max_file_bytes {
+                    return Err(past(
+                        &at,
+                        verbatim!("past the most bytes a package's file may have"),
+                    ));
                 }
-                let hash = hash_file(&entry.path())?;
+                if bytes > max_bytes {
+                    return Err(past(
+                        &at,
+                        verbatim!("past the most bytes a package may have"),
+                    ));
+                }
+                let hash = hash_file_or_why(&at).map_err(|error| on_path(&at, error))?;
                 feed(
                     &mut hasher,
                     b'f',
@@ -337,12 +369,12 @@ fn package_hash_of(
                 );
             } else {
                 // A socket, device or the like: not something to grant.
-                return None;
+                return Err(past(&at, verbatim!("not a file, directory or symlink")));
             }
         }
         stack.extend(subdirs.into_iter().rev());
     }
-    Some(format!("{:x}", hasher.finalize()))
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// The execute bits of a file (user, group, other), which decide whether it
@@ -409,10 +441,14 @@ fn name_in_package(live: &Path, name: &str, alias: bool) -> Option<PathBuf> {
 
 /// The SHA-256 of the file at `path`, in hex.
 fn hash_file(path: &Path) -> Option<String> {
-    let mut file = fs::File::open(path).ok()?;
+    hash_file_or_why(path).ok()
+}
+
+fn hash_file_or_why(path: &Path) -> io::Result<String> {
+    let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher).ok()?;
-    Some(format!("{:x}", hasher.finalize()))
+    io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// A server waiting for the user's decision.
@@ -603,6 +639,9 @@ fn private(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
 struct Evaluated {
     server: ExtensionServer,
     invocation: Invocation,
+    /// Why its package couldn't be snapshotted, when it couldn't: the step,
+    /// the path and the error, as logged.
+    unsnapshotted: Option<String>,
 }
 
 impl Evaluated {
@@ -752,11 +791,31 @@ pub(crate) fn running_extension_servers(cx: &App) -> Vec<Key> {
 /// later sessions, and starts it, restarting what ran before it. Each
 /// launch checks it still runs that ([`ConsentGate`]). The decision is
 /// written to the consent file before this returns, and holds for this
-/// session even if that write fails, which is returned.
+/// session even if that write fails, which is returned. One whose package
+/// couldn't be snapshotted is refused with [`io::ErrorKind::InvalidData`],
+/// the error saying why, as the evaluation logged it.
 pub fn grant_extension_server(cx: &mut App, pending: &PendingConsent) -> io::Result<()> {
     if pending.invocation.package_hash == PACKAGE_INCOMPLETE {
         // The whole package couldn't be read: nothing complete to consent to.
-        return Err(io::ErrorKind::InvalidData.into());
+        let key = (pending.extension_dir.clone(), pending.server.clone());
+        let why = cx
+            .try_global::<ExtensionConsent>()
+            .and_then(|state| {
+                state.evaluated.iter().find(|evaluated| {
+                    evaluated.key() == key && evaluated.invocation == pending.invocation
+                })
+            })
+            .and_then(|evaluated| evaluated.unsnapshotted.clone())
+            .unwrap_or_else(|| verbatim!("the package can't be read whole").to_owned());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}{}{}{why}",
+                verbatim!("can't snapshot the package of "),
+                pending.extension_id,
+                verbatim!(": ")
+            ),
+        ));
     }
     decide(cx, pending, Decision::Granted)
 }
@@ -849,13 +908,16 @@ fn evaluation(
                 Some(store) => store.snapshot(&server.extension_dir),
                 None => Err(io::Error::other(verbatim!("no snapshot store"))),
             };
-            let invocation = match snapshot {
-                Ok((hash, snapshot)) => Invocation::read_from(
-                    &server.spec,
-                    command.unwrap_or_else(|| server.spec.command.clone()),
-                    &server.extension_dir,
-                    &snapshot,
-                    hash,
+            let (invocation, unsnapshotted) = match snapshot {
+                Ok((hash, snapshot)) => (
+                    Invocation::read_from(
+                        &server.spec,
+                        command.unwrap_or_else(|| server.spec.command.clone()),
+                        &server.extension_dir,
+                        &snapshot,
+                        hash,
+                    ),
+                    None,
                 ),
                 Err(error) => {
                     log::warn!(
@@ -864,13 +926,18 @@ fn evaluation(
                         server.spec.name
                     );
                     // Never granted, so it never runs.
-                    Invocation {
+                    let invocation = Invocation {
                         package_hash: PACKAGE_INCOMPLETE.to_owned(),
                         ..Invocation::of(&server.spec, &server.extension_dir, command.as_deref())
-                    }
+                    };
+                    (invocation, Some(error.to_string()))
                 }
             };
-            Evaluated { server, invocation }
+            Evaluated {
+                server,
+                invocation,
+                unsnapshotted,
+            }
         })
         .collect();
     let mut intact = HashMap::new();

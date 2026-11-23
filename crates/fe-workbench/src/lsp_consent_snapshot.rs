@@ -12,7 +12,12 @@
 //!   hard linked: an in-place rewrite of an installed file would change the
 //!   snapshot) into a `.staging-*` directory, hashed from the copy, made
 //!   read-only, and only then renamed to its hash, so a directory with a
-//!   hash's name is always finished. A symlink is copied as one, unfollowed;
+//!   hash's name is finished once it is read-only. Its own write bits are
+//!   cleared last, after the rename, as macOS 15 doesn't rename a directory
+//!   its owner can't write. The publisher holds `<hash>.publishing.lock`
+//!   exclusively from before the rename to after that, and a check that
+//!   finds the snapshot unfinished waits on it and checks again, so only
+//!   one a crash left there stays unfinished. A symlink is copied as one, unfollowed;
 //!   one reaching back into the live directory makes the package not
 //!   snapshottable, checked on every evaluation, reuse included. A reused
 //!   snapshot is hashed again and checked read-only; a damaged one is
@@ -37,13 +42,48 @@ use std::{
 
 use kiln_l10n::verbatim;
 
-use crate::lsp_consent::{ConsentStore, Decision, PACKAGE_INCOMPLETE, package_hash};
+use crate::lsp_consent::{ConsentStore, Decision, on_path, package_hash_or_why};
 
 /// The store's directory beside the consent file.
 const STORE_DIR: &str = "extensions-lsp-packages";
 const STAGING: &str = ".staging-";
 /// A lock file's suffix.
 const LOCK: &str = verbatim!(".lock");
+/// What a hash's name has after it in the name of the lock its publisher
+/// holds while the snapshot is renamed but not yet read-only.
+const PUBLISHING: &str = verbatim!(".publishing");
+
+/// The steps of making a snapshot, as a failure names them: checking the
+/// live package's links, hashing it, reusing a snapshot found, taking a
+/// lock, making the staging directory, copying into it, publishing the
+/// copy (hashed and made read-only) and renaming it to its hash.
+const CHECK: &str = "check";
+const HASH: &str = "hash";
+const REUSE: &str = "reuse";
+const LOCKING: &str = "lock";
+const STAGE: &str = "stage";
+const COPY: &str = "copy";
+const PUBLISH: &str = "publish";
+const RENAME: &str = "rename";
+
+/// What error messages put between a step and its path, the paths of a
+/// move, and a path and its error.
+const SPACE: &str = verbatim!(" ");
+const TO: &str = verbatim!(" -> ");
+const BECAUSE: &str = verbatim!(": ");
+
+/// `error`, met at `step` on `path`, as an error naming both; its kind kept.
+fn failed(step: &str, path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{step}{SPACE}{}{BECAUSE}{error}", path.display()),
+    )
+}
+
+/// [`failed`], for `map_err`.
+fn at<'a>(step: &'a str, path: &'a Path) -> impl FnOnce(io::Error) -> io::Error + 'a {
+    move |error| failed(step, path, error)
+}
 
 /// The snapshots of this app: shared by the evaluations that make them and
 /// every launch and process that holds one.
@@ -188,7 +228,7 @@ impl Snapshots {
         let lock = lock_file(&dir, hash).ok()?;
         lock.lock_shared().ok()?;
         let canonical = dunce::canonicalize(dir.join(hash)).ok()?;
-        sound(&canonical, hash).then_some(Held {
+        settled(&dir, &canonical, hash).is_ok().then_some(Held {
             hold: Hold { _lock: lock },
             dir: canonical,
         })
@@ -226,7 +266,7 @@ impl Session<'_> {
         let lock = lock_file(&self.dir, hash).ok()?;
         lock.lock_shared().ok()?;
         let dir = dunce::canonicalize(self.dir.join(hash)).ok()?;
-        sound(&dir, hash).then(|| {
+        settled(&self.dir, &dir, hash).is_ok().then(|| {
             self.fresh.insert(hash.to_owned(), lock);
             dir
         })
@@ -240,16 +280,11 @@ impl Session<'_> {
         // Whether it can be snapshotted at all depends on where it is, so
         // it's checked for a snapshot found as much as one made.
         check_live_links(live, live, Path::new(""))?;
-        let hash = package_hash(live);
-        if hash == PACKAGE_INCOMPLETE {
-            return Err(io::Error::other(verbatim!(
-                "the package can't be read whole"
-            )));
-        }
+        let hash = package_hash_or_why(live).map_err(at(HASH, live))?;
         if let Some(found) = self.reuse(&hash)? {
             return Ok((hash, found));
         }
-        ensure_dir(&self.dir)?;
+        ensure_dir(&self.dir).map_err(at(STAGE, &self.dir))?;
         let (name, lock) = staging_slot(&self.dir)?;
         let staging = self.dir.join(&name);
         // Left by an earlier run of this process id: nothing holds it.
@@ -274,23 +309,32 @@ impl Session<'_> {
         if !target.is_dir() {
             return Ok(None);
         }
-        let lock = lock_file(&self.dir, hash)?;
-        lock.lock_shared()?;
-        let found = dunce::canonicalize(&target).ok();
-        if let Some(found) = found.filter(|found| sound(found, hash)) {
-            self.fresh.insert(hash.to_owned(), lock);
-            return Ok(Some(found));
-        }
+        let lock = shared_lock(&self.dir, hash)?;
+        let found = dunce::canonicalize(&target).map_err(at(REUSE, &target));
+        let damage = match found.and_then(|found| settled(&self.dir, &found, hash).map(|()| found))
+        {
+            Ok(found) => {
+                self.fresh.insert(hash.to_owned(), lock);
+                return Ok(Some(found));
+            }
+            Err(damage) => damage,
+        };
         // Damaged, or gone meanwhile.
-        lock.unlock()?;
-        if lock.try_lock().is_err() {
-            return Err(io::Error::other(verbatim!(
-                "the snapshot is damaged and in use"
-            )));
+        let path = lock_path(&self.dir, hash);
+        lock.unlock().map_err(at(LOCKING, &path))?;
+        if !try_exclusive(&lock, &path)? {
+            return Err(failed(
+                REUSE,
+                &target,
+                io::Error::other(format!(
+                    "{}{damage}",
+                    verbatim!("the snapshot is damaged and in use: ")
+                )),
+            ));
         }
         if target.is_dir() {
             make_writable(&target);
-            fs::remove_dir_all(&target)?;
+            fs::remove_dir_all(&target).map_err(at(REUSE, &target))?;
         }
         Ok(None)
     }
@@ -298,41 +342,66 @@ impl Session<'_> {
     /// Copies `live` to the new `staging`, refusing a symlink that reaches
     /// back into it.
     fn stage(&self, live: &Path, staging: &Path) -> io::Result<()> {
-        fs::create_dir(staging)?;
-        let staged = dunce::canonicalize(staging)?;
+        fs::create_dir(staging).map_err(at(STAGE, staging))?;
+        let staged = dunce::canonicalize(staging).map_err(at(STAGE, staging))?;
         copy_tree(live, live, staging, Path::new(""))?;
         // A relative link through a link of its own may still leave.
         check_links(live, &staged, &staged)
     }
 
-    /// Makes the staged copy read-only and renames it to the hash of its
-    /// own content, under a shared lock on that hash, kept; if one is there
-    /// already, that one is used if it is sound.
+    /// Makes what's in the staged copy read-only and renames it to the hash
+    /// of its own content, under a shared lock on that hash, kept, and then
+    /// makes the directory itself read-only; if one is there already, that
+    /// one is used if it is sound.
     fn publish(&mut self, staging: &Path) -> io::Result<(String, PathBuf)> {
-        let staged = dunce::canonicalize(staging)?;
-        let hash = package_hash(&staged);
-        if hash == PACKAGE_INCOMPLETE {
-            return Err(io::Error::other(verbatim!("the copy can't be read whole")));
-        }
-        make_readonly(staging)?;
+        let staged = dunce::canonicalize(staging).map_err(at(PUBLISH, staging))?;
+        let hash = package_hash_or_why(&staged).map_err(at(PUBLISH, &staged))?;
+        // Not the directory itself yet: macOS 15 refuses to rename a
+        // directory its owner can't write (EACCES, on the GitHub runner's
+        // APFS; T2083), where macOS 27 and Linux, renaming within one
+        // directory, don't.
+        make_readonly_within(staging)?;
         // Taken before the rename, so a collection removing this hash
         // finishes first and none starts after.
-        let lock = lock_file(&self.dir, &hash)?;
-        lock.lock_shared()?;
+        let lock = shared_lock(&self.dir, &hash)?;
+        // Held until the directory is read-only too, so a check of it
+        // meanwhile waits rather than finding it unfinished. Another
+        // publisher of this hash waits here, and its rename then fails.
+        let publishing = publishing_lock(&self.dir, &hash, true)?;
         let target = self.dir.join(&hash);
-        if fs::rename(staging, &target).is_err() {
+        if let Err(error) = fs::rename(staging, &target) {
             // Another instance made it first (or something is in the way).
-            let found = dunce::canonicalize(&target)?;
-            if !sound(&found, &hash) {
-                return Err(io::Error::other(verbatim!("the snapshot is damaged")));
-            }
+            let renamed = || {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{RENAME}{SPACE}{}{TO}{}{BECAUSE}{error}",
+                        staging.display(),
+                        target.display()
+                    ),
+                )
+            };
+            let found = dunce::canonicalize(&target).map_err(|_| renamed())?;
+            soundness(&found, &hash).map_err(|damage| {
+                io::Error::new(
+                    damage.kind(),
+                    format!("{}{}{damage}", renamed(), verbatim!("; the one there: ")),
+                )
+            })?;
             make_writable(staging);
-            fs::remove_dir_all(staging)?;
+            fs::remove_dir_all(staging).map_err(at(PUBLISH, staging))?;
             self.fresh.insert(hash.clone(), lock);
             return Ok((hash, found));
         }
+        #[cfg(test)]
+        run_hooks(&AFTER_RENAME, &self.dir);
+        // Until this, a check of it waits on `publishing`. One left by a
+        // crash here stays unfinished: replaced if nothing holds it.
+        set_readonly(&target)?;
+        drop(publishing);
+        let found = dunce::canonicalize(&target).map_err(at(RENAME, &target))?;
         self.fresh.insert(hash.clone(), lock);
-        Ok((hash, dunce::canonicalize(target)?))
+        Ok((hash, found))
     }
 
     /// Keeps `hashes` through every collection of this session, and the
@@ -355,28 +424,71 @@ impl Session<'_> {
     }
 }
 
-/// Whether the directory `dir` is the finished snapshot of `hash`: that
-/// content, and nothing in it writable.
-fn sound(dir: &Path, hash: &str) -> bool {
-    package_hash(dir) == hash && read_only(dir)
+/// Whether `found`, the snapshot of `hash` in the store `dir`, is
+/// [sound](soundness), checked again once a publishing of it under way has
+/// finished making it read-only.
+fn settled(dir: &Path, found: &Path, hash: &str) -> io::Result<()> {
+    if soundness(found, hash).is_ok() {
+        return Ok(());
+    }
+    drop(publishing_lock(dir, hash, false)?);
+    soundness(found, hash)
 }
 
-fn read_only(path: &Path) -> bool {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return false;
-    };
+/// Whether the directory `dir` is the finished snapshot of `hash`: that
+/// content, and nothing in it writable; or why not: what its content
+/// hashes to, or what in it is writable or can't be read.
+fn soundness(dir: &Path, hash: &str) -> io::Result<()> {
+    let found = package_hash_or_why(dir)?;
+    if found != hash {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}{found}", verbatim!("its content hashes to ")),
+        ));
+    }
+    read_only(dir)
+}
+
+/// Nothing at or under `path` (never through a symlink) is writable; an
+/// error naming the first that is, or that can't be checked.
+fn read_only(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path).map_err(|error| on_path(path, error))?;
     if meta.file_type().is_symlink() {
-        return true;
+        return Ok(());
     }
     if !meta.permissions().readonly() {
-        return false;
+        return Err(on_path(
+            path,
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}{:o}",
+                    verbatim!("writable, mode "),
+                    permissions_mode(&meta)
+                ),
+            ),
+        ));
     }
     if meta.is_dir() {
-        return fs::read_dir(path)
-            .map(|entries| entries.flatten().all(|entry| read_only(&entry.path())))
-            .unwrap_or(false);
+        for entry in fs::read_dir(path).map_err(|error| on_path(path, error))? {
+            read_only(&entry.map_err(|error| on_path(path, error))?.path())?;
+        }
     }
-    true
+    Ok(())
+}
+
+/// The mode bits, for a message; 0 off Unix.
+fn permissions_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        meta.permissions().mode()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        0
+    }
 }
 
 /// Removes the snapshots and staging directories in `dir` that nothing
@@ -454,7 +566,8 @@ fn granted_in_file(state: &State) -> Option<HashSet<String>> {
     )
 }
 
-/// Whether `name` is a package hash as [`package_hash`] writes it.
+/// Whether `name` is a package hash as
+/// [`package_hash`](crate::lsp_consent::package_hash) writes it.
 fn is_hash(name: &str) -> bool {
     name.len() == 64
         && name
@@ -469,12 +582,16 @@ pub(crate) fn staging_slot(dir: &Path) -> io::Result<(String, fs::File)> {
         let name = format!("{STAGING}{}-{slot}", std::process::id());
         let lock = lock_file(dir, &name)?;
         #[cfg(test)]
-        after_open(dir);
-        if lock.try_lock().is_ok() {
+        run_hooks(&AFTER_OPEN, dir);
+        if try_exclusive(&lock, &lock_path(dir, &name))? {
             return Ok((name, lock));
         }
     }
-    Err(io::Error::other(verbatim!("no free staging directory")))
+    Err(failed(
+        STAGE,
+        dir,
+        io::Error::other(verbatim!("no free staging directory")),
+    ))
 }
 
 /// `dir`, made, and only the user's if new.
@@ -486,34 +603,90 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
     builder.create(dir)
 }
 
-/// `<name>.lock` in `dir`, made if missing.
+/// `<name>.lock` in `dir`.
+fn lock_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}{LOCK}"))
+}
+
+/// `<name>.lock` in `dir`, made if missing; an error names the step and
+/// the path.
 fn lock_file(dir: &Path, name: &str) -> io::Result<fs::File> {
-    ensure_dir(dir)?;
+    ensure_dir(dir).map_err(at(LOCKING, dir))?;
+    let path = lock_path(dir, name);
     fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(dir.join(format!("{name}{LOCK}")))
+        .open(&path)
+        .map_err(at(LOCKING, &path))
+}
+
+/// [`lock_file`], with a shared lock taken on it.
+fn shared_lock(dir: &Path, name: &str) -> io::Result<fs::File> {
+    let lock = lock_file(dir, name)?;
+    lock.lock_shared()
+        .map_err(at(LOCKING, &lock_path(dir, name)))?;
+    Ok(lock)
+}
+
+/// The lock held by the publisher of `hash` from before its rename until
+/// the directory is read-only, taken exclusively or shared. Blocking.
+fn publishing_lock(dir: &Path, hash: &str, exclusive: bool) -> io::Result<fs::File> {
+    let name = format!("{hash}{PUBLISHING}");
+    let lock = lock_file(dir, &name)?;
+    let taken = if exclusive {
+        lock.lock()
+    } else {
+        lock.lock_shared()
+    };
+    taken.map_err(at(LOCKING, &lock_path(dir, &name)))?;
+    Ok(lock)
+}
+
+/// Takes `lock`, the file at `path`, exclusively if nothing holds it:
+/// whether it did, or an error naming `path` if taking it failed.
+fn try_exclusive(lock: &fs::File, path: &Path) -> io::Result<bool> {
+    #[cfg(test)]
+    let injected = LOCK_ERRORS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find(|(at, _)| at == path)
+        .map(|&(_, errno)| io::Error::from_raw_os_error(errno));
+    #[cfg(test)]
+    if let Some(error) = injected {
+        return Err(failed(LOCKING, path, error));
+    }
+    match lock.try_lock() {
+        Ok(()) => Ok(true),
+        Err(fs::TryLockError::WouldBlock) => Ok(false),
+        Err(fs::TryLockError::Error(error)) => Err(failed(LOCKING, path, error)),
+    }
 }
 
 /// Refuses a symlink anywhere under `dir` (the canonical live directory
 /// `root`, `rel` the way to it) that reaches back into the live directory.
 fn check_live_links(root: &Path, dir: &Path, rel: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    for entry in fs::read_dir(dir).map_err(at(CHECK, dir))? {
+        let entry = entry.map_err(at(CHECK, dir))?;
+        let path = entry.path();
         let rel = rel.join(entry.file_name());
-        let kind = entry.file_type()?;
+        let kind = entry.file_type().map_err(at(CHECK, &path))?;
         if kind.is_symlink() {
-            let target = fs::read_link(entry.path())?;
-            refuse_link(root, &rel, &target)?;
+            let target = fs::read_link(&path).map_err(at(CHECK, &path))?;
+            refuse_link(root, &rel, &target).map_err(at(CHECK, &path))?;
             if link_escapes(root, root, dir, &target) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "{}{}",
-                        rel.display(),
-                        verbatim!(" reaches outside the package or the live directory")
+                return Err(failed(
+                    CHECK,
+                    &path,
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{}{}",
+                            rel.display(),
+                            verbatim!(" reaches outside the package or the live directory")
+                        ),
                     ),
                 ));
             }
@@ -543,25 +716,39 @@ fn refuse_link(root: &Path, rel: &Path, target: &Path) -> io::Result<()> {
 /// Copies `src`, under `root` (the live directory), to `dst`: files by
 /// `fs::copy`, symlinks as symlinks, with the target unchanged.
 fn copy_tree(root: &Path, src: &Path, dst: &Path, rel: &Path) -> io::Result<()> {
-    let mut entries = fs::read_dir(src)?.collect::<Result<Vec<_>, _>>()?;
+    let mut entries = fs::read_dir(src)
+        .and_then(|entries| entries.collect::<Result<Vec<_>, _>>())
+        .map_err(at(COPY, src))?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
+        let from = entry.path();
         let rel = rel.join(entry.file_name());
         let to = dst.join(entry.file_name());
-        let kind = entry.file_type()?;
+        let kind = entry.file_type().map_err(at(COPY, &from))?;
         if kind.is_symlink() {
-            let target = fs::read_link(entry.path())?;
-            refuse_link(root, &rel, &target)?;
-            symlink(&target, &to, &entry.path())?;
+            let target = fs::read_link(&from).map_err(at(COPY, &from))?;
+            refuse_link(root, &rel, &target).map_err(at(COPY, &from))?;
+            symlink(&target, &to, &from).map_err(at(COPY, &to))?;
         } else if kind.is_dir() {
-            fs::create_dir(&to)?;
-            copy_tree(root, &entry.path(), &to, &rel)?;
+            fs::create_dir(&to).map_err(at(COPY, &to))?;
+            copy_tree(root, &from, &to, &rel)?;
         } else if kind.is_file() {
-            fs::copy(entry.path(), &to)?;
+            fs::copy(&from, &to).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{COPY}{SPACE}{}{TO}{}{BECAUSE}{error}",
+                        from.display(),
+                        to.display()
+                    ),
+                )
+            })?;
         } else {
-            return Err(io::Error::other(verbatim!(
-                "not a file, directory or symlink"
-            )));
+            return Err(failed(
+                COPY,
+                &from,
+                io::Error::other(verbatim!("not a file, directory or symlink")),
+            ));
         }
     }
     Ok(())
@@ -597,20 +784,26 @@ fn reaches_out(root: &Path, rel: &Path, target: &Path) -> bool {
 /// After the copy: no symlink in it reaches out of it or into the live
 /// package, whether or not its destination exists ([`link_escapes`]).
 fn check_links(live: &Path, dir: &Path, staged: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
+    for entry in fs::read_dir(dir).map_err(at(CHECK, dir))? {
+        let entry = entry.map_err(at(CHECK, dir))?;
+        let path = entry.path();
+        let kind = entry.file_type().map_err(at(CHECK, &path))?;
         if kind.is_dir() {
-            check_links(live, &entry.path(), staged)?;
+            check_links(live, &path, staged)?;
         } else if kind.is_symlink()
-            && link_escapes(staged, live, dir, &fs::read_link(entry.path())?)
+            && link_escapes(
+                staged,
+                live,
+                dir,
+                &fs::read_link(&path).map_err(at(CHECK, &path))?,
+            )
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{}{}",
-                    entry.path().display(),
-                    verbatim!(" resolves outside the package")
+            return Err(failed(
+                CHECK,
+                &path,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    verbatim!("resolves outside the package"),
                 ),
             ));
         }
@@ -709,19 +902,29 @@ fn symlink(target: &Path, to: &Path, from: &Path) -> io::Result<()> {
     }
 }
 
-/// Clears the write bits of everything under `dir` (the execute bits stay),
-/// symlinks left alone. An error if any can't be.
-fn make_readonly(dir: &Path) -> io::Result<()> {
-    walk(dir, &mut |path, _| {
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(path, permissions)
+/// Clears the write bits of everything under `dir` (the execute bits
+/// stay), symlinks left alone, but not of `dir` itself ([`set_readonly`]).
+/// An error if any can't be.
+fn make_readonly_within(dir: &Path) -> io::Result<()> {
+    walk(dir, PUBLISH, &mut |path, _| {
+        if path == dir {
+            return Ok(());
+        }
+        set_readonly(path)
     })
 }
 
-/// Undoes [`make_readonly`], so the tree can be removed.
+/// Clears the write bits of `path` alone (the execute bits stay).
+fn set_readonly(path: &Path) -> io::Result<()> {
+    let mut permissions = fs::metadata(path).map_err(at(PUBLISH, path))?.permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions).map_err(at(PUBLISH, path))
+}
+
+/// Undoes [`make_readonly_within`] and [`set_readonly`], so the tree can be
+/// removed.
 fn make_writable(dir: &Path) {
-    let _ = walk(dir, &mut |path, is_dir| {
+    let _ = walk(dir, PUBLISH, &mut |path, is_dir| {
         let mut permissions = fs::metadata(path)?.permissions();
         #[cfg(unix)]
         {
@@ -741,9 +944,14 @@ fn make_writable(dir: &Path) {
 }
 
 /// Visits `root` and everything under it, a directory after what's in it,
-/// never through a symlink; the first error stops it.
-fn walk(root: &Path, visit: &mut dyn FnMut(&Path, bool) -> io::Result<()>) -> io::Result<()> {
-    let meta = fs::symlink_metadata(root)?;
+/// never through a symlink; the first error stops it. Its own errors name
+/// `step` and the path they were met on.
+fn walk(
+    root: &Path,
+    step: &str,
+    visit: &mut dyn FnMut(&Path, bool) -> io::Result<()>,
+) -> io::Result<()> {
+    let meta = fs::symlink_metadata(root).map_err(at(step, root))?;
     if meta.file_type().is_symlink() {
         return Ok(());
     }
@@ -755,10 +963,10 @@ fn walk(root: &Path, visit: &mut dyn FnMut(&Path, bool) -> io::Result<()>) -> io
             use std::os::unix::fs::PermissionsExt as _;
             let mut permissions = meta.permissions();
             permissions.set_mode(permissions.mode() | 0o700);
-            fs::set_permissions(root, permissions)?;
+            fs::set_permissions(root, permissions).map_err(at(step, root))?;
         }
-        for entry in fs::read_dir(root)? {
-            walk(&entry?.path(), visit)?;
+        for entry in fs::read_dir(root).map_err(at(step, root))? {
+            walk(&entry.map_err(at(step, root))?.path(), step, visit)?;
         }
     }
     visit(root, is_dir)
@@ -772,6 +980,15 @@ type Hook = Arc<dyn Fn() + Send + Sync>;
 #[cfg(test)]
 static AFTER_OPEN: Mutex<Vec<(PathBuf, Hook)>> = Mutex::new(Vec::new());
 
+/// What a test runs in [`Session::publish`] between the rename and making
+/// the directory read-only, for the store directory it was set for.
+#[cfg(test)]
+static AFTER_RENAME: Mutex<Vec<(PathBuf, Hook)>> = Mutex::new(Vec::new());
+
+/// Lock files whose taking without blocking a test fails, with the errno.
+#[cfg(test)]
+static LOCK_ERRORS: Mutex<Vec<(PathBuf, i32)>> = Mutex::new(Vec::new());
+
 /// Has `hook` run between the open and the lock in [`staging_slot`] of `dir`.
 #[cfg(all(test, unix))]
 pub(crate) fn pause_after_open(dir: PathBuf, hook: Hook) {
@@ -781,9 +998,29 @@ pub(crate) fn pause_after_open(dir: PathBuf, hook: Hook) {
         .push((dir, hook));
 }
 
+/// Has `hook` run between the rename and the read-only of the directory
+/// itself in [`Session::publish`] of `dir`.
+#[cfg(all(test, unix))]
+fn pause_after_rename(dir: PathBuf, hook: Hook) {
+    AFTER_RENAME
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push((dir, hook));
+}
+
+/// Has every taking without blocking of the lock file `path` fail with
+/// `errno`.
+#[cfg(all(test, unix))]
+fn fail_lock(path: PathBuf, errno: i32) {
+    LOCK_ERRORS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push((path, errno));
+}
+
 #[cfg(test)]
-fn after_open(dir: &Path) {
-    let hook = AFTER_OPEN
+fn run_hooks(hooks: &Mutex<Vec<(PathBuf, Hook)>>, dir: &Path) {
+    let hook = hooks
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .iter()
@@ -839,5 +1076,301 @@ mod windows_tests {
             live,
             Path::new(r"C:\elsewhere\missing")
         ));
+    }
+}
+
+/// Publishing racing a check of the same snapshot, and the causes of
+/// failures to take a lock or walk a staged copy (T2083).
+#[cfg(all(test, unix))]
+mod cause_and_race_tests {
+    use std::{
+        fs, io,
+        os::unix::fs::PermissionsExt as _,
+        path::{Path, PathBuf},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        time::Duration,
+    };
+
+    use fe_lsp::ServerSpec;
+    use gpui::TestAppContext;
+
+    use super::{
+        LOCK, PUBLISH, STAGING, STORE_DIR, Snapshots, fail_lock, pause_after_open,
+        pause_after_rename, soundness, walk,
+    };
+    use crate::{
+        CONSENT_FILE, ExtensionServer, grant_extension_server, pending_extension_consents,
+        set_extension_consent_file, set_extension_servers,
+    };
+
+    /// A canonical package directory in `dir`.
+    fn package(dir: &Path) -> PathBuf {
+        let live = dir.join("ext");
+        fs::create_dir_all(live.join("lib")).unwrap();
+        fs::write(live.join("server.sh"), "true\n").unwrap();
+        fs::write(live.join("lib/util.sh"), "VALUE=1\n").unwrap();
+        dunce::canonicalize(live).unwrap()
+    }
+
+    /// The snapshot of `live` made by an instance of its own, in the store
+    /// beside `consent`: its hash and directory, or the error's text.
+    fn snapshot_alone(consent: &Path, live: &Path) -> Made {
+        let snapshots = Snapshots::default();
+        let mut session = snapshots.begin(Some(consent)).map_err(|e| e.to_string())?;
+        session.snapshot(live).map_err(|error| error.to_string())
+    }
+
+    /// Has `hook` run once, the first time a seam reaches it.
+    fn once(hook: impl Fn() + Send + Sync + 'static) -> Arc<dyn Fn() + Send + Sync> {
+        let first = AtomicBool::new(true);
+        Arc::new(move || {
+            if first.swap(false, Ordering::SeqCst) {
+                hook();
+            }
+        })
+    }
+
+    /// A seam that tells `reached` and then waits for `go`.
+    fn pausing(reached: mpsc::Sender<()>, go: mpsc::Receiver<()>) -> Arc<dyn Fn() + Send + Sync> {
+        let channels = Mutex::new((reached, go));
+        once(move || {
+            let (reached, go) = &*channels.lock().unwrap();
+            reached.send(()).unwrap();
+            go.recv().unwrap();
+        })
+    }
+
+    /// What [`snapshot_alone`] made, or its error's text.
+    type Made = Result<(String, PathBuf), String>;
+
+    /// `snapshot_alone` on a thread of its own, and whether it has ended.
+    fn spawn_snapshot(
+        consent: &Path,
+        live: &Path,
+    ) -> (std::thread::JoinHandle<Made>, mpsc::Receiver<()>) {
+        let (consent, live) = (consent.to_owned(), live.to_owned());
+        let (ended_tx, ended_rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let made = snapshot_alone(&consent, &live);
+            // Nothing may be asking.
+            let _ = ended_tx.send(());
+            made
+        });
+        (thread, ended_rx)
+    }
+
+    #[test]
+    fn a_check_while_a_snapshot_is_published_waits_for_it_and_reuses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = package(dir.path());
+        let consent = dir.path().join(CONSENT_FILE);
+        let (renamed_tx, renamed_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        pause_after_rename(dir.path().join(STORE_DIR), pausing(renamed_tx, go_rx));
+        let (publisher, _) = spawn_snapshot(&consent, &live);
+        renamed_rx.recv().unwrap();
+
+        // Renamed to its hash, not yet read-only: another instance checks
+        // it, and waits rather than finding it unfinished.
+        let (checker, checked) = spawn_snapshot(&consent, &live);
+        assert!(checked.recv_timeout(Duration::from_millis(300)).is_err());
+        go_tx.send(()).unwrap();
+        let (hash, made) = publisher.join().unwrap().unwrap();
+        let (found, at) = checker.join().unwrap().unwrap();
+        assert_eq!((&found, &at), (&hash, &made));
+        assert!(soundness(&at, &hash).is_ok());
+    }
+
+    #[test]
+    fn a_publisher_that_loses_the_race_waits_for_the_winner_and_uses_its_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = package(dir.path());
+        let consent = dir.path().join(CONSENT_FILE);
+        let store = dir.path().join(STORE_DIR);
+        // The loser pauses past its check for a snapshot to reuse, the
+        // winner once it has renamed its copy.
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let (loser_go_tx, loser_go_rx) = mpsc::channel();
+        pause_after_open(store.clone(), pausing(opened_tx, loser_go_rx));
+        let (renamed_tx, renamed_rx) = mpsc::channel();
+        let (winner_go_tx, winner_go_rx) = mpsc::channel();
+        pause_after_rename(store, pausing(renamed_tx, winner_go_rx));
+        let (loser, lost) = spawn_snapshot(&consent, &live);
+        opened_rx.recv().unwrap();
+        let (winner, _) = spawn_snapshot(&consent, &live);
+        renamed_rx.recv().unwrap();
+
+        // The loser copies and publishes while the winner's snapshot isn't
+        // read-only yet: it waits for the winner rather than refusing it.
+        loser_go_tx.send(()).unwrap();
+        assert!(lost.recv_timeout(Duration::from_millis(300)).is_err());
+        winner_go_tx.send(()).unwrap();
+        let (hash, made) = winner.join().unwrap().unwrap();
+        let (found, at) = loser.join().unwrap().unwrap();
+        assert_eq!((&found, &at), (&hash, &made));
+        assert!(soundness(&at, &hash).is_ok());
+    }
+
+    /// The text of `errno`'s error, as a failure quotes it.
+    fn cause(errno: i32) -> String {
+        io::Error::from_raw_os_error(errno).to_string()
+    }
+
+    /// A staging lock that can't be taken, in the store beside `consent`:
+    /// what a failure names it by.
+    fn failing_staging_lock(consent: &Path) -> String {
+        let store = consent.parent().unwrap().join(STORE_DIR);
+        let lock = store.join(format!("{STAGING}{}-0{LOCK}", std::process::id()));
+        fail_lock(lock.clone(), libc::ENOLCK);
+        format!("lock {}: {}", lock.display(), cause(libc::ENOLCK))
+    }
+
+    /// A damaged snapshot of `live` in the store beside `consent`, whose
+    /// lock can't be taken: what a failure names it by.
+    fn failing_damaged_snapshot(consent: &Path, live: &Path) -> String {
+        let (hash, made) = snapshot_alone(consent, live).unwrap();
+        fs::set_permissions(made.join("server.sh"), fs::Permissions::from_mode(0o644)).unwrap();
+        let lock = consent
+            .parent()
+            .unwrap()
+            .join(STORE_DIR)
+            .join(format!("{hash}{LOCK}"));
+        fail_lock(lock.clone(), libc::ENOLCK);
+        format!("lock {}: {}", lock.display(), cause(libc::ENOLCK))
+    }
+
+    #[test]
+    fn a_staging_lock_that_cant_be_taken_is_named_with_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = package(dir.path());
+        let consent = dir.path().join(CONSENT_FILE);
+        let named = failing_staging_lock(&consent);
+        let error = snapshot_alone(&consent, &live).unwrap_err();
+        assert!(error.contains(&named), "{error}");
+    }
+
+    #[test]
+    fn a_snapshot_lock_that_cant_be_taken_is_named_with_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = package(dir.path());
+        let consent = dir.path().join(CONSENT_FILE);
+        let named = failing_damaged_snapshot(&consent, &live);
+        let error = snapshot_alone(&consent, &live).unwrap_err();
+        assert!(error.contains(&named), "{error}");
+    }
+
+    #[test]
+    fn a_walk_names_the_nested_path_it_failed_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap().join("copy");
+        for name in ["a", "b"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+            fs::write(root.join(name).join("file"), "").unwrap();
+        }
+        // The first file visited takes the other directory away, so the walk
+        // fails on it, listed but gone.
+        let removed = Mutex::new(None);
+        let error = walk(&root, PUBLISH, &mut |path, is_dir| {
+            let mut removed = removed.lock().unwrap();
+            if !is_dir && removed.is_none() {
+                let here = path.parent().unwrap().file_name().unwrap();
+                let other = if here == "a" { "b" } else { "a" };
+                fs::remove_dir_all(root.join(other)).unwrap();
+                *removed = Some(root.join(other));
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        let other = removed.lock().unwrap().clone().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let message = error.to_string();
+        assert!(
+            message.starts_with(&format!("publish {}: ", other.display())),
+            "{message}"
+        );
+    }
+
+    /// Warn-level log lines, from every test in the process.
+    static WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    struct Warnings;
+
+    impl log::Log for Warnings {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record) {
+            if record.level() == log::Level::Warn {
+                WARNINGS.lock().unwrap().push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// Runs [`lock_failures_reach_the_warning_and_the_grant`] in a process
+    /// of its own, so its logger is the one installed: a process has one.
+    #[test]
+    fn lock_failures_keep_their_cause() {
+        let name = "lsp_consent::lsp_consent_snapshot::cause_and_race_tests::lock_failures_reach_the_warning_and_the_grant";
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--ignored", "--nocapture"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("{name}: {}\n{stdout}\n{stderr}", output.status);
+        assert!(output.status.success() && stdout.contains("1 passed"));
+    }
+
+    /// A staging lock and a damaged snapshot's lock that can't be taken:
+    /// each failure's lock file and cause reach the warning logged and the
+    /// error a grant returns.
+    #[gpui::test]
+    #[ignore = "run by lock_failures_keep_their_cause, in a process of its own"]
+    fn lock_failures_reach_the_warning_and_the_grant(cx: &mut TestAppContext) {
+        log::set_logger(&Warnings).expect("the process's only logger");
+        log::set_max_level(log::LevelFilter::Warn);
+        let staging: fn(&Path, &Path) -> String = |consent, _| failing_staging_lock(consent);
+        for failing in [staging, failing_damaged_snapshot] {
+            let dir = tempfile::tempdir().unwrap();
+            let live = package(dir.path());
+            let consent = dir.path().join(CONSENT_FILE);
+            let named = failing(&consent, &live);
+            let server = ExtensionServer {
+                extension_id: "acme.sh".into(),
+                extension_name: "Sh".into(),
+                extension_version: "1.0.0".into(),
+                extension_license: "MIT".into(),
+                extension_dir: live.clone(),
+                spec: ServerSpec {
+                    args: vec!["server.sh".into()],
+                    languages: vec!["sh".into()],
+                    ..ServerSpec::new("shls", "/bin/sh")
+                },
+            };
+            cx.update(|cx| set_extension_consent_file(cx, consent.clone()));
+            cx.update(|cx| set_extension_servers(cx, vec![server]));
+            cx.run_until_parked();
+            let asked = cx.update(|cx| pending_extension_consents(cx)).remove(0);
+            assert_eq!(asked.invocation.package_hash, "incomplete");
+            let error = cx
+                .update(|cx| grant_extension_server(cx, &asked))
+                .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains(&named), "{message}");
+            let warnings = WARNINGS.lock().unwrap();
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains(&named) && warning.contains("shls")),
+                "{warnings:?}"
+            );
+        }
     }
 }
