@@ -43,6 +43,32 @@
 //!   [`MIN_UPDATE_INTERVAL`] while it shows, showing a held update once it
 //!   is due ([`PanelViews::flush`]); hidden, it only notes whether it shows
 //!   ([`PanelEvent::Shown`], [`PanelEvent::Hidden`]).
+//! - **Grids.** A `grid` is a row of text in the editor's font a row of
+//!   cells, one image region named by its label (`plugin_panel_grid`).
+//! - **Realtime panels** (T2007), ones whose manifest asks for `keys` or
+//!   `tick_ms`. One with `keys` takes keyboard focus when clicked or shown
+//!   by its command, and shows a focus ring while it has it. Its key
+//!   context holds its plain keys ([`HOLDS_PLAIN_KEYS`]), so no binding,
+//!   vim's, the editor's or the workbench's, takes them first: each goes to the plugin
+//!   ([`PanelEvent::Key`]) except the host's (fe-plugin's
+//!   [`KeyEvent::is_reserved`]). Escape returns focus to the editor
+//!   (`dock.focus_editor`) from anywhere in a realtime panel, a control
+//!   in it that leaves Escape be included; Tab moves focus on; and the
+//!   keymap still has keys with the secondary modifier and the chords they
+//!   start, a plain key continuing one included, and Tab with any
+//!   modifiers (`ctrl-tab`'s tab switcher). One with
+//!   `tick_ms` has one timer while it is shown and focused in the active
+//!   window, started when it takes focus and dropped when it loses it (the
+//!   window's too), is hidden or its plugin unloads. Each tick goes to the
+//!   plugin ([`PanelEvent::Tick`]) through fe-plugin's [`PanelRuntime`]
+//!   for the load, which lets no tick overlap the last: one falling due
+//!   while the plugin still has the last is dropped. A tick is an ordinary
+//!   call, so a plugin that runs past its deadline is unloaded, as for any
+//!   other. Each timer is a tick session of that panel instance (one per
+//!   window): when it stops, the panel is released (its window closed) or
+//!   the timer can no longer reach it, the session ends, and a tick of it
+//!   queued, or taken by the host, is dropped before it reaches the plugin
+//!   ([`PanelEvents::close_ticks`]); another window's session is untouched.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::Range;
@@ -52,21 +78,25 @@ use std::time::{Duration, Instant};
 use fe_command::Invocation;
 use fe_gpui::commands::RunCommand;
 use fe_plugin::fastedit::editor::panels::{Node, NodeKind};
-pub(crate) use fe_plugin::panels::{MIN_UPDATE_INTERVAL, PanelViews, Tone, View};
+pub(crate) use fe_plugin::panels::{
+    Delivery, KeyEvent, MIN_UPDATE_INTERVAL, PanelRuntime, PanelState, PanelViews, Skipped, Tone,
+    View,
+};
 use fe_ui::{
-    ActiveTheme as _, Button, CODE, Checkbox, FamilySlot, FontFamilies, Icon, ROW_HEIGHT, Role,
-    States, TextField, TextFieldEvent, Tokens, TreeRow, UI_BODY, UI_HEADING, UiTheme, node as a11y,
-    node_with as a11y_with, space,
+    ActiveTheme as _, Button, CODE, Checkbox, FOCUS_RING, FamilySlot, FontFamilies, Icon,
+    ROW_HEIGHT, Role, States, TextField, TextFieldEvent, Tokens, TreeRow, UI_BODY, UI_HEADING,
+    UiTheme, node as a11y, node_with as a11y_with, space,
 };
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle,
-    Focusable, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
-    ListState as MeasuredList, Modifiers, ParentElement as _, Render, ScrollStrategy, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle,
-    Window, div, list as measured_list, prelude::FluentBuilder as _, px, relative, svg,
-    uniform_list,
+    Focusable, Hsla, InteractiveElement as _, IntoElement, KeyContext, KeyDownEvent, ListAlignment,
+    ListOffset, ListState as MeasuredList, Modifiers, ParentElement as _, Render, ScrollStrategy,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    UniformListScrollHandle, Window, div, list as measured_list, prelude::FluentBuilder as _, px,
+    relative, svg, uniform_list,
 };
 use kiln_l10n::{Text, tr, verbatim};
+use kiln_platform::keys::{self, HOLDS_PLAIN_KEYS};
 use kiln_plugin::manifest::{PanelDecl, PanelLocation};
 use kiln_shell::{DockItem, PanelId};
 
@@ -97,6 +127,11 @@ pub(crate) const INPUT_DEBOUNCE: Duration = Duration::from_millis(150);
 /// Rows a Page Up or Page Down moves a list's selection by.
 const PAGE_ROWS: usize = 10;
 
+/// The key context of a panel with `keys`, which no binding names; it
+/// holds its plain keys ([`HOLDS_PLAIN_KEYS`]) for the panel's own key
+/// listener.
+pub(crate) const KEYS_CONTEXT: &str = verbatim!("plugin_panel_keys");
+
 /// What the user did in a panel, as `fastedit:editor/panel-handler`'s
 /// `panel-event` tells the plugin. Node ids are the plugin's own.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,6 +153,10 @@ pub enum PanelEvent {
     Shown,
     /// It went out of view.
     Hidden,
+    /// A key pressed while the panel has focus, of a panel with `keys`.
+    Key(KeyEvent),
+    /// A tick of a panel with `tick_ms`: the milliseconds since its last.
+    Tick(u32),
 }
 
 /// One event for a plugin, and the panel it's of.
@@ -147,6 +186,68 @@ struct Queue {
     events: VecDeque<QueuedEvent>,
     dropped: u64,
     waker: Option<Waker>,
+    /// The load's realtime panels: their ticks in the plugin.
+    runtime: Arc<PanelRuntime>,
+    /// The open tick session of each realtime panel, by its id: the one
+    /// panel instance, in one window, ticking it ([`PanelEvents::open_ticks`],
+    /// [`PanelEvents::close_ticks`]). None while none ticks.
+    sessions: HashMap<String, TickSession>,
+    /// The session of each panel's tick queued or with the host, which the
+    /// runtime lets be only one ([`PanelRuntime::deliver_tick`]).
+    in_flight: HashMap<String, TickSession>,
+}
+
+impl Queue {
+    /// `panel`'s tick is done with, delivered or not: the next may go.
+    fn release_tick(&mut self, panel: &str) {
+        self.in_flight.remove(panel);
+        self.runtime.tick_finished(panel);
+    }
+
+    /// Queues `event`, dropping the oldest if full; whether it did.
+    fn enqueue(&mut self, panel: &str, event: PanelEvent) -> bool {
+        let dropped = self.events.len() >= MAX_QUEUED_EVENTS;
+        if dropped {
+            // A tick dropped never reaches the plugin: the next may go.
+            if let Some(QueuedEvent {
+                panel,
+                event: PanelEvent::Tick(_),
+            }) = self.events.pop_front()
+            {
+                self.release_tick(&panel);
+            }
+            self.dropped += 1;
+        }
+        self.events.push_back(QueuedEvent {
+            panel: panel.to_owned(),
+            event,
+        });
+        dropped
+    }
+}
+
+/// One stretch of one panel instance's ticking, from its timer's start to
+/// its stop: unique in the process, so one window's panel ending its
+/// session never touches another's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TickSession(u64);
+
+impl TickSession {
+    fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// What [`PanelEvents::tick`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ticked {
+    /// The tick is queued for the plugin.
+    Queued,
+    /// The runtime kept it ([`Skipped`]).
+    Skipped(Skipped),
+    /// The load the panel ticked for is gone.
+    Gone,
 }
 
 impl PanelEvents {
@@ -160,16 +261,7 @@ impl PanelEvents {
         let (dropped, waker) = {
             let mut shared = self.lock();
             let queue = shared.entry(plugin.to_owned()).or_default();
-            let dropped = queue.events.len() >= MAX_QUEUED_EVENTS;
-            if dropped {
-                queue.events.pop_front();
-                queue.dropped += 1;
-            }
-            queue.events.push_back(QueuedEvent {
-                panel: panel.to_owned(),
-                event,
-            });
-            (dropped, queue.waker.clone())
+            (queue.enqueue(panel, event), queue.waker.clone())
         };
         // Outside the lock: a waker may take the events at once.
         if let Some(waker) = waker {
@@ -231,10 +323,122 @@ impl PanelEvents {
         self.lock().get(plugin).map_or(0, |queue| queue.dropped)
     }
 
-    /// Forgets plugin `plugin`'s events, its count and its waker: it was
-    /// unloaded.
+    /// Forgets plugin `plugin`'s events, its count, its waker and its
+    /// realtime panels' runtime: it was unloaded.
     pub fn unload(&self, plugin: &str) {
         self.lock().remove(plugin);
+    }
+
+    /// Plugin `plugin`'s load's realtime runtime, which its panels tick
+    /// through ([`PanelEvents::tick`]); a later load has another.
+    pub(crate) fn runtime(&self, plugin: &str) -> Arc<PanelRuntime> {
+        (self.lock().entry(plugin.to_owned()).or_default().runtime).clone()
+    }
+
+    /// Queues a tick, `ms` since the last, for plugin `plugin`'s panel
+    /// `panel`, in `state`, if `runtime` is still the plugin's load's,
+    /// `session` is the panel's open one and the runtime lets it go
+    /// ([`PanelRuntime::deliver_tick`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tick(
+        &self,
+        plugin: &str,
+        panel: &str,
+        session: TickSession,
+        runtime: &Arc<PanelRuntime>,
+        state: PanelState,
+        now: Instant,
+        ms: u32,
+    ) -> Ticked {
+        let waker = {
+            let mut shared = self.lock();
+            let Some(queue) = shared.get_mut(plugin) else {
+                return Ticked::Gone;
+            };
+            if !Arc::ptr_eq(&queue.runtime, runtime) {
+                return Ticked::Gone;
+            }
+            // Another instance (another window's) ticks it now.
+            if queue.sessions.get(panel) != Some(&session) {
+                return Ticked::Skipped(Skipped::Unfocused);
+            }
+            if let Delivery::Skipped(skipped) = runtime.deliver_tick(panel, state, now) {
+                return Ticked::Skipped(skipped);
+            }
+            // Noted before the host can take it.
+            queue.in_flight.insert(panel.to_owned(), session);
+            queue.enqueue(panel, PanelEvent::Tick(ms));
+            queue.waker.clone()
+        };
+        if let Some(waker) = waker {
+            waker();
+        }
+        Ticked::Queued
+    }
+
+    /// Plugin `plugin`'s panel `panel` starts ticking, in one instance: a
+    /// new session, the panel's open one, which [`PanelEvents::close_ticks`]
+    /// ends.
+    pub(crate) fn open_ticks(&self, plugin: &str, panel: &str) -> TickSession {
+        let session = TickSession::next();
+        if let Some(queue) = self.lock().get_mut(plugin) {
+            queue.sessions.insert(panel.to_owned(), session);
+        }
+        session
+    }
+
+    /// The instance that opened `session` stops ticking plugin `plugin`'s
+    /// panel `panel` (it lost focus, was hidden, or its window closed): the
+    /// session ends, so a tick of it not yet in the plugin never goes. One
+    /// still queued is taken out at once; one the host has taken already
+    /// is dropped when the host asks ([`PanelEvents::tick_is_current`]).
+    /// Another instance's session, one opened since, is left alone.
+    pub(crate) fn close_ticks(&self, plugin: &str, panel: &str, session: TickSession) {
+        let mut shared = self.lock();
+        let Some(queue) = shared.get_mut(plugin) else {
+            return;
+        };
+        if queue.sessions.get(panel) == Some(&session) {
+            queue.sessions.remove(panel);
+        }
+        if queue.in_flight.get(panel) != Some(&session) {
+            return;
+        }
+        let before = queue.events.len();
+        (queue.events).retain(|queued| {
+            !(queued.panel == panel && matches!(queued.event, PanelEvent::Tick(_)))
+        });
+        if queue.events.len() != before {
+            queue.release_tick(panel);
+        }
+    }
+
+    /// Whether the host, about to hand plugin `plugin` a tick of its panel
+    /// `panel`, still should: the session it was queued in hasn't ended.
+    /// When it has, the tick is dropped here and the next may go.
+    pub fn tick_is_current(&self, plugin: &str, panel: &str) -> bool {
+        let mut shared = self.lock();
+        let Some(queue) = shared.get_mut(plugin) else {
+            return false;
+        };
+        let open = queue.sessions.get(panel);
+        if open.is_some() && queue.in_flight.get(panel) == open {
+            return true;
+        }
+        queue.release_tick(panel);
+        false
+    }
+
+    /// The host has handed the plugin `plugin` `event` of its panel
+    /// `panel`, and the call has come back, however it ended: after a
+    /// tick, the next may go.
+    pub fn delivered(&self, plugin: &str, panel: &str, event: &PanelEvent) {
+        if !matches!(event, PanelEvent::Tick(_)) {
+            return;
+        }
+        if let Some(queue) = self.lock().get_mut(plugin) {
+            queue.release_tick(panel);
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeMap<String, Queue>> {
@@ -484,6 +688,25 @@ pub struct PluginPanel {
     /// draws it alone, where [`PluginPanel::set_shown`] says.
     shows: Option<Shows>,
     shown: bool,
+    /// Its manifest's `tick_ms`: how often it asks to be ticked.
+    tick_ms: Option<u32>,
+    /// Whether its manifest asks for `keys`.
+    keys: bool,
+    /// Its plugin's load's realtime runtime ([`PanelEvents::runtime`]), for
+    /// a realtime panel.
+    runtime: Option<Arc<PanelRuntime>>,
+    /// The timer ticking it, while it's shown and focused, and its session.
+    ticks: Option<(Task<()>, TickSession)>,
+    /// When it last ticked, or its timer started.
+    last_tick: Option<Instant>,
+    /// Its plugin's load went while it ticked: it never ticks again.
+    load_gone: bool,
+    /// What starts and stops its timer as focus comes and goes, set when
+    /// it's first drawn, with a window.
+    focus_watch: Vec<Subscription>,
+    /// Each grid as drawn, by node id.
+    #[cfg(test)]
+    pub(crate) drawn_grids: HashMap<String, grid::DrawnGrid>,
     /// The colour each text-bearing node was drawn in, by node id.
     #[cfg(test)]
     pub(crate) drawn_colors: HashMap<String, Hsla>,
@@ -511,6 +734,12 @@ impl PluginPanel {
             );
             Icon::Puzzle
         });
+        let runtime = (decl.keys || decl.tick_ms.is_some()).then(|| events.runtime(plugin));
+        // Released (its plugin went), it ends its tick session: a tick it
+        // queued never reaches the plugin. Its window closing ends it sooner
+        // (`watch_focus`).
+        cx.on_release(|panel: &mut Self, _| panel.stop_ticks())
+            .detach();
         let poll = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(MIN_UPDATE_INTERVAL).await;
@@ -539,6 +768,15 @@ impl PluginPanel {
             location: decl.location,
             shows: None,
             shown: false,
+            tick_ms: decl.tick_ms,
+            keys: decl.keys,
+            runtime,
+            ticks: None,
+            last_tick: None,
+            load_gone: false,
+            focus_watch: Vec::new(),
+            #[cfg(test)]
+            drawn_grids: HashMap::new(),
             #[cfg(test)]
             drawn_colors: HashMap::new(),
             #[cfg(test)]
@@ -588,11 +826,15 @@ impl PluginPanel {
     }
 
     /// Notes whether it shows, telling the plugin when that changes.
+    /// Hidden, it stops ticking.
     pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         if shown == self.shown {
             return;
         }
         self.shown = shown;
+        if !shown {
+            self.stop_ticks();
+        }
         self.send(if shown {
             PanelEvent::Shown
         } else {
@@ -600,6 +842,190 @@ impl PluginPanel {
         });
         if shown {
             self.refresh(cx);
+        }
+    }
+
+    /// Whether its manifest asks for keys or ticks.
+    pub fn is_realtime(&self) -> bool {
+        self.runtime.is_some()
+    }
+
+    /// Whether its tick timer runs.
+    pub fn is_ticking(&self) -> bool {
+        self.ticks.is_some()
+    }
+
+    /// Whether the dock shows it now, not as last noted: focus can come
+    /// before the poll notes it shows.
+    fn shows_now(&self, cx: &App) -> bool {
+        self.shows.as_ref().map_or(self.shown, |shows| shows(cx))
+    }
+
+    /// Whether it may tick: shown, with focus in it, in the active window.
+    fn may_tick(&self, window: &Window, cx: &App) -> bool {
+        window.is_window_active() && self.focus.contains_focused(window, cx) && self.shows_now(cx)
+    }
+
+    /// Watches its focus and its window, once, for a realtime panel: taking
+    /// focus starts the tick timer, losing it (the window's included) stops
+    /// it, in the frame it moves, and so does its window closing, at once,
+    /// whatever still holds the panel or its workbench.
+    fn watch_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_watch.is_empty() || self.tick_ms.is_none() {
+            return;
+        }
+        let focus = self.focus.clone();
+        let mine = window.window_handle().window_id();
+        let this = cx.weak_entity();
+        self.focus_watch = vec![
+            cx.on_focus_in(&focus, window, |panel, window, cx| {
+                panel.start_ticks(window, cx)
+            }),
+            cx.on_focus_out(&focus, window, |panel, _, _, _| panel.stop_ticks()),
+            // GPUI sends no focus-out as a window goes: its session ends here.
+            cx.on_window_closed(move |cx, closed| {
+                if closed == mine {
+                    let _ = this.update(cx, |panel, _| panel.stop_ticks());
+                }
+            }),
+        ];
+    }
+
+    /// Starts its one tick timer, if it ticks, may and has none.
+    fn start_ticks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ms) = self.tick_ms else {
+            return;
+        };
+        if self.ticks.is_some() || self.load_gone || !self.may_tick(window, cx) {
+            return;
+        }
+        let every = Duration::from_millis(u64::from(ms)).max(fe_plugin::panels::MIN_TICK_INTERVAL);
+        self.last_tick = Some(cx.background_executor().now());
+        let session = self.events.open_ticks(&self.plugin, &self.panel);
+        let (events, plugin, panel) =
+            (self.events.clone(), self.plugin.clone(), self.panel.clone());
+        let timer = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(every).await;
+                let ticking = this.update_in(cx, |panel, window, cx| panel.tick_due(window, cx));
+                match ticking {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    // Its window closed, or the panel went: its session
+                    // ends with the timer.
+                    Err(_) => {
+                        events.close_ticks(&plugin, &panel, session);
+                        break;
+                    }
+                }
+            }
+        });
+        self.ticks = Some((timer, session));
+    }
+
+    /// Drops its tick timer, ending its session: any tick of it not yet in
+    /// the plugin goes too.
+    fn stop_ticks(&mut self) {
+        self.last_tick = None;
+        if let Some((_, session)) = self.ticks.take() {
+            self.events.close_ticks(&self.plugin, &self.panel, session);
+        }
+    }
+
+    /// Its timer fired: a tick for the plugin, unless it may no longer tick
+    /// or its load is gone, which stop the timer. False once stopped.
+    fn tick_due(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let runtime = match &self.runtime {
+            Some(runtime) if self.may_tick(window, cx) => runtime.clone(),
+            _ => {
+                self.stop_ticks();
+                return false;
+            }
+        };
+        let now = cx.background_executor().now();
+        let since =
+            (self.last_tick).map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
+        let ms = u32::try_from(since.as_millis()).unwrap_or(u32::MAX);
+        let state = PanelState {
+            shown: true,
+            focused: true,
+        };
+        let Some(&(_, session)) = self.ticks.as_ref() else {
+            return false;
+        };
+        match (self.events).tick(&self.plugin, &self.panel, session, &runtime, state, now, ms) {
+            Ticked::Queued => {
+                self.last_tick = Some(now);
+                true
+            }
+            Ticked::Skipped(_) => true,
+            Ticked::Gone => {
+                self.load_gone = true;
+                self.stop_ticks();
+                false
+            }
+        }
+    }
+
+    /// A key in the panel that nothing in it took: the host's focus order
+    /// for Tab; in a realtime panel, Escape to the editor; and at a panel
+    /// with `keys` itself, not a control in it, any key without the
+    /// secondary modifier to the plugin (the keymap has those with it).
+    /// True if it took the key.
+    fn key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let keystroke = &event.keystroke;
+        let modifiers = keystroke.modifiers;
+        // The host's focus order: a plugin can't keep focus.
+        if keystroke.key == "tab" && !(modifiers.control || modifiers.alt || modifiers.platform) {
+            match modifiers.shift {
+                true => window.focus_prev(cx),
+                false => window.focus_next(cx),
+            }
+            return true;
+        }
+        // Escape leaves a realtime panel for the editor from anywhere in
+        // it, a control in it too, if the control left it.
+        if self.runtime.is_some()
+            && keystroke.key.eq_ignore_ascii_case("escape")
+            && self.focus.contains_focused(window, cx)
+        {
+            let stack = keys::context_stack(&window.context_stack(), cx);
+            let leave = Invocation::of(verbatim!("dock.focus_editor")).expect("a command id");
+            run(leave.context(stack), window, cx);
+            return true;
+        }
+        if !self.keys || !self.focus.is_focused(window) {
+            return false;
+        }
+        let key = KeyEvent {
+            key: keystroke.key.clone(),
+            shift: modifiers.shift,
+            ctrl: modifiers.control,
+            alt: modifiers.alt,
+            secondary: modifiers.secondary(),
+        };
+        // The host's: the keymap had it first ([`HOLDS_PLAIN_KEYS`]).
+        if key.secondary {
+            return false;
+        }
+        let Some(runtime) = &self.runtime else {
+            return false;
+        };
+        let state = PanelState {
+            shown: self.shown,
+            focused: true,
+        };
+        match runtime.deliver_key(&self.panel, &key, state) {
+            Delivery::Delivered => {
+                self.send(PanelEvent::Key(key));
+                true
+            }
+            Delivery::Skipped(_) => false,
         }
     }
 
@@ -1458,11 +1884,14 @@ impl PluginPanel {
             // A tree item outside a list starts a run of them (the
             // containers draw only a run's first): a tree, as a list is.
             NodeKind::List(_) | NodeKind::TreeItem(_) => self.render_list(index, window, cx),
-            // Not drawn here: realtime panels (T2007) draw a grid's cells.
-            // Until then it is an empty region, named by its label.
-            NodeKind::Grid(grid) => a11y(div().id(id), window, cx, role, grid.label.clone())
-                .flex_none()
-                .into_any_element(),
+            NodeKind::Grid(grid_node) => {
+                let (element, drawn) = grid::render_grid(&node.id, grid_node, window, cx);
+                #[cfg(test)]
+                self.drawn_grids.insert(node.id.clone(), drawn);
+                #[cfg(not(test))]
+                drop(drawn);
+                element
+            }
             NodeKind::Separator => a11y(div().id(id), window, cx, role, "")
                 .flex_none()
                 .h(px(1.))
@@ -1816,29 +2245,45 @@ impl Focusable for PluginPanel {
 impl Render for PluginPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = cx.theme().colors;
+        // A realtime panel's timer follows its focus; one that took focus
+        // before it was first drawn starts here.
+        self.watch_focus(window, cx);
+        if self.ticks.is_none() {
+            self.start_ticks(window, cx);
+        }
         let body = match &self.view {
             Some(_) => self.render_node(0, window, cx),
             None => div().into_any_element(),
         };
+        let ring = self.keys && self.focus.is_focused(window);
         div()
             .id(ElementId::Name(
                 format!(verbatim!("plugin-panel:{}"), self.id.0).into(),
             ))
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
-                // The host's focus order: a plugin can't keep focus.
-                let keystroke = &event.keystroke;
-                let modifiers = keystroke.modifiers;
-                if keystroke.key == "tab"
-                    && !(modifiers.control || modifiers.alt || modifiers.platform)
-                {
-                    match modifiers.shift {
-                        true => window.focus_prev(cx),
-                        false => window.focus_next(cx),
-                    }
+            .when(self.keys, |root| {
+                let mut context = KeyContext::default();
+                context.add(KEYS_CONTEXT);
+                context.add(HOLDS_PLAIN_KEYS);
+                root.key_context(context)
+            })
+            .on_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
+                if panel.key_down(event, window, cx) {
                     cx.stop_propagation();
                 }
             }))
+            .relative()
+            .when(ring, |root| {
+                // Inside its edge: a dock clips what's drawn outside it.
+                root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border(FOCUS_RING.width)
+                        .border_color(c.state.focus_ring)
+                        .debug_selector(|| verbatim!("plugin-panel-focus-ring").into()),
+                )
+            })
             .size_full()
             .flex()
             .flex_col()
@@ -1954,6 +2399,21 @@ fn add_panels(
     }
 }
 
+/// Runs `invocation` from the panel, as a key bound to it would.
+fn run(invocation: Invocation, window: &mut Window, cx: &mut App) {
+    if let Err(error) = kiln_platform::command_actions::dispatch_invocation(invocation, window, cx)
+    {
+        log::warn!("{error}");
+    }
+}
+
+#[path = "plugin_panel_grid.rs"]
+mod grid;
+
 #[cfg(test)]
 #[path = "plugin_panel_tests.rs"]
 mod plugin_panel_tests;
+
+#[cfg(test)]
+#[path = "plugin_panel_realtime_tests.rs"]
+mod plugin_panel_realtime_tests;

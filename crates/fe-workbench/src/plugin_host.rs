@@ -3213,13 +3213,10 @@ enum WirePanelEvent {
     Shown,
     #[component(name = "hidden")]
     Hidden,
-    /// T2005's realtime cases: the variant must have every case of the
-    /// WIT's for `on-event` to typecheck, though only T2007 sends these.
+    /// T2005's realtime cases, which realtime panels send (T2007).
     #[component(name = "key")]
-    #[allow(dead_code, reason = "realtime panels (T2007) send keys")]
     Key(WireKeyEvent),
     #[component(name = "tick")]
-    #[allow(dead_code, reason = "realtime panels (T2007) send ticks")]
     Tick(u32),
 }
 
@@ -3245,6 +3242,14 @@ impl From<PanelEvent> for WirePanelEvent {
             PanelEvent::Expanded(id, expanded) => Self::Expanded((id, expanded)),
             PanelEvent::Shown => Self::Shown,
             PanelEvent::Hidden => Self::Hidden,
+            PanelEvent::Key(key) => Self::Key(WireKeyEvent {
+                key: key.key,
+                shift: key.shift,
+                ctrl: key.ctrl,
+                alt: key.alt,
+                secondary: key.secondary,
+            }),
+            PanelEvent::Tick(ms) => Self::Tick(ms),
         }
     }
 }
@@ -3490,12 +3495,25 @@ impl Guest {
         };
         let queued = plugin_panel::events().take(&self.id, DELIVERED_PER_BATCH);
         for QueuedEvent { panel, event } in queued {
+            // A tick's runtime hears when its call is back, however it
+            // ended: until then the panel's next tick is dropped, so ticks
+            // never overlap. One past its deadline unloads the plugin, as
+            // any call does.
+            let tick = matches!(event, PanelEvent::Tick(_)).then(|| event.clone());
+            // A tick whose panel stopped ticking since (it lost focus or was
+            // hidden) doesn't go, though it was taken.
+            if tick.is_some() && !plugin_panel::events().tick_is_current(&self.id, &panel) {
+                continue;
+            }
             let event = WirePanelEvent::from(event);
             let delivered = self.guarded(async |store| {
                 on_event
                     .call_async(store, (panel.clone(), event.clone()))
                     .await
             });
+            if let Some(tick) = tick {
+                plugin_panel::events().delivered(&self.id, &panel, &tick);
+            }
             if let Err(diagnostic) = delivered {
                 log::warn!("{diagnostic}");
                 self.store.data().inbox.stop(diagnostic);
