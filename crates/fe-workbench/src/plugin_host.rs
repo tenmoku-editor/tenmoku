@@ -801,6 +801,10 @@ pub(crate) struct PluginHost {
     workspace: Vec<PathBuf>,
     /// Every open root and its trust, for `settings.get`.
     open_roots: OpenRoots,
+    /// The plugin settings problems published in [`ConfigDiagnostics`] now,
+    /// so that a load or an unload replaces its own and leaves the config
+    /// service's alone (T2094).
+    settings_problems: Vec<fe_config::Diagnostic>,
     /// The plugins' background jobs: their queue and their runs.
     pub(crate) jobs: plugin_jobs::JobsHub,
     evaluating: Option<Task<()>>,
@@ -969,6 +973,121 @@ impl Loaded {
 }
 
 /// The host, made on first use, following the settings' preview.
+/// A plugin's contributed schema as fe-config checks it: a JSON schema of
+/// its keys, and the keys no settings file (and no project file) may set,
+/// each with the warning fe-config positions at the key.
+///
+/// `check_schema` checks a value's `type`, so a key of the wrong type is a
+/// positioned error. It does not check `enum` membership or an array's item
+/// types: those two stay with `SettingsSchema::resolve`, which drops the
+/// value and reports it in the plugin's log, as before.
+fn plugin_settings_schema(
+    id: &str,
+    schema: &kiln_plugin::settings::SettingsSchema,
+) -> fe_config::PluginSettingsSchema {
+    use kiln_plugin::settings::{Kind, Scope};
+
+    fn json_type(kind: &Kind) -> serde_json::Value {
+        match kind {
+            Kind::String | Kind::Enum(_) => serde_json::json!({ "type": "string" }),
+            Kind::Number => serde_json::json!({ "type": "number" }),
+            Kind::Integer => serde_json::json!({ "type": "integer" }),
+            Kind::Boolean => serde_json::json!({ "type": "boolean" }),
+            Kind::Array(item) => serde_json::json!({
+                "type": "array",
+                "items": json_type(item),
+            }),
+        }
+    }
+
+    let properties: serde_json::Map<String, serde_json::Value> = schema
+        .keys
+        .iter()
+        .map(|(name, key)| (name.clone(), json_type(&key.kind)))
+        .collect();
+    let secret_keys = schema
+        .keys
+        .iter()
+        .filter(|(_, key)| key.secret)
+        .map(|(name, _)| {
+            (
+                name.clone(),
+                tr!("kiln-plugin-settings-secret-in-file", key = name.as_str()).to_string(),
+            )
+        })
+        .collect();
+    let user_only_keys = schema
+        .keys
+        .iter()
+        .filter(|(_, key)| !key.secret && key.scope != Scope::Project)
+        .map(|(name, _)| {
+            (
+                name.clone(),
+                tr!("kiln-plugin-settings-not-project", key = name.as_str()).to_string(),
+            )
+        })
+        .collect();
+    fe_config::PluginSettingsSchema {
+        id: id.to_owned(),
+        schema: Arc::new(serde_json::json!({
+            "type": "object",
+            "properties": properties,
+        })),
+        secret_keys,
+        user_only_keys,
+    }
+}
+
+/// Hands the loaded plugins' settings schemas to fe-config and publishes
+/// their settings problems, in place of the ones published before.
+///
+/// A plugin loading or unloading changes these problems with no settings
+/// file changed, so the config service has no batch to re-read on: the host
+/// checks the files itself and puts the result in [`ConfigDiagnostics`], as
+/// kiln's extension source does for a contributed file between batches. The
+/// schemas stay with fe-config too, so the service's own next read of the
+/// files reports the same problems.
+fn republish_plugin_settings(cx: &mut App) {
+    let host = cx.global::<PluginHost>();
+    let schemas: Vec<fe_config::PluginSettingsSchema> = host
+        .slots
+        .iter()
+        .filter_map(|(id, slot)| {
+            let loaded = slot.loaded.as_ref()?;
+            let schema = loaded.artifact.manifest.settings.as_ref()?;
+            Some(plugin_settings_schema(id, schema))
+        })
+        .collect();
+    let roots = host.workspace.clone();
+    let previous = host.settings_problems.clone();
+    fe_config::set_plugin_schemas(schemas.clone());
+
+    let user = fe_config::paths::user_settings_path();
+    let mut problems = fe_config::plugin_settings_problems(user, None, schemas.clone());
+    // Each open root's project file is a layer of its own: its keys are
+    // narrowed as a project file's are, and the user's file is not read
+    // again for it.
+    for root in roots {
+        let project = fe_config::paths::project_settings_path(&root);
+        problems.extend(fe_config::plugin_settings_problems(
+            None,
+            Some(project),
+            schemas.clone(),
+        ));
+    }
+    if previous == problems {
+        return;
+    }
+    cx.global_mut::<PluginHost>().settings_problems = problems.clone();
+    let mut all = cx
+        .try_global::<kiln::platform::config::ConfigDiagnostics>()
+        .map(|all| all.0.clone())
+        .unwrap_or_default();
+    all.retain(|diagnostic| !previous.contains(diagnostic));
+    all.extend(problems);
+    cx.set_global(kiln::platform::config::ConfigDiagnostics(all));
+}
+
 fn host_mut(cx: &mut App) -> &mut PluginHost {
     if !cx.has_global::<PluginHost>() {
         let preview = cx
@@ -988,6 +1107,7 @@ fn host_mut(cx: &mut App) -> &mut PluginHost {
             logs,
             workspace: Vec::new(),
             open_roots: OpenRoots::default(),
+            settings_problems: Vec::new(),
             jobs: plugin_jobs::JobsHub::default(),
             evaluating: None,
             listed: HashSet::new(),
@@ -1533,6 +1653,8 @@ fn start_unload(id: &str, cx: &mut App) {
     plugin_diagnostics::unload(id, cx);
     plugin_format::unload(id, cx);
     plugin_panel::unload(id, cx);
+    // Its schema goes, so its settings problems go with it.
+    republish_plugin_settings(cx);
     let shut_down = cx.background_spawn(async move { lock(&loaded.plugin).shutdown() });
     let id = id.to_owned();
     cx.spawn(async move |cx| {
@@ -1831,6 +1953,8 @@ fn loaded_plugin(id: &str, finished: Finished, cx: &mut App) {
     if let Some(panels) = panels {
         plugin_panel::attach(id, &panels, cx);
     }
+    // Its settings schema, and the problems in the files it now knows about.
+    republish_plugin_settings(cx);
     drive(id, cx);
 }
 

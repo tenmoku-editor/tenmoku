@@ -10,7 +10,7 @@
 //! user's table, then, for an open and trusted root, that root's `project`-scoped keys. A value
 //! that doesn't fit its key is dropped with a diagnostic.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -440,12 +440,17 @@ impl PluginSettings {
 #[derive(Debug, Default)]
 pub struct State {
     settings: Option<PluginSettings>,
+    /// The problems logged for this load already. The config problem list
+    /// shows them positioned now (T2094), so the plugin's log keeps one
+    /// warning of each per load instead of one per `settings.get`.
+    logged: BTreeSet<String>,
 }
 
 impl State {
     pub fn new(settings: PluginSettings) -> Self {
         Self {
             settings: Some(settings),
+            logged: BTreeSet::new(),
         }
     }
 }
@@ -456,8 +461,12 @@ impl Host for HostState {
             return unimplemented("kiln:extension/settings.get");
         };
         let resolved = settings.get(root.as_deref())?;
+        // Each problem is logged once per load, not once per call: the
+        // config problem list is where they are shown now.
         for message in resolved.diagnostics {
-            (self.log)(Level::Warn, message);
+            if self.settings.logged.insert(message.clone()) {
+                (self.log)(Level::Warn, message);
+            }
         }
         let text = Json::Object(resolved.values).to_string();
         if text.len() > MAX_VALUE_BYTES {
