@@ -423,6 +423,81 @@ fn a_store_that_cannot_be_made_fails_closed(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| grant_extension_server(cx, &asked)).is_err());
 }
 
+/// Warn-level log lines, from every test in the process.
+static WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+struct Warnings;
+
+impl log::Log for Warnings {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        if record.level() == log::Level::Warn {
+            WARNINGS.lock().unwrap().push(record.args().to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Runs [`a_failed_snapshot_names_its_step_path_and_cause`] in a process
+/// of its own, so its logger is the one installed whichever runner runs
+/// the tests: a process has one.
+#[test]
+fn a_failed_snapshot_keeps_its_cause() {
+    let name =
+        "lsp_consent::lsp_consent_snapshot_tests::a_failed_snapshot_names_its_step_path_and_cause";
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--ignored", "--nocapture"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{name}: {}\n{stdout}\n{stderr}",
+        output.status
+    );
+}
+
+/// The step, the path and the io error of a failed snapshot reach both the
+/// warning logged and the error a grant of it returns.
+#[gpui::test]
+#[ignore = "run by a_failed_snapshot_keeps_its_cause, in a process of its own"]
+fn a_failed_snapshot_names_its_step_path_and_cause(cx: &mut TestAppContext) {
+    log::set_logger(&Warnings).expect("the process's only logger");
+    log::set_max_level(log::LevelFilter::Warn);
+    let dir = tempfile::tempdir().unwrap();
+    let extension = extension(dir.path(), "v1");
+    let server = server(&extension, &dir.path().join("out"));
+    // The consent file's directory is a file, so the store can't be made.
+    let blocked = dir.path().join("blocked");
+    fs::write(&blocked, "").unwrap();
+    cx.update(|cx| set_extension_consent_file(cx, blocked.join(CONSENT_FILE)));
+    set(cx, &server);
+    let asked = pending(cx).remove(0);
+    assert_eq!(asked.invocation.package_hash, "incomplete");
+    let error = cx
+        .update(|cx| grant_extension_server(cx, &asked))
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    let store = blocked.join(STORE).display().to_string();
+    let cause = std::io::Error::from_raw_os_error(libc::ENOTDIR).to_string();
+    let named = |text: &str| text.contains(&format!("stage {store}: {cause}"));
+    let message = error.to_string();
+    assert!(named(&message), "{message}");
+    assert!(message.contains("acme.sh"), "{message}");
+    let warnings = WARNINGS.lock().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| named(warning) && warning.contains("shls")),
+        "{warnings:?}"
+    );
+}
+
 #[gpui::test]
 fn identical_packages_in_other_roots_are_checked_for_symlinks_again(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

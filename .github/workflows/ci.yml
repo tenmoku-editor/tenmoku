@@ -31,37 +31,26 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Format
-        run: cargo fmt --all --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      # nextest, as the local gate (scripts/paddock-check.sh) runs it: some
-      # tests rely on each test having its own process, which `cargo test`
-      # doesn't give. The workspace has no doctests, which nextest skips.
-      - name: Test
-        run: cargo nextest run --workspace --profile ci
-      - name: Core crates stay GPUI-free
-        run: scripts/check-no-gpui.sh
-      - name: fe-syntax builds with no languages and with each alone
-        run: scripts/check-syntax-features.sh
-      - name: Screenshots match their goldens
-        # The runner's display is 1× and the goldens 2×, so every capture is
-        # half their size. Render every scene (they must still settle) but
-        # skip the pixel comparison there; see TESTING.md.
-        env:
-          SCREENSHOTS_ALLOW_OTHER_SCALE: 1
+      # CI evidence only (T2083): the macOS runner's environment, and the
+      # tests C3 names, nothing else.
+      - name: Runner environment
         run: |
-          cargo run -p fe-gpui --example screenshots
-          cargo run -p fe-workbench --example screenshots
-      - name: Upload screenshot diffs
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: screenshots
-          path: target/screenshots/
-          if-no-files-found: ignore
+          sw_vers; uname -a; id; umask
+          echo "TMPDIR=$TMPDIR HOME=$HOME PWD=$PWD"
+          df -h "$TMPDIR" "$PWD" /
+          diskutil info "$(df "$TMPDIR" | tail -1 | awk '{print $1}')" | head -40 || true
+          mount
+          ls -lde "$TMPDIR" || true
+          xattr -l "$TMPDIR" || true
+      - name: Test (the snapshot and consent tests)
+        run: >-
+          cargo nextest run --profile ci -p fe-workbench -p fastedit -E
+          '(package(fe-workbench) and test(/lsp_consent|extensions_picker_disable|plugin_lsp_tests/))
+          or (package(fastedit) and (binary(extension_consent_tree) or binary(extension_disabled)
+          or binary(extension_consent) or binary(extension_servers)))'
 
   linux:
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -131,6 +120,7 @@ jobs:
           if-no-files-found: ignore
 
   windows:
+    if: false
     # The runner image has MSVC and CMake (for wasmtime's C API) on PATH.
     runs-on: windows-2025
     steps:
@@ -156,6 +146,7 @@ jobs:
         run: cargo nextest run --workspace --profile ci --lib --bins --tests
 
   deny:
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
