@@ -22,6 +22,10 @@
 //! Then a Markdown file in the editor, dark and light (`markdown_scene`):
 //! its markup in the theme's styles.
 //!
+//! Then a plugin's panel in the sidebar, dark and light
+//! (`plugin_panel_scene`): its view's nodes in kiln-ui's widgets and the
+//! theme's tones.
+//!
 //! Then the setup wizard's sheet over the same workbench, dark and light
 //! (`setup_scene`), against goldens of their own. They load settings, so
 //! they draw the default `workbench.icon_theme`'s coloured icons; the two
@@ -48,6 +52,8 @@ mod audit_scenes;
 mod icons_scene;
 #[cfg(target_os = "macos")]
 mod markdown_scene;
+#[cfg(target_os = "macos")]
+mod plugin_panel_scene;
 #[cfg(target_os = "macos")]
 mod scenes;
 #[cfg(target_os = "macos")]

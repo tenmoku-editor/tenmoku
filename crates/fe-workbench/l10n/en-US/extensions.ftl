@@ -367,3 +367,12 @@ workbench-extensions-plugin-shutdown-failed = its shutdown failed: { $diagnostic
 workbench-extensions-plugin-deadline = a call ran past its { $deadline } deadline
 workbench-extensions-plugin-no-ticker = no thread to enforce plugins' deadlines: { $error }
 workbench-extensions-plugin-load-cancelled = its load was cancelled
+
+## A plugin's panel in the dock (plugin_panel.rs).
+
+# A progress bar's accessible name; its percent is its value.
+workbench-extensions-panel-progress = Progress
+# A progress bar's value, read after its name.
+workbench-extensions-panel-percent = { $percent }%
+# The accessible name of a tree a plugin's panel shows outside a list.
+workbench-extensions-panel-tree = Tree

@@ -17,6 +17,7 @@
 //! [`PanelDecl`]: kiln_plugin::manifest::PanelDecl
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -88,9 +89,18 @@ struct Plugin {
 #[derive(Default)]
 struct Panel {
     shown: Option<View>,
+    /// The number of `shown`, from [`next_revision`]; 0 before it has one.
+    revision: u64,
     /// A valid view not shown yet, for the rate.
     pending: Option<View>,
     last_applied: Option<Instant>,
+}
+
+/// A number no shown view had before, in this process: one counter for every panel of every
+/// load, so a reloaded plugin's first view isn't taken for its last load's.
+fn next_revision() -> u64 {
+    static REVISIONS: AtomicU64 = AtomicU64::new(0);
+    REVISIONS.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 impl PanelViews {
@@ -102,6 +112,26 @@ impl PanelViews {
     pub fn view(&self, plugin: &str, panel: &str) -> Option<View> {
         let shared = self.lock();
         shared.plugins.get(plugin)?.panels.get(panel)?.shown.clone()
+    }
+
+    /// The revision of plugin `plugin`'s panel `panel`'s view: a new number each time a view
+    /// is shown, even one equal to the last, which tells a renderer the plugin answered. 0 while
+    /// it shows none.
+    pub fn revision(&self, plugin: &str, panel: &str) -> u64 {
+        self.view_with_revision(plugin, panel).1
+    }
+
+    /// [`PanelViews::view`] and [`PanelViews::revision`] together, as one read.
+    pub fn view_with_revision(&self, plugin: &str, panel: &str) -> (Option<View>, u64) {
+        let shared = self.lock();
+        match shared
+            .plugins
+            .get(plugin)
+            .and_then(|plugin| plugin.panels.get(panel))
+        {
+            Some(panel) => (panel.shown.clone(), panel.revision),
+            None => (None, 0),
+        }
     }
 
     /// Whether a valid update of the panel waits for [`PanelViews::flush`].
@@ -129,6 +159,7 @@ impl PanelViews {
             return false;
         }
         panel.shown = panel.pending.take();
+        panel.revision = next_revision();
         panel.last_applied = Some(now);
         true
     }
@@ -261,6 +292,7 @@ fn due(panel: &Panel, now: Instant) -> bool {
 fn accept(panel: &mut Panel, view: View, now: Instant) -> Update {
     if due(panel, now) {
         panel.shown = Some(view);
+        panel.revision = next_revision();
         panel.pending = None;
         panel.last_applied = Some(now);
         Update::Applied

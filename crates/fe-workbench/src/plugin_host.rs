@@ -93,7 +93,7 @@ use kiln::core::{
     extension::{ExtensionSet, ExtensionSource, Manifest},
     secrets::{KeychainStore, MemoryStore, Secret, SecretError, SecretStore},
 };
-use kiln_l10n::tr;
+use kiln_l10n::{tr, verbatim};
 use kiln_plugin::{
     bindings::{
         self, Level, LogSink,
@@ -119,7 +119,10 @@ use kiln_plugin::{
 use sha2::{Digest as _, Sha256};
 use wasmtime::{
     Engine, Store, StoreContextMut, Trap, UpdateDeadline,
-    component::{Component, HasSelf, Instance, InstancePre, Linker, ResourceTable, TypedFunc},
+    component::{
+        Component, ComponentType, HasSelf, Instance, InstancePre, Linker, Lower, ResourceTable,
+        TypedFunc,
+    },
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
@@ -135,6 +138,7 @@ use crate::{
     plugin_format::{self, PluginFormatting},
     plugin_log::{self, PluginLogs},
     plugin_paint::{self, Paint},
+    plugin_panel::{self, PanelEvent, QueuedEvent},
     show_plugin_prompt,
 };
 
@@ -1528,6 +1532,7 @@ fn start_unload(id: &str, cx: &mut App) {
     plugin_paint::unload(id, cx);
     plugin_diagnostics::unload(id, cx);
     plugin_format::unload(id, cx);
+    plugin_panel::unload(id, cx);
     let shut_down = cx.background_spawn(async move { lock(&loaded.plugin).shutdown() });
     let id = id.to_owned();
     cx.spawn(async move |cx| {
@@ -1628,6 +1633,7 @@ fn start_load(id: &str, cx: &mut App) {
         plugin_paint::unload(id, cx);
         plugin_diagnostics::unload(id, cx);
         plugin_format::unload(id, cx);
+        plugin_panel::unload(id, cx);
     }
     let host = cx.global_mut::<PluginHost>();
     #[cfg(test)]
@@ -1743,10 +1749,12 @@ fn loaded_plugin(id: &str, finished: Finished, cx: &mut App) {
     };
     let mut listed = Vec::new();
     let mut inbox = None;
+    let mut panels = None;
     match loaded {
         Ok((plugin, commands, events)) => {
             if wanted {
                 inbox = Some(events.clone());
+                panels = Some(artifact.manifest.panels.clone());
             }
             let loaded = Loaded {
                 load,
@@ -1819,6 +1827,10 @@ fn loaded_plugin(id: &str, finished: Finished, cx: &mut App) {
         .detach();
         plugin_events::add(inbox, cx);
     }
+    // Its panels, in each window's docks.
+    if let Some(panels) = panels {
+        plugin_panel::attach(id, &panels, cx);
+    }
     drive(id, cx);
 }
 
@@ -1874,6 +1886,7 @@ fn stopped_running(id: &str, load: u64, diagnostic: Diagnostic, cx: &mut App) {
     plugin_paint::unload(id, cx);
     plugin_diagnostics::unload(id, cx);
     plugin_format::unload(id, cx);
+    plugin_panel::unload(id, cx);
     cx.refresh_windows();
 }
 
@@ -2081,7 +2094,12 @@ impl LoadContext {
             diagnostics: self.paint.diagnostics(id, grants, checked),
             formatting: formatters,
             status: self.paint.status(id, grants),
-            panels: fe_plugin::panels::State::default(),
+            panels: {
+                let declared: Vec<String> = (artifact.manifest.panels.iter())
+                    .map(|panel| panel.id.clone())
+                    .collect();
+                fe_plugin::panels::State::new(id, grants, &declared, plugin_panel::views())
+            },
             lsp: {
                 let (dir, declared) = own_servers(id);
                 fe_plugin::lsp::State::new(
@@ -2103,6 +2121,7 @@ impl LoadContext {
                 decorations: host.decorations.shared(),
                 diagnostics: host.diagnostics.shared(),
                 status: host.status.shared(),
+                panels: host.panels.shared(),
             };
             let workers = self.worker_data(
                 id,
@@ -2135,9 +2154,12 @@ impl LoadContext {
             jobs,
         )
         .map_err(|error| {
-            // Whatever its `init` set before it failed goes with it.
+            // Whatever its `init` set before it failed goes with it: its
+            // panels' views and events too, kept for every load by id.
             self.paint.forget(id);
             formatting.forget(id);
+            plugin_panel::views().unload(id);
+            plugin_panel::events().unload(id);
             failed(error.to_string())
         })?;
         let mut plugin = plugin;
@@ -2218,7 +2240,10 @@ impl LoadContext {
                     .map(|load| fe_plugin::diagnostics::State::worker(load, versions()))
                     .unwrap_or_default(),
                 formatting: fe_plugin::formatting::State::default(),
-                panels: fe_plugin::panels::State::default(),
+                // A job may fill the load's panels as it works.
+                panels: (shared.panels.as_ref())
+                    .map(fe_plugin::panels::State::worker)
+                    .unwrap_or_default(),
                 status: (shared.status.as_ref())
                     .map(fe_plugin::status::State::worker)
                     .unwrap_or_default(),
@@ -2256,6 +2281,7 @@ struct LoadShared {
     decorations: Option<fe_plugin::decorations::SharedLoad>,
     diagnostics: Option<fe_plugin::diagnostics::SharedLoad>,
     status: Option<fe_plugin::status::SharedLoad>,
+    panels: Option<fe_plugin::panels::SharedLoad>,
 }
 
 /// Every plugin's waiting language-server requests, which the plugins' lsp slices share.
@@ -2710,6 +2736,9 @@ pub(crate) struct HostedPlugin {
     pub(crate) background: BackgroundLimits,
     /// Its jobs, with the `jobs` capability: detached as it stops.
     pub(crate) jobs: Option<plugin_jobs::JobsLoad>,
+    /// Wakes its thread for its panels' events: forgotten as it stops, as it
+    /// holds the thread's channel open.
+    panel_waker: Option<plugin_panel::Waker>,
 }
 
 /// The caller's ends of the plugin thread's channels.
@@ -2726,6 +2755,9 @@ pub(crate) enum Work {
     Events,
     /// Its jobs' ends wait for delivery to `job-finished`.
     Jobs,
+    /// Its panels' events wait for delivery to `on-event`
+    /// ([`plugin_panel::events`]).
+    Panels,
 }
 
 impl HostedPlugin {
@@ -2877,6 +2909,12 @@ impl HostedPlugin {
             return Err(error);
         }
         inbox.set_wake(calls.clone());
+        // Each event a panel queues wakes the thread; one queued before
+        // the wake was set goes now.
+        let wake = calls.clone();
+        let panel_waker =
+            plugin_panel::events().wake_with(id, move || drop(wake.try_send(Work::Panels)));
+        drop(calls.try_send(Work::Panels));
         if let Some(jobs) = &jobs {
             jobs.set_wake(calls.clone());
             // A job `init` started may have ended before there was a wake.
@@ -2891,7 +2929,15 @@ impl HostedPlugin {
             lsp: None,
             background: BackgroundLimits::default(),
             jobs,
+            panel_waker: Some(panel_waker),
         })
+    }
+
+    /// Forgets its panels' waker, which holds its thread's channel open.
+    fn unwake_panels(&mut self) {
+        if let Some(waker) = self.panel_waker.take() {
+            plugin_panel::events().unwake(&self.id, &waker);
+        }
     }
 
     pub(crate) fn state(&self) -> &kiln_plugin::runner::PluginState {
@@ -2924,6 +2970,7 @@ impl HostedPlugin {
             // The host is told whoever called, a command or a formatter, and
             // even once the caller stopped waiting: it stops the load.
             self.inbox.stop(diagnostic.clone());
+            self.unwake_panels();
             self.channel = None;
             if let Some(thread) = self.thread.take() {
                 drop(thread.join());
@@ -2945,6 +2992,7 @@ impl HostedPlugin {
             jobs.detach();
         }
         self.inbox.close();
+        self.unwake_panels();
         self.channel = None;
         if let Some(thread) = self.thread.take() {
             drop(thread.join());
@@ -2998,7 +3046,9 @@ impl Drop for HostedPlugin {
 /// plugin that `runs_jobs`, the jobs world's ([`plugin_jobs::link`]). Each
 /// notes that the store entered an import, for a worker's slice.
 fn linker(engine: &PluginEngine, runs_jobs: bool) -> wasmtime::Result<Linker<Data>> {
-    use fe_plugin::fastedit::editor::{buffer, decorations, diagnostics, formatting, lsp, status};
+    use fe_plugin::fastedit::editor::{
+        buffer, decorations, diagnostics, formatting, lsp, panels, status,
+    };
     let mut linker = Linker::<Data>::new(engine.engine());
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     bindings::add_to_linker(&mut linker, |data| {
@@ -3021,6 +3071,8 @@ fn linker(engine: &PluginEngine, runs_jobs: bool) -> wasmtime::Result<Linker<Dat
     diagnostics::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, imported)?;
     formatting::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, imported)?;
     lsp::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, imported)?;
+    // The panels the docks draw, which a panel polls: nothing to repaint.
+    panels::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, imported)?;
     status::add_to_linker::<_, HasSelf<fe_plugin::HostState>>(&mut linker, |data| {
         data.painted = true;
         imported(data)
@@ -3135,6 +3187,66 @@ struct Exports {
     handle_events: TypedFunc<(Vec<Event>,), ()>,
     /// With the `jobs` capability.
     job_finished: Option<TypedFunc<(plugin_jobs::JobId, kiln_plugin::jobs::JobState), ()>>,
+    /// `fastedit:editor/panel-handler`'s, for a plugin that exports it: a
+    /// plugin that shows no panels needn't.
+    on_event: Option<TypedFunc<(String, WirePanelEvent), ()>>,
+}
+
+/// `fastedit:editor/panel-handler`'s `panel-event`, as the plugin is handed
+/// it: [`PanelEvent`] in the WIT's shape.
+#[derive(ComponentType, Lower, Clone, Debug)]
+#[component(variant)]
+enum WirePanelEvent {
+    #[component(name = "activated")]
+    Activated(String),
+    #[component(name = "toggled")]
+    Toggled((String, bool)),
+    #[component(name = "input")]
+    Input((String, String)),
+    #[component(name = "submitted")]
+    Submitted((String, String)),
+    #[component(name = "selected")]
+    Selected((String, Vec<String>)),
+    #[component(name = "expanded")]
+    Expanded((String, bool)),
+    #[component(name = "shown")]
+    Shown,
+    #[component(name = "hidden")]
+    Hidden,
+    /// T2005's realtime cases: the variant must have every case of the
+    /// WIT's for `on-event` to typecheck, though only T2007 sends these.
+    #[component(name = "key")]
+    #[allow(dead_code, reason = "realtime panels (T2007) send keys")]
+    Key(WireKeyEvent),
+    #[component(name = "tick")]
+    #[allow(dead_code, reason = "realtime panels (T2007) send ticks")]
+    Tick(u32),
+}
+
+/// `panel-handler`'s `key-event`, for [`WirePanelEvent::Key`].
+#[derive(Clone, Debug, ComponentType, Lower)]
+#[component(record)]
+struct WireKeyEvent {
+    key: String,
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+    secondary: bool,
+}
+
+impl From<PanelEvent> for WirePanelEvent {
+    fn from(event: PanelEvent) -> Self {
+        match event {
+            PanelEvent::Activated(id) => Self::Activated(id),
+            PanelEvent::Toggled(id, on) => Self::Toggled((id, on)),
+            PanelEvent::Input(id, text) => Self::Input((id, text)),
+            PanelEvent::Submitted(id, text) => Self::Submitted((id, text)),
+            PanelEvent::Selected(id, rows) => Self::Selected((id, rows)),
+            PanelEvent::Expanded(id, expanded) => Self::Expanded((id, expanded)),
+            PanelEvent::Shown => Self::Shown,
+            PanelEvent::Hidden => Self::Hidden,
+        }
+    }
 }
 
 impl Exports {
@@ -3167,7 +3279,20 @@ impl Exports {
             true => Some(export(&world.interface("job-handler"), "job-finished")?),
             false => None,
         };
+        // Optional: looked up, not required.
+        let panel_handler = format!(
+            verbatim!("fastedit:editor/panel-handler@{}"),
+            world.package_version()
+        );
+        let on_event = instance
+            .get_export_index(&mut *store, None, &panel_handler)
+            .and_then(|interface| {
+                instance.get_export_index(&mut *store, Some(&interface), "on-event")
+            });
         Ok(Self {
+            on_event: on_event
+                .map(|at| instance.get_typed_func(&mut *store, at))
+                .transpose()?,
             init: instance.get_typed_func(&mut *store, "init")?,
             shutdown: instance.get_typed_func(&mut *store, "shutdown")?,
             run_command: instance.get_typed_func(&mut *store, run_command)?,
@@ -3231,13 +3356,14 @@ impl Guest {
             return;
         }
         let mut next = None;
-        // Job ends the last batch left undelivered.
+        // Job ends, and panel events, the last batch left undelivered.
         let mut jobs_left = false;
+        let mut panels_left = false;
         loop {
             let work = match next.take() {
                 Some(work) => work,
                 // A call or an event waiting goes before the rest of them.
-                None if jobs_left => match calls.try_recv() {
+                None if jobs_left || panels_left => match calls.try_recv() {
                     Ok(work) => work,
                     Err(TryRecvError::Empty) => Work::Jobs,
                     Err(TryRecvError::Disconnected) => break,
@@ -3266,6 +3392,10 @@ impl Guest {
             // A wake for them may have come in among the events.
             match self.deliver_jobs(&exports) {
                 Ok(left) => jobs_left = left,
+                Err(()) => return,
+            }
+            match self.deliver_panels(&exports) {
+                Ok(left) => panels_left = left,
                 Err(()) => return,
             }
         }
@@ -3315,7 +3445,7 @@ impl Guest {
             inbox.delivered(event);
             match calls.try_recv() {
                 Ok(Work::Call(call)) => return Delivered::Until(Work::Call(call)),
-                Ok(Work::Events | Work::Jobs) | Err(TryRecvError::Empty) => {}
+                Ok(Work::Events | Work::Jobs | Work::Panels) | Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => return Delivered::Closed,
             }
         }
@@ -3347,6 +3477,32 @@ impl Guest {
         }
         // Perhaps more: a `job-finished` may start jobs that end while it runs.
         Ok(true)
+    }
+
+    /// Hands the plugin its panels' events to `on-event`, one per call,
+    /// oldest first, at most [`DELIVERED_PER_BATCH`]: true if more wait,
+    /// which go after the calls and events waiting. Without the export they
+    /// stay queued, the oldest dropped past the cap and counted. One whose
+    /// call fails unloads the plugin, the host told why: an error then.
+    fn deliver_panels(&mut self, exports: &Exports) -> Result<bool, ()> {
+        let Some(on_event) = &exports.on_event else {
+            return Ok(false);
+        };
+        let queued = plugin_panel::events().take(&self.id, DELIVERED_PER_BATCH);
+        for QueuedEvent { panel, event } in queued {
+            let event = WirePanelEvent::from(event);
+            let delivered = self.guarded(async |store| {
+                on_event
+                    .call_async(store, (panel.clone(), event.clone()))
+                    .await
+            });
+            if let Err(diagnostic) = delivered {
+                log::warn!("{diagnostic}");
+                self.store.data().inbox.stop(diagnostic);
+                return Err(());
+            }
+        }
+        Ok(plugin_panel::events().queued(&self.id) > 0)
     }
 
     fn start(&mut self, pre: &InstancePre<Data>) -> Result<Exports, LoadError> {

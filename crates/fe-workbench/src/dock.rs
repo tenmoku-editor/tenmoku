@@ -64,6 +64,7 @@ use crate::{
     ai_changes_panel::AiChangesPanel,
     debug_panel::{self, DebugPanel},
     outline_panel::CaretSymbol,
+    plugin_panel::PluginPanel,
     runs_panel::{self, RunsPanel},
     search_panel::{self, SearchPanel},
 };
@@ -289,6 +290,10 @@ pub(crate) const BOTTOM_TABS: [&str; 5] = [
     TERMINAL_BUTTON,
     GIT_LOG_BUTTON,
 ];
+
+/// The command of a plugin's bottom panel's foot button: none, as the
+/// workbench shows the panel itself ([`crate::Workbench::add_plugin_panel`]).
+pub(crate) const PLUGIN_PANEL_COMMAND: &str = "";
 
 /// The transfer group of the sidebar and the bottom panel, which take
 /// each other's tool windows by drag ([`kiln_shell::dock::DockedPanel`]).
@@ -660,6 +665,10 @@ pub struct Dock {
     chat: Option<Entity<ChatPanel>>,
     /// Made the first time a changeset is shown.
     ai_changes: Option<Entity<AiChangesPanel>>,
+    /// The plugins' panels, in the order they were added, the sidebar's and
+    /// the bottom panel's, and where each is: where its manifest says.
+    plugin_panels: Vec<Entity<PluginPanel>>,
+    plugin_places: HashMap<PanelId, Place>,
     /// What Changes' and Problems' badges count: the changed files and the
     /// errors.
     changed_files: usize,
@@ -844,6 +853,8 @@ impl Dock {
             git_log: Some(git_log),
             chat: Some(chat),
             ai_changes: None,
+            plugin_panels: Vec::new(),
+            plugin_places: HashMap::new(),
             changed_files: 0,
             errors: 0,
             debug_joined: false,
@@ -1008,6 +1019,9 @@ impl Dock {
 
     /// Where the tool window `panel` is: its default place unless moved.
     pub(crate) fn place_of(&self, panel: PanelId) -> Place {
+        if let Some(place) = self.plugin_places.get(&panel) {
+            return *place;
+        }
         (self.placements.get(&panel).copied()).unwrap_or(Place::default_of(panel))
     }
 
@@ -1087,7 +1101,17 @@ impl Dock {
                     command: sidebar.show_command,
                 })
             });
-        let foot: Vec<RailAction> = bottom.chain(moved).collect();
+        // A plugin's bottom panels after them, in the order they came.
+        let plugins = (self.plugin_panels.iter())
+            .map(|panel| panel.read(cx))
+            .filter(|panel| panel.in_bottom_panel())
+            .map(|panel| RailAction {
+                id: panel.dock_id().0,
+                icon: DockItem::icon(panel, cx),
+                title: DockItem::title(panel, cx),
+                command: PLUGIN_PANEL_COMMAND,
+            });
+        let foot: Vec<RailAction> = bottom.chain(moved).chain(plugins).collect();
         let ids: Vec<&'static str> = foot.iter().map(|action| action.id).collect();
         // The same buttons keep their places and light, retitled; others
         // are put there anew, lit as the bottom panel shows.
@@ -1241,6 +1265,96 @@ impl Dock {
         self.ai_changes = Some(panel);
         self.sync_foot(cx);
         cx.notify();
+    }
+
+    /// Notes `panel`, a plugin's, unless a panel of its id is here already
+    /// (the plugin reloaded): then that one stays, and this is false. One
+    /// its manifest puts in the sidebar is registered here, at the end of
+    /// the rail's top group, and asks this dock whether it shows; one in the
+    /// bottom panel gets a button at the rail's foot, after the bottom tool
+    /// windows', and the workbench registers it there
+    /// ([`crate::Workbench::add_plugin_panel`]).
+    pub(crate) fn add_plugin_panel(
+        &mut self,
+        panel: Entity<PluginPanel>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let id = panel.read(cx).dock_id();
+        if self.plugin_places.contains_key(&id) {
+            return false;
+        }
+        let place = match panel.read(cx).in_bottom_panel() {
+            true => Place::Bottom,
+            false => Place::Sidebar,
+        };
+        if place == Place::Sidebar {
+            let dock = cx.weak_entity();
+            panel.update(cx, |panel, _| {
+                panel.set_shown_by(move |cx| {
+                    dock.upgrade().is_some_and(|dock| {
+                        let state = dock.read(cx).state();
+                        state.is_visible() && state.active() == Some(id)
+                    })
+                })
+            });
+            self.state.add_panel(panel.clone(), cx);
+        }
+        self.plugin_places.insert(id, place);
+        self.plugin_panels.push(panel);
+        self.sync_foot(cx);
+        cx.notify();
+        true
+    }
+
+    /// Whether `id` is a plugin's panel, and where it is.
+    pub(crate) fn plugin_place(&self, id: PanelId) -> Option<Place> {
+        self.plugin_places.get(&id).copied()
+    }
+
+    /// The focus of plugin panel `id`, in either dock.
+    pub(crate) fn plugin_panel_focus(&self, id: PanelId, cx: &App) -> Option<FocusHandle> {
+        (self.plugin_panels.iter())
+            .find(|panel| panel.read(cx).dock_id() == id)
+            .map(|panel| panel.focus_handle(cx))
+    }
+
+    /// The focus of each plugin panel in the sidebar.
+    pub(crate) fn sidebar_plugin_focuses(&self, cx: &App) -> Vec<FocusHandle> {
+        (self.plugin_panels.iter())
+            .filter(|panel| self.plugin_place(panel.read(cx).dock_id()) == Some(Place::Sidebar))
+            .map(|panel| panel.focus_handle(cx))
+            .collect()
+    }
+
+    /// Takes plugin `plugin`'s panels out, as it was unloaded: the
+    /// sidebar's from here, hiding the sidebar if it showed one, and their
+    /// foot buttons. The ids of those in the bottom panel, for the workbench
+    /// to take out of it.
+    pub(crate) fn remove_plugin_panels(
+        &mut self,
+        plugin: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<PanelId> {
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.plugin_panels)
+            .into_iter()
+            .partition(|panel| panel.read(cx).plugin() == plugin);
+        self.plugin_panels = kept;
+        let mut bottom = Vec::new();
+        for panel in gone {
+            let id = panel.read(cx).dock_id();
+            match self.plugin_places.remove(&id) {
+                Some(Place::Bottom) => bottom.push(id),
+                _ => {
+                    if self.state.active() == Some(id) && self.state.is_visible() {
+                        self.state.set_visible(false);
+                    }
+                    self.state.take_panel(id);
+                }
+            }
+        }
+        self.sync_foot(cx);
+        cx.notify();
+        bottom
     }
 
     pub(crate) fn chat(&self) -> Option<&Entity<ChatPanel>> {
@@ -1548,11 +1662,15 @@ impl DockView for Dock {
 
     /// The workbench runs the op the panel's key would, or hides the dock;
     /// for a bottom tool window moved here, what its foot button does.
-    fn rail_clicked(&mut self, panel: PanelId, _: &mut Window, cx: &mut Context<Self>) {
+    fn rail_clicked(&mut self, panel: PanelId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = DockPanel::of(panel) {
             cx.emit(DockEvent::Rail(panel));
         } else if let Some(action) = tool_action(panel.0) {
             cx.emit(DockEvent::Action(action.id, action.command));
+        } else if self.plugin_place(panel) == Some(Place::Sidebar) {
+            // A plugin's: shown, or hidden if it shows.
+            self.state.click_rail(panel, window, cx);
+            cx.notify();
         }
     }
 

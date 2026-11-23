@@ -225,6 +225,14 @@ impl TextField {
         self
     }
 
+    /// Whether Tab and Shift-Tab stop at it, in the window's tab order. A
+    /// field isn't one unless this says so: hosts with their own key order
+    /// (pickers, the command line) focus theirs themselves.
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.focus = self.focus.clone().tab_stop(tab_stop);
+        self
+    }
+
     /// Draws each grapheme as a bullet, for a secret: copy and cut leave
     /// the clipboard alone. Select, paste, input methods and undo work as
     /// ever, and [`value`](Self::value) is the real text.

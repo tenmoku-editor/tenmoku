@@ -133,6 +133,7 @@ impl Workbench {
         .chain(sidebar.history().map(|panel| panel.focus_handle(cx)))
         .chain(sidebar.quickfix().map(|panel| panel.focus_handle(cx)))
         .chain(sidebar.chat().map(|panel| panel.focus_handle(cx)))
+        .chain(sidebar.sidebar_plugin_focuses(cx))
         .chain(moved);
         (views.any(|focus| focus.contains_focused(window, cx))).then_some(Focused::Sidebar)
     }

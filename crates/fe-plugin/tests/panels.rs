@@ -236,3 +236,44 @@ fn panels_requires_panels_capability() {
         Err(Error::Unimplemented(_))
     ));
 }
+
+#[test]
+fn panels_revision_counts_every_shown_view() {
+    let views = PanelViews::new();
+    let state = plugin(&["panels"], &views);
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let set = |count: usize, ms: u64| state.panels.set_view_at("todos", flat(count), at(ms));
+    // None shown, none numbered.
+    assert_eq!(views.revision(PLUGIN, "todos"), 0);
+    assert_eq!(views.revision(PLUGIN, "nothing"), 0);
+    set(1, 0).unwrap();
+    let first = views.revision(PLUGIN, "todos");
+    assert!(first > 0);
+    // The same view again is a new revision once shown: the plugin
+    // answered, whatever it said.
+    set(1, 100).unwrap();
+    let again = views.revision(PLUGIN, "todos");
+    assert!(again > first);
+    assert_eq!(
+        views.view_with_revision(PLUGIN, "todos"),
+        (Some(flat(1)), again)
+    );
+    // A held view is numbered when its flush shows it.
+    assert_eq!(set(1, 110).unwrap(), Update::Coalesced);
+    assert_eq!(views.revision(PLUGIN, "todos"), again);
+    assert!(views.flush(PLUGIN, "todos", at(160)));
+    let flushed = views.revision(PLUGIN, "todos");
+    assert!(flushed > again);
+    // A new load's first view isn't numbered as one of the last load's.
+    let reloaded = plugin(&["panels"], &views);
+    assert_eq!(views.revision(PLUGIN, "todos"), 0);
+    reloaded
+        .panels
+        .set_view_at("todos", flat(1), at(200))
+        .unwrap();
+    assert!(views.revision(PLUGIN, "todos") > flushed);
+    // Unloaded, it shows none.
+    views.unload(PLUGIN);
+    assert_eq!(views.view_with_revision(PLUGIN, "todos"), (None, 0));
+}
