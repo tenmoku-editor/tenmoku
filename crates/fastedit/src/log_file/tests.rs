@@ -88,6 +88,27 @@ fn launch_line_is_first() {
     assert!(text.lines().nth(1).unwrap().contains("record"));
 }
 
+#[test]
+fn log_path_honours_the_state_dir() {
+    let env = |state: Option<&'static str>| {
+        move |name: &str| match name {
+            "TENMOKU_STATE_DIR" => state.map(PathBuf::from),
+            "HOME" => Some(PathBuf::from("/home/u")),
+            "XDG_STATE_HOME" => Some(PathBuf::from("/xdg")),
+            _ => None,
+        }
+    };
+    assert_eq!(
+        log_path(env(Some("/state"))),
+        Some(PathBuf::from("/state/tenmoku.log"))
+    );
+    let usual = log_path(env(None)).unwrap();
+    assert_ne!(usual, PathBuf::from("/state/tenmoku.log"));
+    assert!(usual.starts_with("/home/u") || usual.starts_with("/xdg"));
+    // Set but empty falls back.
+    assert_eq!(log_path(env(Some(""))), Some(usual));
+}
+
 /// The child half of [`install_follows_the_real_stderr`]: does nothing unless
 /// the parent started it with `TENMOKU_LOG_CHILD`.
 #[test]
@@ -120,6 +141,7 @@ fn install_follows_the_real_stderr() {
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "log_file::tests::install_child", "--nocapture"])
             .env("TENMOKU_LOG_CHILD", "1")
+            .env_remove("TENMOKU_STATE_DIR")
             .env("HOME", home.path())
             .env("XDG_STATE_HOME", home.path().join("state"))
             .stdout(Stdio::null())

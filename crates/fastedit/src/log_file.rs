@@ -4,6 +4,10 @@
 //! display link`) were all thrown away. [`install`] points fd 2 at an
 //! append-mode file in that case, and leaves a terminal, a pipe or a file the
 //! user redirected to as it is.
+//!
+//! The log lives in `$TENMOKU_STATE_DIR` when that is set (every nextest run
+//! sets its own), else `~/Library/Logs/Tenmoku` on macOS and
+//! `$XDG_STATE_HOME/tenmoku` elsewhere.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -80,8 +84,13 @@ fn fstat(fd: i32) -> io::Result<(u64, u64)> {
     Ok((stat.st_dev as u64, stat.st_ino as u64))
 }
 
-/// Where the log goes, from the environment.
+/// Where the log goes, from the environment: `$TENMOKU_STATE_DIR/tenmoku.log`
+/// when that is set and non-empty (on every platform, so a test run's own
+/// state dir holds its log too), else the platform's usual place.
 fn log_path(var: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(state) = var("TENMOKU_STATE_DIR").filter(|path| !path.as_os_str().is_empty()) {
+        return Some(state.join("tenmoku.log"));
+    }
     if cfg!(target_os = "macos") {
         Some(var("HOME")?.join("Library/Logs/Tenmoku/tenmoku.log"))
     } else {
