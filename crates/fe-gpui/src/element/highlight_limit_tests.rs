@@ -1,7 +1,7 @@
 //! Search highlighting has one time limit per painted frame, and a frame
 //! that ran out is not searched again until the pattern or the text changes.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fe_buffer::Buffer;
 use fe_command::Invocation;
@@ -58,17 +58,28 @@ fn found() -> usize {
 
 #[gpui::test]
 fn one_limit_per_frame(cx: &mut TestAppContext) {
-    TEST_LIMIT.with(|l| l.set(Some(Duration::from_millis(100))));
-    let (view, cx) = editor(cx, &format!("{}\n", "a".repeat(200_000)).repeat(20));
-    submit("/", r"a.*z\|a", cx);
+    // The frame's budget is counted in regex calls, not time, so how much
+    // the host gets done doesn't matter: the clock's limit is out of reach.
+    // The first row has more matches than the budget has calls, so the
+    // frame runs out in it, and a limit per row would paint the others too.
+    const ROWS: usize = 20;
+    const WIDTH: usize = 50;
+    const CALLS: u64 = 10;
+    TEST_LIMIT.with(|l| l.set(Some(Duration::from_secs(3600))));
+    let (view, cx) = editor(cx, &format!("{}\n", "a".repeat(WIDTH)).repeat(ROWS));
+    submit("/", "a", cx);
     unlatch(&view, cx);
-    let started = Instant::now();
+    fe_vim::search::set_call_limit(Some(CALLS));
+    let before = fe_vim::search::regex_calls();
     let painted = draw(&view, cx);
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "{:?}",
-        started.elapsed()
-    );
+    fe_vim::search::set_call_limit(None);
+    // The frame stopped searching when it ran out, a call or so past it.
+    let calls = fe_vim::search::regex_calls() - before;
+    assert!(calls <= CALLS + 1, "{calls}");
+    assert!(found() > 0 && found() < WIDTH, "{}", found());
+    assert!(view.read_with(cx, |view, _| {
+        view.layout.as_ref().unwrap().highlight_ran_out()
+    }));
     assert!(!painted.is_empty());
     assert!(painted.iter().all(|m| m.origin.y == painted[0].origin.y));
     let first_row_y = view.read_with(cx, |view, _| {
