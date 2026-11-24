@@ -9,7 +9,7 @@
 # 1. Checks <dist>/index.json against <dist>/index.json.sig and the
 #    registry.toml's public_key (`grammar-registry verify`), that the index's
 #    url_template is the repository's, that the published index's serial
-#    isn't newer than this one's, and that every file it names is in <dist>
+#    (or its watermark's) isn't newer than this one's, nor equal with other bytes, and that every file it names is in <dist>
 #    with its size and SHA-256. A draft release (a run cut off partway) fails
 #    the run. On any failure it publishes nothing.
 # 2. For each language: if the release <tag> exists, its assets' names and
@@ -186,22 +186,58 @@ tarballs=$("${registry[@]}" tarballs --index "$index")
 serial=$("${registry[@]}" serial --index "$index")
 
 # Never replace a newer index: a rerun of an older run keeps its commit, and
-# its older serial. The same serial is a retry, and goes ahead. The serial
-# isn't signature-checked here: only the registry's App can write the
-# release, and an index signed by a rotated-out key must still be readable.
+# its older serial. Freshness is judged against two records of what was last
+# published: the index.json asset, and a watermark in the release's notes,
+# `serial=<n> sha256=<index.json's digest>`, written before any pack or index
+# upload. `gh release upload --clobber` deletes the old asset before it
+# uploads the new one, so a failed upload leaves the release without an
+# index.json: the watermark is what still says how new it was. The same serial
+# with the same bytes is a retry, and goes ahead; the serial is only a commit
+# time, so the same serial with other bytes is another commit's index, and is
+# refused. A published release with neither record can't be judged, and is
+# refused. Neither is signature-checked here: only the registry's App can
+# write the release, and an index signed by a rotated-out key must still be
+# readable.
 release_view index
 index_state=$release_state
 [ "$index_state" != draft ] || draft "the index" index
-if [ "$index_state" = published ] && grep -q $'^index.json\t' <<<"$release_assets"; then
-  published=$(mktemp -d)
-  gh release download index --repo "$repo" --pattern index.json --dir "$published" </dev/null ||
-    die "couldn't download the published index.json: publishing nothing"
-  published_serial=$("${registry[@]}" serial --index "$published/index.json") ||
-    die "the published index.json doesn't parse, so its serial is unknown: publishing nothing"
-  rm -rf "$published"
-  [ "$serial" -ge "$published_serial" ] ||
-    die "the published index is serial $published_serial, newer than this one's $serial (a rerun of an older run?): publishing nothing"
-  echo "the published index is serial $published_serial; this one is $serial"
+index_sha=$(sha256 "$index")
+watermark_line="Publication watermark: serial=$serial sha256=$index_sha"
+watermark_current=
+# Dies unless a published index of serial $2 and digest $3, named $1, isn't
+# newer than this one, nor another index of the same serial.
+check_fresh() {
+  [ "$serial" -ge "$2" ] ||
+    die "the $1 is serial $2, newer than this one's $serial (a rerun of an older run?): publishing nothing"
+  if [ "$serial" -eq "$2" ] && [ "$index_sha" != "$3" ]; then
+    die "the $1 is serial $2 too, but not these bytes (SHA-256 $3, this one's $index_sha): another commit's index with the same commit time, so publishing nothing"
+  fi
+  echo "the $1 is serial $2; this one is $serial"
+}
+if [ "$index_state" = published ]; then
+  body=$(gh release view index --repo "$repo" --json body --jq .body </dev/null) ||
+    die "couldn't read the index release's notes: publishing nothing"
+  mark=$(sed -n 's/.*Publication watermark: serial=\([0-9][0-9]*\) sha256=\([0-9a-f]*\).*/\1 \2/p' <<<"$body" | tail -n 1)
+  known=
+  if [ -n "$mark" ]; then
+    read -r mark_serial mark_sha <<<"$mark"
+    check_fresh "index release's watermark" "$mark_serial" "$mark_sha"
+    [ "$mark_serial $mark_sha" != "$serial $index_sha" ] || watermark_current=1
+    known=1
+  fi
+  if grep -q $'^index.json\t' <<<"$release_assets"; then
+    published=$(mktemp -d)
+    gh release download index --repo "$repo" --pattern index.json --dir "$published" </dev/null ||
+      die "couldn't download the published index.json: publishing nothing"
+    published_serial=$("${registry[@]}" serial --index "$published/index.json") ||
+      die "the published index.json doesn't parse, so its serial is unknown: publishing nothing"
+    published_sha=$(sha256 "$published/index.json")
+    rm -rf "$published"
+    check_fresh "published index" "$published_serial" "$published_sha"
+    known=1
+  fi
+  [ -n "$known" ] ||
+    die "the index release has neither an index.json nor a publication watermark, so whether this index is the newest can't be established: publishing nothing (restore index.json or add the watermark line to the release's notes by hand)"
 fi
 
 create=()
@@ -261,10 +297,15 @@ done
 # 3. The index, last of all. The concurrency group keeps another run from
 # changing it since the check above.
 index_notes="The grammar registry's index and offline packs. index.json is signed by
-index.json.sig; check it with grammar-registry verify (docs/release/grammar-registry.md)."
+index.json.sig; check it with grammar-registry verify (docs/release/grammar-registry.md).
+$watermark_line"
+# The watermark goes in before any upload, so whatever a failed upload leaves,
+# the release still records the newest serial that started to publish.
 if [ "$index_state" = absent ]; then
   gh_run release create index --repo "$repo" --target main --latest=false \
     --title "Grammar index" --notes "$index_notes"
+elif [ -z "$watermark_current" ]; then
+  gh_run release edit index --repo "$repo" --notes "$index_notes"
 fi
 if [ ${#pack_files[@]} -gt 0 ]; then
   gh_run release upload index --repo "$repo" --clobber "${pack_files[@]}"

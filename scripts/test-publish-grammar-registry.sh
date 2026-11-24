@@ -31,7 +31,7 @@ wasm=$t/wasm
 dist=$t/dist
 mkdir -p "$grammars" "$wasm" "$t/bin" "$t/state"
 
-# The fake gh: `release view|create|upload|download <tag> ...`. Each call is
+# The fake gh: `release view|create|edit|upload|download <tag> ...`. Each call is
 # a line of the log, `<verb> <tag>` and the base names of the files it was
 # given. A release is the directory $GH_STATE/<tag>, holding its assets; it's
 # a draft while $GH_STATE/<tag>.draft exists. view prints what the script's
@@ -42,7 +42,7 @@ set -eu
 [ "$1" = release ] || { echo "fake gh: no $1" >&2; exit 2; }
 verb=$2 tag=$3
 shift 3
-files=() json= pattern= into=
+files=() json= pattern= into= notes=
 while [ $# -gt 0 ]; do
   case $1 in
   --repo)
@@ -51,7 +51,8 @@ while [ $# -gt 0 ]; do
   --json) json=$2; shift 2 ;;
   --pattern) pattern=$2; shift 2 ;;
   --dir) into=$2; shift 2 ;;
-  --target | --title | --notes | --jq) shift 2 ;;
+  --notes) notes=$2; shift 2 ;;
+  --target | --title | --jq) shift 2 ;;
   --latest=false | --clobber) shift ;;
   -*) echo "fake gh: unknown flag $1" >&2; exit 2 ;;
   *) files+=("$1"); shift ;;
@@ -67,6 +68,7 @@ add() {
 case $verb in
 view)
   [ -d "$release" ] || { echo "release not found" >&2; exit 1; }
+  if [ "$json" = body ]; then cat "$release.notes" 2>/dev/null || true; exit 0; fi
   [ "$json" = isDraft,assets ] || { echo "fake gh: --json $json" >&2; exit 2; }
   if [ -e "$release.draft" ]; then printf 'draft\ttrue\n'; else printf 'draft\tfalse\n'; fi
   for asset in "$release"/*; do
@@ -76,7 +78,11 @@ view)
 create)
   [ ! -d "$release" ] || { echo "a release with the same tag name already exists: $tag" >&2; exit 1; }
   mkdir "$release"
+  printf '%s\n' "$notes" >"$release.notes"
   add ;;
+edit)
+  [ -d "$release" ] || { echo "release not found" >&2; exit 1; }
+  printf '%s\n' "$notes" >"$release.notes" ;;
 upload)
   [ -d "$release" ] || { echo "release not found" >&2; exit 1; }
   add ;;
@@ -328,7 +334,7 @@ dist=$t/dist-b
 run || fail "B's publish failed"
 dist=$dist_a
 run && fail "A, older than the published B, was published"
-grep -q "the published index is serial 8, newer than this one's 7" "$t/out" || fail "A's refusal doesn't give the serials"
+grep -q "is serial 8, newer than this one's 7" "$t/out" || fail "A's refusal doesn't give the serials"
 grep -qvE "^(view|download) " "$t/log" && fail "A still published:
 $(log)"
 cmp -s "$t/state/index/index.json" "$t/dist-b/index.json" || fail "B's index was replaced"
@@ -337,3 +343,53 @@ dist=$t/dist-b
 run || fail "B's retry failed"
 dist=$dist_a
 ok "an older run's index never replaces a newer one, and a retry goes ahead"
+
+# 9. The newest serial survives a failed upload. B (serial 8) is published;
+# a retry of B then fails after gh --clobber has deleted index.json, as the
+# real one does before its replacement is up. A (serial 7) is still refused,
+# by the watermark in the release's notes, and B's retry recovers.
+reset
+dist=$t/dist-b
+run || fail "B's publish failed"
+rm "$t/state/index/index.json"
+dist=$dist_a
+run && fail "A was published over B's index release after its index.json was deleted"
+grep -q "watermark is serial 8, newer than this one's 7" "$t/out" || fail "A's refusal doesn't come from the watermark"
+grep -qvE "^view " "$t/log" && fail "A still published:
+$(log)"
+[ ! -e "$t/state/index/index.json" ] || fail "A uploaded an index.json"
+dist=$t/dist-b
+run || fail "B's recovery after the deleted index.json failed"
+cmp -s "$t/state/index/index.json" "$t/dist-b/index.json" || fail "B's index wasn't restored"
+dist=$dist_a
+ok "a deleted index.json doesn't open the index release to an older run, and the same index recovers it"
+# A published release with neither an index.json nor a watermark can't be judged.
+reset
+mkdir -p "$t/state/index"
+run && fail "a published index release with no record of its serial was published to"
+grep -q "whether this index is the newest can't be established" "$t/out" || fail "the unjudgeable release isn't explained"
+grep -qvE "^view " "$t/log" && fail "an unjudgeable release still published"
+ok "an index release with no index.json and no watermark is refused"
+
+# 10. The serial is only a commit time: another commit's index with the same
+# serial isn't a retry. B publishes, then C (serial 8, a grammar changed) is
+# refused, from the index.json and, with that deleted, from the watermark.
+reset
+echo "; changed" >>"$grammars/ruby/highlights.scm"
+build_dist "$t/dist-c" 8
+sed -i.bak '$d' "$grammars/ruby/highlights.scm" && rm "$grammars/ruby/highlights.scm.bak"
+cmp -s "$t/dist-b/index.json" "$t/dist-c/index.json" && fail "the fixture's C index is B's"
+dist=$t/dist-b
+run || fail "B's publish failed"
+dist=$t/dist-c
+run && fail "C, the same serial as B but other bytes, was published"
+grep -q "another commit's index with the same commit time" "$t/out" || fail "C's refusal isn't explained"
+grep -qvE "^(view|download) " "$t/log" && fail "C still published:
+$(log)"
+rm "$t/state/index/index.json"
+run && fail "C was published after B's index.json was deleted"
+grep -q "watermark is serial 8 too" "$t/out" || fail "C's refusal doesn't come from the watermark"
+dist=$t/dist-b
+run || fail "B's retry failed"
+dist=$dist_a
+ok "an equal serial is a retry only if the bytes are the same"
