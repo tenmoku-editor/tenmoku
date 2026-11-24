@@ -48,6 +48,7 @@
     shipping is free over {{ limits.max }} items
   {% endfilter %}
   {% filter trim | striptags | upper %}<em> {{ site.tagline }} </em>{% endfilter %}
+  {% filter trim | striptags | lower | upper | escape | title %}x{% endfilter %}
 
   {% call(row) table(product.variants, columns=["size", "colour"]) %}
     <td>{{ row.size }}</td><td>{{ row.colour | default(none) }}</td>

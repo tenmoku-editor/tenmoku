@@ -195,42 +195,36 @@
     (primary_expression
       (identifier) @function.call)))
 
-(filter_statement
-  (expression
-    (binary_expression
-      (unary_expression
-        (primary_expression
-          (identifier) @function.call)))))
-
 ; The grammar nests a filter chain to the left (`a | b | c` is
 ; ((a | b) | c)), so a `{% filter %}` block's first filter sits one level
-; deeper per `|`: chains of up to four filters.
-(filter_statement
-  (expression
-    (binary_expression
-      (binary_expression
-        (unary_expression
-          (primary_expression
-            (identifier) @function.call))))))
+; deeper per `|`. A query cannot descend a spine of unknown depth, so one
+; pattern per depth covers chains of up to 12 filters (generated).
+; Known limit: chains of 13 or more filters miss the first filter, because a
+; query can't descend unknown nesting in the prebuilt wasm grammar.
 
-(filter_statement
-  (expression
-    (binary_expression
-      (binary_expression
-        (binary_expression
-          (unary_expression
-            (primary_expression
-              (identifier) @function.call)))))))
+(filter_statement (expression (binary_expression (unary_expression (primary_expression (identifier) @function.call)))))
 
-(filter_statement
-  (expression
-    (binary_expression
-      (binary_expression
-        (binary_expression
-          (binary_expression
-            (unary_expression
-              (primary_expression
-                (identifier) @function.call))))))))
+(filter_statement (expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call))))))
+
+(filter_statement (expression (binary_expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call)))))))
+
+(filter_statement (expression (binary_expression (binary_expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call))))))))
+
+(filter_statement (expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call)))))))))
+
+(filter_statement (expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call))))))))))
+
+(filter_statement (expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call)))))))))))
+
+(filter_statement (expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call))))))))))))
+
+(filter_statement (expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call)))))))))))))
+
+(filter_statement (expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call))))))))))))))
+
+(filter_statement (expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call)))))))))))))))
+
+(filter_statement (expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (binary_expression (unary_expression (primary_expression (identifier) @function.call))))))))))))))))
 
 ; Added: the word operators (`is`, and `in` after `for`, are each a whole
 ; aliased `binary_operator`).
