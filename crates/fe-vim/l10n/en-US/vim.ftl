@@ -423,5 +423,4 @@ vim-remap-cmd-error = <Cmd>{ $line }<CR>: { $error }
 vim-remap-nop-left = <Nop> can't be a left side
 vim-remap-cmd-left = <Cmd> in a left side is not supported
 vim-remap-unsupported = <{ $name }> is not supported
-vim-remap-macro-cap = macro stopped: it would replay more than { $cap } keys
 vim-e223 = recursive mapping

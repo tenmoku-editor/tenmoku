@@ -772,7 +772,7 @@ pub(crate) fn insert(state: &mut VimState, key: VimKey) -> RemapInsert {
     state.provenance.read_from(origin);
     if taken.is_some() && state.remap.over_cap() {
         state.pending = Pending::new();
-        state.fail(tr!("vim-remap-macro-cap", cap = REPLAY_CAP).to_string());
+        state.fail(crate::macros::replay_capped());
         return RemapInsert::Wait;
     }
     let remap = tag.remap && !state.remap.off;
