@@ -25,7 +25,9 @@
 //!   bits past the legend are ignored, and a token running past the end of
 //!   its line is cut there.
 //! - **Failures.** A request past `lsp.timeouts.hover` (3 s) is
-//!   `Err(Retry)`, and cancels the request.
+//!   `Err(Retry)`, and cancels the request. So is a null or empty full
+//!   answer while the server isn't quiescent (`empty_is_final` false):
+//!   asked again, not taken as final empty tokens.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -189,6 +191,21 @@ struct Edit {
 enum Answer {
     Full(Full),
     Delta(Delta),
+    /// A null or empty full answer from a server not yet quiescent: not final.
+    NotFinal,
+}
+
+impl Answer {
+    /// A full answer: not final if it is empty and the server isn't yet
+    /// quiescent (`empty_is_final` false), as rust-analyzer's null while
+    /// its files load.
+    fn full(full: Full, empty_is_final: bool) -> Self {
+        if full.data.is_empty() && !empty_is_final {
+            Answer::NotFinal
+        } else {
+            Answer::Full(full)
+        }
+    }
 }
 
 impl LspManager {
@@ -202,7 +219,9 @@ impl LspManager {
     /// (nothing is sent). `Err(LspError::Retry)` if the server doesn't
     /// answer within `lsp.timeouts.hover` (which also cancels the request:
     /// a busy server answers a later ask, as rust-analyzer does once it has
-    /// analysed), or the answer can't be decoded as asked: the server was
+    /// analysed), or the server answers null or empty before it is
+    /// quiescent (rust-analyzer's answer while its files load: not final,
+    /// see [`Reply::empty_is_final`](crate::Reply)), or the answer can't be decoded as asked: the server was
     /// initializing, or restarted or reopened the document before the
     /// request went. Asking again then works. Dropping the future cancels the request. It
     /// doesn't borrow the manager.
@@ -291,9 +310,12 @@ impl LspManager {
                             },
                             move |_, reply| {
                                 reply.map(|reply| {
+                                    let empty_is_final = reply.empty_is_final;
                                     let answer = match reply.result {
-                                        None => Answer::Full(Full::default()),
-                                        Some(DeltaReply::Full(full)) => Answer::Full(full),
+                                        None => Answer::full(Full::default(), empty_is_final),
+                                        Some(DeltaReply::Full(full)) => {
+                                            Answer::full(full, empty_is_final)
+                                        }
                                         Some(DeltaReply::Delta(delta)) => Answer::Delta(delta),
                                     };
                                     (answer, at, Some((from.1, data)))
@@ -309,7 +331,8 @@ impl LspManager {
                             },
                             move |_, reply| {
                                 reply.map(|reply| {
-                                    (Answer::Full(reply.result.unwrap_or_default()), at, None)
+                                    let full = reply.result.unwrap_or_default();
+                                    (Answer::full(full, reply.empty_is_final), at, None)
                                 })
                             },
                         ),
@@ -337,6 +360,7 @@ impl LspManager {
                     return Ok(None);
                 };
                 let (result_id, data) = match answer {
+                    Answer::NotFinal => return Err(LspError::Retry),
                     Answer::Full(full) => (full.result_id, full.data),
                     Answer::Delta(delta) => match previous {
                         Some((from, previous)) if from == identity => {

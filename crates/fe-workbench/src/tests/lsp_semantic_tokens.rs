@@ -226,6 +226,9 @@ mod underline;
 #[path = "lsp_semantic_timeout.rs"]
 mod timeout;
 
+#[path = "lsp_semantic_slow_first_answer.rs"]
+mod slow_first_answer;
+
 #[path = "lsp_semantic_underline_colour.rs"]
 mod underline_colour;
 

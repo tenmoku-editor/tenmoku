@@ -18,10 +18,14 @@ use lsp_types::{
 use serde_json::{Value, json};
 
 use super::super::{Started, answer, manager};
+use crate::fake::Echo;
 use crate::fake::{
     FakeServer, InitializeReply, Record, Reply, Script, Scripted, initialize_result,
 };
-use crate::{LspError, ManualClock, SemanticToken, SemanticTokens, ServerSpec, ServerStatus};
+use crate::router::{ServerStatusNotification, ServerStatusParams};
+use crate::{
+    LspError, ManualClock, ReadinessMode, SemanticToken, SemanticTokens, ServerSpec, ServerStatus,
+};
 
 struct Tokens {
     s: Started,
@@ -32,6 +36,14 @@ struct Tokens {
 }
 
 fn start(encoding: PositionEncodingKind, full: Option<SemanticTokensFullOptions>) -> Tokens {
+    start_in(encoding, full, ReadinessMode::default())
+}
+
+fn start_in(
+    encoding: PositionEncodingKind,
+    full: Option<SemanticTokensFullOptions>,
+    readiness: ReadinessMode,
+) -> Tokens {
     let utf16 = encoding == PositionEncodingKind::UTF16;
     let mut init = initialize_result(Some(encoding));
     init.capabilities = ServerCapabilities {
@@ -65,7 +77,10 @@ fn start(encoding: PositionEncodingKind, full: Option<SemanticTokensFullOptions>
     let (mut manager, events) = manager(fake.launcher(), Some(clock.clone()));
     let server = manager
         .start(
-            ServerSpec::new("fake", "fake-server"),
+            ServerSpec {
+                readiness,
+                ..ServerSpec::new("fake", "fake-server")
+            },
             Path::new(super::super::ROOT),
         )
         .unwrap();
@@ -378,6 +393,73 @@ fn another_opening_is_asked_in_full() {
     let (method, params) = requests(&t.s.fake.records()).pop().unwrap();
     assert_eq!(method, SemanticTokensFullDeltaRequest::METHOD);
     assert_eq!(params["previousResultId"], json!("1"));
+}
+
+/// Says the server's quiescence, and returns once the client has read it.
+fn quiescent(t: &Tokens, quiescent: bool) {
+    t.s.fake
+        .notify::<ServerStatusNotification>(ServerStatusParams {
+            health: "ok".into(),
+            quiescent,
+            message: None,
+        });
+    answer(t.s.manager.request::<Echo>(t.s.server, json!({}))).unwrap();
+}
+
+#[test]
+fn a_null_answer_is_final_only_once_the_server_is_quiescent() {
+    let t = start_in(
+        PositionEncodingKind::UTF16,
+        full_only(),
+        ReadinessMode::ServerStatus,
+    );
+    reply(&t, SemanticTokensFullRequest::METHOD, Value::Null);
+    let asked = || {
+        answer(
+            t.s.manager
+                .semantic_tokens(t.buffer.id(), t.buffer.version(), None),
+        )
+    };
+    assert_eq!(asked(), Err(LspError::Retry));
+    quiescent(&t, false);
+    assert_eq!(asked(), Err(LspError::Retry));
+    quiescent(&t, true);
+    let found = asked().unwrap().unwrap();
+    assert!(found.tokens.is_empty());
+}
+
+#[test]
+fn a_null_or_empty_delta_answer_is_final_only_once_the_server_is_quiescent() {
+    let t = start_in(
+        PositionEncodingKind::UTF16,
+        delta(),
+        ReadinessMode::ServerStatus,
+    );
+    reply(
+        &t,
+        SemanticTokensFullRequest::METHOD,
+        json!({ "resultId": "1", "data": stream(&FIRST, t.utf16) }),
+    );
+    let first = ask(&t, None).unwrap();
+    let asked = || {
+        answer(
+            t.s.manager
+                .semantic_tokens(t.buffer.id(), t.buffer.version(), Some(&first)),
+        )
+    };
+    for empty in [Value::Null, json!({ "data": [] })] {
+        reply(&t, SemanticTokensFullDeltaRequest::METHOD, empty.clone());
+        quiescent(&t, false);
+        assert_eq!(asked(), Err(LspError::Retry), "{empty}");
+        quiescent(&t, true);
+        let found = asked().unwrap().unwrap();
+        assert!(found.tokens.is_empty(), "{empty}");
+    }
+    let sent = requests(&t.s.fake.records());
+    assert_eq!(
+        sent.last().unwrap().0,
+        SemanticTokensFullDeltaRequest::METHOD
+    );
 }
 
 #[test]

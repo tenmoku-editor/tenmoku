@@ -23,8 +23,22 @@ use crate::Workbench;
 /// How long the buffer holds still before tokens are asked for.
 const REST: Duration = Duration::from_millis(250);
 
-/// How many times a request the server wasn't ready for is asked again.
-const RETRIES: u32 = 8;
+/// How long before a request the server wasn't ready for is asked again
+/// the first time; it doubles with each ask, up to [`BACKOFF_MAX`].
+const BACKOFF: Duration = Duration::from_millis(250);
+
+/// The longest wait between asks a server isn't ready for.
+const BACKOFF_MAX: Duration = Duration::from_secs(5);
+
+/// The wait before ask number `attempt` (counting from 1) after a turn-away.
+fn backoff(attempt: u32) -> Duration {
+    BACKOFF
+        .saturating_mul(
+            1u32.checked_shl(attempt.saturating_sub(1))
+                .unwrap_or(u32::MAX),
+        )
+        .min(BACKOFF_MAX)
+}
 
 type Answer = Result<Option<SemanticTokens>, LspError>;
 
@@ -121,6 +135,9 @@ struct Slot {
     /// clears.
     keys_unchecked: Option<(Version, SemanticTokens)>,
     task: Option<Task<()>>,
+    /// Whether a slow server has been logged for the buffer since its last
+    /// answer.
+    slow_logged: bool,
 }
 
 /// Every shown buffer's tokens.
@@ -186,6 +203,7 @@ impl Workbench {
                     previous: None,
                     keys_unchecked: None,
                     task: None,
+                    slow_logged: false,
                 });
             let ids: Vec<EntityId> = editors.iter().map(|e| e.entity_id()).collect();
             slot.editors.retain(|id, _| ids.contains(id));
@@ -296,13 +314,26 @@ impl Workbench {
             Err(LspError::Retry) => {
                 // The server wasn't ready, or reopened the document.
                 slot.previous = None;
-                if attempt < RETRIES {
-                    self.ask_semantic_tokens_in(buffer, REST, attempt + 1, cx);
+                // Asked again while the buffer and server are as they were;
+                // an edit or another server asks for itself.
+                let unchanged = slot.editors.values().next().is_some_and(|(editor, _)| {
+                    editor.read(cx).model().snapshot().version() == version
+                });
+                if !unchanged {
+                    return;
                 }
+                if !std::mem::replace(&mut slot.slow_logged, true) {
+                    let server = (self.lsp.manager.as_ref())
+                        .and_then(|manager| super::lock(manager).route_of(buffer));
+                    log::info!(
+                        "semantic tokens: server {server:?} is slow to answer; asking again with backoff"
+                    );
+                }
+                self.ask_semantic_tokens_in(buffer, backoff(attempt + 1), attempt + 1, cx);
                 return;
             }
             Err(error) => {
-                log::debug!("no semantic tokens: {error}");
+                log::info!("no semantic tokens: {error}");
                 return;
             }
         };
@@ -315,6 +346,7 @@ impl Workbench {
             slot.previous = Some(tokens);
             return;
         }
+        slot.slow_logged = false;
         let (items, checked) = decorations(&tokens, &slot.editors, version, cx);
         slot.keys_unchecked = (!checked).then(|| (version, tokens.clone()));
         slot.previous = Some(tokens);
