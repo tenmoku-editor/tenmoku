@@ -1821,10 +1821,36 @@ fn a_focused_input_scrolled_out_of_a_list_still_takes_keys(cx: &mut TestAppConte
     }
     let (panel, events, cx) = panel_with(view.clone(), cx);
     cx.update(|window, _| window.activate_window());
-    show_view(&panel, uniform, cx);
+    show_view(&panel, uniform.clone(), cx);
     assert!(panel.read_with(cx, |panel, _| panel.lists["list"].uniform));
-    show_view(&panel, view, cx);
+    show_view(&panel, view.clone(), cx);
     assert!(!panel.read_with(cx, |panel, _| panel.lists["list"].uniform));
+    // Scrolled far below it: its row is still drawn, and still focused.
+    panel.update(cx, |panel, _| {
+        panel.lists["list"].measured.scroll_to(gpui::ListOffset {
+            item_ix: 900,
+            offset_in_item: gpui::px(3.),
+        })
+    });
+    draw(cx);
+    assert_eq!(scrolled_to(&panel, cx).0, 900);
+    // Uniform and measured again with the same ids: the top row and its
+    // offset are kept.
+    let (_, top_id, offset) = scrolled_by(&panel, cx);
+    show_view(&panel, uniform.clone(), cx);
+    assert!(panel.read_with(cx, |panel, _| panel.lists["list"].uniform));
+    show_view(&panel, view.clone(), cx);
+    draw(cx);
+    let (_, id, back) = scrolled_by(&panel, cx);
+    assert_eq!(id, top_id, "same top row id");
+    assert_eq!(back, offset, "same pixel offset");
+    panel.update(cx, |panel, _| {
+        panel.lists["list"].measured.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: gpui::px(0.),
+        })
+    });
+    draw(cx);
     click_node("q", cx);
     cx.simulate_input("a");
     let field = panel.read_with(cx, |panel, _| panel.inputs["q"].field.clone());

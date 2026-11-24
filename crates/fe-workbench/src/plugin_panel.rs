@@ -90,8 +90,8 @@ use fe_ui::{
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle,
     Focusable, Hsla, InteractiveElement as _, IntoElement, KeyContext, KeyDownEvent, ListAlignment,
-    ListOffset, ListState as MeasuredList, Modifiers, ParentElement as _, Render, ScrollStrategy,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    ListOffset, ListState as MeasuredList, Modifiers, ParentElement as _, Pixels, Render,
+    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
     UniformListScrollHandle, Window, div, list as measured_list, prelude::FluentBuilder as _, px,
     relative, svg, uniform_list,
 };
@@ -609,6 +609,10 @@ struct ListState {
     /// keys still reach that control. Focus given to the row itself goes to
     /// the list.
     row_focus: HashMap<String, RowFocus>,
+    /// The measured list's top row (node id, pixel offset) while the list is
+    /// drawn uniform: emptying the measured list resets its scroll, so the
+    /// top is restored by node id when measured rows come back.
+    parked_top: Option<(String, Pixels)>,
 }
 
 /// A measured row's focus, and what hands focus given to it to its list.
@@ -1207,6 +1211,7 @@ impl PluginPanel {
                 measured: MeasuredList::new(0, ListAlignment::Top, px(200.)),
                 ids: Vec::new(),
                 row_focus: HashMap::new(),
+                parked_top: None,
             });
         let ids: HashSet<&str> = rows
             .iter()
@@ -1236,6 +1241,11 @@ impl PluginPanel {
             // Drawn by `uniform_list` now: the measured list is emptied, so
             // measured rows coming back are registered again, with focus.
             state.row_focus.clear();
+            if state.measured.item_count() > 0 {
+                let top = state.measured.logical_scroll_top();
+                state.parked_top =
+                    (state.ids.get(top.item_ix)).map(|id| (id.clone(), top.offset_in_item));
+            }
             state.measured.splice(0..state.measured.item_count(), 0);
         } else if new_ids == state.ids && state.measured.item_count() == rows.len() {
             // The same rows: measured again where they are, as a new view
@@ -1244,9 +1254,14 @@ impl PluginPanel {
             state.measured.remeasure_items(0..rows.len());
         } else {
             // Other rows: the one at the top stays at the top, by its node.
-            let top = state.measured.logical_scroll_top();
-            let kept = (state.ids.get(top.item_ix))
-                .and_then(|id| new_ids.iter().position(|new| new == id));
+            let mut top = state.measured.logical_scroll_top();
+            let mut top_id = state.ids.get(top.item_ix).cloned();
+            if let Some((id, offset)) = state.parked_top.take() {
+                // Back from uniform: the top the measured list had before.
+                top_id = Some(id);
+                top.offset_in_item = offset;
+            }
+            let kept = top_id.and_then(|id| new_ids.iter().position(|new| *new == id));
             state.row_focus.retain(|id, _| ids.contains(id.as_str()));
             for id in &new_ids {
                 (state.row_focus.entry(id.clone())).or_insert_with(|| RowFocus {
