@@ -86,6 +86,10 @@ Copyright (c) 2021 Munif Tanjim. The crate ships no LICENSE file; the line is
 from the repository's LICENSE.md at v0.5.0.
 Licensed under the MIT License.
 
+tree-sitter-batch (highlight query, adapted in extensions/grammars/batch/highlights.scm, wharflab/tree-sitter-batch 2aa22f00d7f5bbe58556b8eef0b1fc1629508603)
+Copyright (c) 2026 WharfLab
+Licensed under the MIT License.
+
 Lucide icons (lucide-icons/lucide 1.52.0, in kiln/crates/kiln-ui/assets/icons;
 stroke width set to 1.75)
 Copyright (c) 2026 Lucide Icons and Contributors.

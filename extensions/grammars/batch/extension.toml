@@ -1,0 +1,17 @@
+id = "tenmoku.grammar_batch"
+name = "Batch syntax"
+version = "0.11.1"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "batch"
+wasm = "tree-sitter-batch.wasm"
+extensions = ["bat", "cmd"]
+packs = ["shells"]
+line_comment = "REM"
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false

@@ -1,0 +1,4 @@
+git = "https://github.com/wharflab/tree-sitter-batch"
+rev = "2aa22f00d7f5bbe58556b8eef0b1fc1629508603"
+src = "src"
+grammar = "batch"
