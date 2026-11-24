@@ -43,7 +43,12 @@ make it faster or smaller (see the imara Histogram and large-text notes). A test
 that a task criterion or `--regression-test` names must not be in the slow set:
 the gate must run it, and Regatta refuses a criterion whose test did not run in
 the gate. The gate and `rgt ci run --fast` skip the slow set; `post_merge` runs
-it (stage `test_all`). By hand: `cargo nextest run --profile ci
+it (stage `test_all`). Every test is capped at 10 minutes (`slow-timeout`
+60 s x 10 in `profile.default`, inherited by `profile.ci`) so a hung test fails
+with TIMEOUT instead of hanging the run; the slow set gets 30 minutes. A test
+added to the slow set is added to both filtersets in `.config/nextest.toml`
+(the `profile.ci` `default-filter` and the `profile.default` slow-timeout
+override). By hand: `cargo nextest run --profile ci
 --ignore-default-filter`, or the unfiltered default profile.
 
 **Affected packages.** The gate and `rgt ci run --fast` test only the packages

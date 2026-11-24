@@ -1,5 +1,38 @@
 experimental = ["setup-scripts"]
 
+# A hung test fails instead of hanging the run: a vps01 run waited 7h45m on a
+# test that locked a std::Mutex twice. After 10 periods of 60 s nextest sends
+# SIGTERM, then kills the test after the grace period, and reports TIMEOUT.
+# profile.ci inherits this.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# The slow set gets 30 minutes: under parallel load in post_merge's test_all
+# these take minutes. An override can't refer to profile.ci's default-filter, so
+# keep this list in step with it (plus the fe-syntax wasm parity tests).
+[[profile.default.overrides]]
+filter = '''
+  (package(fe-workbench) and test(=tests::m3_signoff::a_100k_file_project_end_to_end))
+  or (package(fe-project) and test(=tests::finder::a_100k_file_index_bounds_query_work))
+  or (package(fe-project) and test(=tests::large::a_100k_file_tree_loads_lazily))
+  or (package(fe-editor) and test(=a_new_file_saves_on_an_exfat_volume))
+  or (package(fe-vim) and test(=counted_replace_of_regional_indicators_stays_bounded))
+  or (package(fe-vim) and test(=huge_virtual_counts_stay_bounded))
+  or (package(fe-vim) and test(=a_huge_virtual_count_stays_bounded))
+  or (package(fe-vim) and test(=a_visual_counted_l_goes_over_the_windows_edge))
+  or (package(fe-vim) and test(=columns_far_along_a_huge_row_are_the_rows_own))
+  or (package(fe-vim) and test(=graphemes_joining_across_the_windows_edge_stay_whole))
+  or (package(fe-vim) and test(=graphemes_joining_across_the_windows_left_edge_stay_whole))
+  or (package(fe-vim) and test(=sentence_objects_and_motions_go_over_the_windows_edge))
+  or (package(fe-vim) and test(=keys_from_the_middle_of_a_100_mb_row_land_as_on_a_short_row))
+  or (package(fe-vim) and test(=counted_replace_of_regional_indicators_caps_at_max_put))
+  or (package(fe-vim) and test(=insert::keys::tests::counted_replay_of_an_oversized_register_is_refused))
+  or (package(fe-vim) and test(=insert::keys::tests::dot_replay_of_an_oversized_register_is_refused))
+  or package(fe-syntax)
+  or test(=every_extension_highlights_its_sample)
+'''
+slow-timeout = { period = "60s", terminate-after = 30 }
+
 # Keep nextest's store in the workspace even when CARGO_TARGET_DIR points elsewhere,
 # so Regatta finds the JUnit report at target/nextest/ci/junit.xml.
 [store]
