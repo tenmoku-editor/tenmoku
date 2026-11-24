@@ -9,7 +9,11 @@
 # secrets against a fixture bundle (a copy of /usr/bin/true, as test-bundle-macos.sh does), the
 # Sparkle steps, a run of make-appcast.sh on that bundle's zip, and the Velopack (vpk) steps: vpk
 # at the crate's pin, the Setup.exe and AppImage packs (velopack-pack.sh --linux --dry-run runs),
-# their smoke steps, the feeds' signing key and the publish guard for their .sig files.
+# their smoke steps, the feeds' signing key and the publish guard for their .sig files; and
+# preview tags (vX.Y.Z-preview.N): the preview appcast written for stable and preview versions,
+# no appcast.xml for a preview, the preview feeds baked in and packed, publish's --prerelease
+# --latest=false for a preview and --latest for a new stable, and the stale-feed guard over the
+# preview files.
 # Prints one line per check and exits non-zero on the first failure. macOS only; needs
 # actionlint (brew install actionlint).
 set -eu
@@ -351,7 +355,7 @@ echo "$publish_job" | grep -q -F 'notes="release-notes/$version.md"' || fail "pu
 echo "$publish_job" | grep -q -F 'gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \' &&
 	echo "$publish_job" | grep -q -F -- '--title "Tenmoku $GITHUB_REF_NAME" --notes-file "$body"' ||
 	fail "gh release create does not take --notes-file"
-echo "$publish_job" | grep -q -x -F '            gh release edit "$GITHUB_REF_NAME" --notes-file "$body"' ||
+echo "$publish_job" | grep -q -x -F '            gh release edit "$GITHUB_REF_NAME" --notes-file "$body" "$@"' ||
 	fail "a re-run does not set the body with gh release edit --notes-file"
 if grep -n -e '--generate-notes' "$wf"; then
 	fail "release.yml still generates notes (line above)"
@@ -476,36 +480,63 @@ chmod +x "$t/bin/gh"
 # logs its arguments; with and without the version's notes file.
 mkdir -p "$t/signrun/scripts" "$t/signrun/dist" "$t/tools"
 printf '#!/bin/sh\ncat >/dev/null\necho AbCd==\n' >"$t/tools/sign_update"
-printf '#!/bin/sh\necho "$@" >"$APPCAST_ARGS"\n' >"$t/signrun/scripts/make-appcast.sh"
+printf '#!/bin/sh\necho "$@" >>"$APPCAST_ARGS"\n' >"$t/signrun/scripts/make-appcast.sh"
 chmod +x "$t/tools/sign_update" "$t/signrun/scripts/make-appcast.sh"
 : >"$t/signrun/dist/Tenmoku-1.2.3-macos-arm64.zip"
+# sign_run [VERSION]: the sign step for VERSION (default 1.2.3); make-appcast.sh's calls, one a
+# line, in $t/appcast.args.
 sign_run() {
-	(cd "$t/signrun" && SPARKLE_ED_PRIVATE_KEY=fake SPARKLE_TOOLS="$t/tools" VERSION=1.2.3 \
+	rm -f "$t/appcast.args"
+	(cd "$t/signrun" && SPARKLE_ED_PRIVATE_KEY=fake SPARKLE_TOOLS="$t/tools" VERSION="${1:-1.2.3}" \
 		DOWNLOAD_URL_PREFIX=https://example.test/dl APPCAST_ARGS="$t/appcast.args" bash -e "$t/sign-step.sh") >"$t/signrun.log" 2>&1 ||
 		{ cat "$t/signrun.log"; fail "the sign step failed"; }
 }
 sign_run
-grep -q -e '--out dist/appcast.xml$' "$t/appcast.args" || fail "no notes file, yet make-appcast.sh got: $(cat "$t/appcast.args")"
+grep -q -e '--out dist/appcast.xml$' "$t/appcast.args" &&
+	grep -q -e '--out dist/appcast-preview.xml --channel-feed preview$' "$t/appcast.args" ||
+	fail "no notes file, yet make-appcast.sh got: $(cat "$t/appcast.args")"
 grep -q 'no release-notes/1.2.3.md: the appcast has no description' "$t/signrun.log" || fail "no line for the missing notes: $(cat "$t/signrun.log")"
 mkdir -p "$t/signrun/release-notes"
 printf '## Fixed\n\n- A fix.\n' >"$t/signrun/release-notes/1.2.3.md"
 sign_run
-grep -q -e '--out dist/appcast.xml --notes-file release-notes/1.2.3.md$' "$t/appcast.args" ||
+grep -q -e '--out dist/appcast.xml --notes-file release-notes/1.2.3.md$' "$t/appcast.args" &&
+	grep -q -e '--out dist/appcast-preview.xml --channel-feed preview --notes-file release-notes/1.2.3.md$' "$t/appcast.args" ||
 	fail "make-appcast.sh did not get the notes file: $(cat "$t/appcast.args")"
 ok "the appcast step passes release-notes/\$VERSION.md as --notes-file when it is there"
-# Runs the publish step in a fresh dist/ holding the zip, and appcast.xml when $1 is "appcast".
-publish() {
+# A stable version: appcast.xml and appcast-preview.xml, both for the one zip. A preview: only
+# appcast-preview.xml, on the preview feed.
+[ "$(wc -l <"$t/appcast.args" | tr -d ' ')" = 2 ] || fail "a stable version's appcasts: $(cat "$t/appcast.args")"
+[ "$(grep -c -F -- '--zip dist/Tenmoku-1.2.3-macos-arm64.zip --version 1.2.3 --download-url https://example.test/dl/Tenmoku-1.2.3-macos-arm64.zip --signature AbCd== ' "$t/appcast.args")" = 2 ] ||
+	fail "a stable version's appcasts are not both of its zip: $(cat "$t/appcast.args")"
+ok "a stable version writes appcast.xml and appcast-preview.xml (--channel-feed preview)"
+: >"$t/signrun/dist/Tenmoku-1.2.3-preview.1-macos-arm64.zip"
+printf '## Fixed\n\n- A fix.\n' >"$t/signrun/release-notes/1.2.3-preview.1.md"
+sign_run 1.2.3-preview.1
+[ "$(cat "$t/appcast.args")" = '--zip dist/Tenmoku-1.2.3-preview.1-macos-arm64.zip --version 1.2.3-preview.1 --download-url https://example.test/dl/Tenmoku-1.2.3-preview.1-macos-arm64.zip --signature AbCd== --out dist/appcast-preview.xml --channel-feed preview --notes-file release-notes/1.2.3-preview.1.md' ] ||
+	fail "a preview version's appcasts: $(cat "$t/appcast.args")"
+ok "a preview version writes appcast-preview.xml only, never appcast.xml"
+# The tag the publish step runs for.
+tag=v1.2.3
+# stage [appcast] [FILE...]: a fresh dist/ holding $tag's zip, appcast.xml when $1 is "appcast",
+# and each FILE (empty); and $tag's notes.
+stage() {
 	rm -rf "$t/run" "$t/gh.log" "$t/gh.log.body" "$t/runner"
 	mkdir -p "$t/run/dist" "$t/run/release-notes" "$t/runner"
 	: >"$t/gh.log"
-	: >"$t/run/dist/Tenmoku-1.2.3-macos-arm64.zip"
-	[ "$1" != appcast ] || : >"$t/run/dist/appcast.xml"
-	printf '%s\n' "$good" >"$t/run/release-notes/1.2.3.md"
+	: >"$t/run/dist/Tenmoku-${tag#v}-macos-arm64.zip"
+	[ "${1-}" != appcast ] || : >"$t/run/dist/appcast.xml"
+	[ $# -eq 0 ] || shift
+	for f in "$@"; do : >"$t/run/dist/$f"; done
+	printf '%s\n' "$good" >"$t/run/release-notes/${tag#v}.md"
+}
+# Runs the publish step in a fresh dist/ (stage's arguments).
+publish() {
+	stage "$@"
 	publish_again
 }
 # The publish step again on the same folder.
 publish_again() {
-	(cd "$t/run" && PATH="$t/bin:$PATH" GITHUB_REF_NAME=v1.2.3 FAKE_GH_LOG="$t/gh.log" RUNNER_TEMP="$t/runner" \
+	(cd "$t/run" && PATH="$t/bin:$PATH" GITHUB_REF_NAME=$tag FAKE_GH_LOG="$t/gh.log" RUNNER_TEMP="$t/runner" \
 		GH_REPO=owner/repo GLIBC=2.39 bash -e "$t/publish-step.sh") >"$t/publish.log" 2>&1
 }
 # The body gh was last given: the notes file, a blank line, then the downloads paragraph.
@@ -604,6 +635,104 @@ fi
 grep -q 'no release-notes/1.2.3.md at v1.2.3' "$t/publish.log" || fail "no reason given: $(cat "$t/publish.log")"
 [ ! -s "$t/gh.log" ] || fail "a release with no notes was changed: $(cat "$t/gh.log")"
 ok "publish refuses a tag with no notes file and changes nothing"
+
+# Preview tags (vX.Y.Z-preview.N): the trigger takes them, the version job's check passes one at
+# Cargo.toml's version, and they build in the same four jobs (no job is limited to stable tags).
+trigger=$(sed -n "s/^    tags: \\['\\(.*\\)'\\]$/\\1/p" "$wf")
+preview_tag=v1.2.3-preview.1
+# shellcheck disable=SC2254 # the trigger's glob, as a pattern
+case "$preview_tag" in $trigger) ;; *) fail "the trigger's tags '$trigger' do not take $preview_tag" ;; esac
+printf '[workspace]\nmembers = []\n\n[workspace.package]\nversion = "%s"\nedition = "2024"\n' 1.2.3-preview.1 >"$lay/Cargo.toml"
+printf '%s\n' "$good" >"$lay/release-notes/1.2.3-preview.1.md"
+"$check" v1.2.3-preview.1 >"$t/check.log" 2>&1 || { cat "$t/check.log"; fail "the version job's check refused v1.2.3-preview.1"; }
+"$check" v1.2.3 >/dev/null 2>&1 && fail "v1.2.3 passed at Cargo.toml's 1.2.3-preview.1"
+if grep -n -E '^ +if: .*(preview|GITHUB_REF_NAME|github\.ref_name)' "$wf"; then
+	fail "a job or step above is conditional on the tag's name: a preview builds as a stable does"
+fi
+ok "a preview tag triggers the workflow, passes the version job's check and runs the same jobs"
+
+# The macOS bundle step's preview feed, the Velopack builds' preview feed, and the packs' channels.
+echo "$bundle_env" | grep -q -F -- "TENMOKU_PREVIEW_FEED_URL: \${{ vars.TENMOKU_PREVIEW_FEED_URL || format('https://github.com/{0}/releases/download/preview/appcast-preview.xml', github.repository) }}" ||
+	fail "the bundle step does not set the preview appcast's URL"
+job_has macos-arm64 'scripts/bundle-macos.sh --version "\$\{GITHUB_REF_NAME#v\}"$' "the tag's version, a preview's too, to the bundle"
+preview_feed="TENMOKU_UPDATE_FEED_PREVIEW: \${{ vars.TENMOKU_UPDATE_FEED_PREVIEW || format('https://github.com/{0}/releases/download/preview', github.repository) }}"
+for j in windows linux-x86_64; do
+	step "$j" "Build the release binary" | grep -q -F -- "$preview_feed" || fail "$j does not bake in the preview feed"
+done
+step windows "Pack Setup.exe" | grep -q -e '-ChannelSet both$' || fail "the windows pack does not pass -ChannelSet both"
+step linux-x86_64 "Pack the AppImage" | grep -q -e '--channel-set both$' || fail "the linux pack does not pass --channel-set both"
+ok "the builds bake in the preview feeds; the packs put a stable on both channels and a preview on its own"
+
+# publish's flags: a preview is a prerelease and never latest, on create and re-run; a new
+# stable is latest, and a stable re-run leaves latest alone.
+FAKE_VIEW_RC=1 FAKE_ASSETS=''
+publish appcast || { cat "$t/publish.log"; fail "a new stable release failed"; }
+grep -q -e '^release create v1.2.3 .* --latest$' "$t/gh.log" || fail "a new stable release is not --latest: $(cat "$t/gh.log")"
+grep -q -e '--prerelease\|--latest=false' "$t/gh.log" && fail "a new stable release is a prerelease: $(cat "$t/gh.log")"
+FAKE_VIEW_RC=0
+publish appcast || { cat "$t/publish.log"; fail "a stable rerun failed"; }
+grep -q -e '^release edit v1.2.3 --notes-file [^ ]*$' "$t/gh.log" || fail "a stable rerun changed more than the body: $(cat "$t/gh.log")"
+ok "a new stable release is created --latest; a stable rerun sets only the body"
+tag=v1.2.3-preview.1
+FAKE_VIEW_RC=1
+publish none appcast-preview.xml releases.linux-x86_64-preview.json || { cat "$t/publish.log"; fail "a new preview release failed"; }
+grep -q -e '^release create v1.2.3-preview.1 .*dist/appcast-preview.xml .* --title Tenmoku v1.2.3-preview.1 --notes-file [^ ]* --prerelease --latest=false$' "$t/gh.log" ||
+	fail "a new preview release is not a prerelease off latest: $(cat "$t/gh.log")"
+grep -q -e ' --latest$\|--latest ' "$t/gh.log" && fail "a new preview release is marked latest: $(cat "$t/gh.log")"
+FAKE_VIEW_RC=0
+publish none appcast-preview.xml || { cat "$t/publish.log"; fail "a preview rerun failed"; }
+grep -q -e '^release upload v1.2.3-preview.1 .*--clobber$' "$t/gh.log" &&
+	grep -q -e '^release edit v1.2.3-preview.1 --notes-file [^ ]* --prerelease --latest=false$' "$t/gh.log" ||
+	fail "a preview rerun is not kept a prerelease off latest: $(cat "$t/gh.log")"
+ok "a preview is created, and kept on a rerun, --prerelease --latest=false"
+# A preview carries the preview feeds only: an appcast.xml or a -stable feed is an upload bug.
+for f in appcast.xml releases.linux-x86_64-stable.json releases.windows-x64-stable.json; do
+	for FAKE_VIEW_RC in 0 1; do
+		if publish none appcast-preview.xml "$f"; then
+			fail "a preview release with $f was published"
+		fi
+		grep -q "the preview v1.2.3-preview.1 has dist/$f" "$t/publish.log" || fail "no reason given: $(cat "$t/publish.log")"
+		[ ! -s "$t/gh.log" ] || fail "a preview with $f changed the release: $(cat "$t/gh.log")"
+	done
+done
+ok "a preview release with appcast.xml or a -stable feed is refused and changes nothing"
+
+# The stale-feed guard covers the preview feeds: a rerun that made no appcast-preview.xml, or no
+# preview feed .sig, over a release that has one is refused; one that made them replaces them.
+FAKE_VIEW_RC=0
+for tag in v1.2.3-preview.1 v1.2.3; do
+	FAKE_ASSETS="Tenmoku-${tag#v}-macos-arm64.zip
+appcast-preview.xml"
+	if [ "$tag" = v1.2.3 ]; then
+		FAKE_ASSETS="$FAKE_ASSETS
+appcast.xml"
+		set -- appcast
+	else
+		set -- none
+	fi
+	if publish "$@"; then
+		fail "$tag: a rerun with no appcast-preview.xml over a release that has one was not refused"
+	fi
+	grep -q 'has an appcast-preview.xml and this run made none' "$t/publish.log" || fail "$tag: no reason given: $(cat "$t/publish.log")"
+	[ ! -s "$t/gh.log" ] || fail "$tag: the refused rerun still changed the release: $(cat "$t/gh.log")"
+	publish "$@" appcast-preview.xml || { cat "$t/publish.log"; fail "$tag: a signed rerun of a signed preview appcast failed"; }
+	grep -q "^release upload $tag .*dist/appcast-preview.xml .*--clobber" "$t/gh.log" || fail "$tag: the signed rerun: $(cat "$t/gh.log")"
+	FAKE_ASSETS="Tenmoku-${tag#v}-macos-arm64.zip
+releases.windows-arm64-preview.json
+releases.windows-arm64-preview.json.sig"
+	if publish none releases.windows-arm64-preview.json; then
+		fail "$tag: a rerun with no preview feed signature over a release that has one was not refused"
+	fi
+	grep -q "has releases.windows-arm64-preview.json.sig and this run made none" "$t/publish.log" ||
+		fail "$tag: no reason given: $(cat "$t/publish.log")"
+	[ ! -s "$t/gh.log" ] || fail "$tag: the refused rerun still changed the release: $(cat "$t/gh.log")"
+	publish none releases.windows-arm64-preview.json releases.windows-arm64-preview.json.sig ||
+		{ cat "$t/publish.log"; fail "$tag: a signed rerun of a signed preview feed failed"; }
+	grep -q "^release upload $tag .*dist/releases.windows-arm64-preview.json.sig .*--clobber" "$t/gh.log" ||
+		fail "$tag: the signed preview feed rerun: $(cat "$t/gh.log")"
+done
+tag=v1.2.3 FAKE_ASSETS=''
+ok "a rerun of a stable or preview tag with no appcast-preview.xml or preview feed .sig over a signed one is refused"
 
 # C5: no tracing, no echo of secret-named variables.
 if grep -n -E "set -x|echo.*(PASSWORD|CERTIFICATE|APPLE_APP)" "$sign"; then
