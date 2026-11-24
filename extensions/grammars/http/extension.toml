@@ -1,0 +1,18 @@
+id = "tenmoku.grammar_http"
+name = "HTTP request syntax"
+version = "0.2.4"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "http"
+wasm = "tree-sitter-kulala-http.wasm"
+extensions = ["http", "rest"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+packs = ["web"]
+earlier_patterns_win = false
+license = "MIT"
+line_comment = "#"
