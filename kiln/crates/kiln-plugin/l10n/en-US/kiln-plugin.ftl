@@ -116,6 +116,28 @@ kiln-plugin-panel-not-a-bool = panel `{ $key }` must be true or false
 kiln-plugin-panel-tick-out-of-range = panel `tick_ms` of { $value } must be between { $min } and { $max }
 # `$panel` is the panel id, quoted; `$capability` is the capability it needs.
 kiln-plugin-panel-realtime-without-capability = panel { $panel } declares `tick_ms` or `keys`, which needs the `{ $capability }` capability
+
+# `$id` is the extension's id; `$reason` is one of the kiln-plugin-binding-*
+# messages below.
+kiln-plugin-manifest-binding = { $id }: [[contributes.plugin.bindings]]: { $reason }
+kiln-plugin-binding-not-a-table = each entry must be a table
+# `$key` is a key of a binding entry.
+kiln-plugin-binding-missing = a binding needs a `{ $key }`
+kiln-plugin-binding-not-a-string = binding `{ $key }` must be a string
+kiln-plugin-binding-empty = binding `{ $key }` must not be empty
+kiln-plugin-binding-unknown-key = unknown key `{ $key }`
+# `$keys` is the keys as written in the manifest, quoted.
+kiln-plugin-binding-bad-keys = binding keys { $keys } are not keys that can be pressed
+# `$context` is the context as written, quoted.
+kiln-plugin-binding-bad-context = binding context { $context } is not a context expression
+# `$command` is the command as written, quoted.
+kiln-plugin-binding-foreign-command = binding command { $command } is not one of this plugin's own commands
+kiln-plugin-binding-without-capability = binding keys needs the `{ $capability }` capability
+kiln-plugin-binding-duplicate = two bindings share the keys { $keys } and the same context, so one could never run
+kiln-plugin-binding-too-many = a plugin may declare at most { $max } key bindings
+# `$keys` is the keys as written, quoted. The first keystroke of a plugin
+# binding may not be plain typing: see `first_keystroke_is_allowed`.
+kiln-plugin-binding-bad-first-keystroke = binding keys { $keys } must start with a function key, or with ctrl or this platform's secondary modifier: plain typing keys, escape, tab, enter and alt-only keys stay with the editor
 # `$path` is the `wasm` path, quoted; `$reason` one of the messages below.
 kiln-plugin-manifest-wasm-path = { $id }: wasm path { $path }: { $reason }
 kiln-plugin-wasm-path-empty = the path is empty

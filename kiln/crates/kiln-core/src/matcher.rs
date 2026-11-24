@@ -100,6 +100,15 @@ impl Matcher {
         let mut exact: Option<(usize, usize, usize)> = None;
         // The deepest context a longer binding starting with the keys is in.
         let mut longer: Option<usize> = None;
+        // The same two for the host layers, kept apart: a host binding runs
+        // only where NO other layer's binding for these keys - or for a
+        // chord either starts - applies in this stack, whatever the
+        // contexts' depths (T2106). Depth outranks layer order for ordinary
+        // bindings, so this cannot be a rank; the host candidates are
+        // simply not looked at when an ordinary one is there.
+        let mut host_exact: Option<(usize, usize, usize)> = None;
+        let mut host_longer: Option<usize> = None;
+        let mut ordinary = false;
         for (ix, binding) in self.keymap.bindings().iter().enumerate() {
             let keys = binding.keys.keystrokes();
             let matches_prefix = keys.len() <= self.pending.len() && self.pending.starts_with(keys);
@@ -110,12 +119,23 @@ impl Matcher {
             let Some(depth) = binding.depth(stack) else {
                 continue;
             };
+            let (exact, longer) = if binding.host {
+                (&mut host_exact, &mut host_longer)
+            } else {
+                ordinary = true;
+                (&mut exact, &mut longer)
+            };
             if extends {
-                longer = longer.max(Some(depth));
+                *longer = (*longer).max(Some(depth));
             } else if exact.is_none_or(|best| (keys.len(), depth, ix) > best) {
-                exact = Some((keys.len(), depth, ix));
+                *exact = Some((keys.len(), depth, ix));
             }
         }
+        let (exact, longer) = if ordinary {
+            (exact, longer)
+        } else {
+            (host_exact, host_longer)
+        };
         let invocation = |ix: usize| self.keymap.bindings()[ix].invocation(stack);
         if let Some(longer_depth) = longer {
             return match exact {

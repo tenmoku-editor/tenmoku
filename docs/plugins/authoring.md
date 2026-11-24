@@ -66,7 +66,7 @@ in a prompt, and nothing is granted until they accept:
 |---|---|
 | `buffer.read` | read the text of open buffers |
 | `buffer.write` | edit or propose edits to open buffers |
-| `commands` | register commands and invoke the commands plugins may call |
+| `commands` | register commands, invoke the commands plugins may call, and bind keys to its own commands |
 | `decorations` | draw decorations and gutter marks in editors |
 | `status` | show items in the status bar |
 | `fs.read:workspace` | read files in the open workspace |
@@ -118,6 +118,61 @@ is something your plugin does rather than something it declares.
 
 Some keys never reach a panel even with `keys = true`: `escape`, `tab`, and
 anything carrying the secondary modifier stay with the editor.
+
+### Key bindings
+
+A plugin asks for keys in `[[contributes.plugin.bindings]]`:
+
+```toml
+[[contributes.plugin.bindings]]
+keys = "ctrl-alt-9"
+command = "example.word_count.recount"
+
+[[contributes.plugin.bindings]]
+command = "example.word_count.recount"
+context = "editor"           # optional; omitted = everywhere
+[contributes.plugin.bindings.keys]
+macos = "cmd-alt-9"
+default = "ctrl-alt-9"
+```
+
+`keys` is a string, or a table by platform (`macos`, `linux`, `windows`,
+`default`) in the shape `keymap.toml` allows, read for the platform your
+manifest is read on. `command` must be one of your own plugin's commands —
+`<your id>.<something>` — so no plugin can bind keys to another plugin's
+command, or to one of the editor's. A chord is written as its keystrokes
+separated by spaces, as in a keymap file.
+
+Bindings need the `commands` capability, and like `panels.realtime` it is
+checked **when your manifest is read** — at install or load — not when your
+code runs: keys are promised before your plugin starts. A plugin may declare at
+most 32 bindings, and two bindings sharing the same keys and the same context
+are refused, because one of them could never run.
+
+**Which keys you may ask for.** The first keystroke must be a function key, or
+carry `ctrl` or this platform's secondary modifier (`cmd` on macOS, `ctrl`
+elsewhere). Plain typing keys, `escape`, `tab`, `enter` and alt-only
+combinations stay with the editor and a manifest asking for one is refused,
+naming the keys. The rest of a chord is unrestricted: `ctrl-k 1` is fine.
+
+**Your keys lose every contest.** A plugin's binding is the lowest-precedence
+binding there is. It runs only where nothing else wants those keys:
+
+- any other binding for the same keys wins — the editor's, the app's, an
+  extension's or the user's — and it wins *whatever the contexts*. A plugin
+  binding in a narrow context does not beat a binding that applies everywhere,
+  which is the one way plugin keys differ from every other layer. Where the
+  other binding does not apply, yours runs.
+- it does not take the first keystroke of a chord something else starts, since
+  that would make the chord unreachable.
+- the user's keymap always wins, and `command = ""` for your keys in their
+  keymap takes them away entirely.
+- a binding to a command your plugin never registers is dropped, and one whose
+  keys the editor itself has is refused; each is a warning in your plugin's log,
+  naming the keys and why, and the rest of the plugin loads.
+
+Your bindings go away when the plugin is disabled, stopped after a failed call,
+revoked or uninstalled, and come back when it loads or reloads.
 
 ## Trust
 

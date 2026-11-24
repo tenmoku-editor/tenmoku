@@ -89,7 +89,7 @@ use gpui::{
     WindowId,
 };
 use kiln::core::{
-    ApiVersion,
+    ApiVersion, KeySequence,
     extension::{ExtensionSet, ExtensionSource, Manifest},
     secrets::{KeychainStore, MemoryStore, Secret, SecretError, SecretStore},
 };
@@ -1655,6 +1655,7 @@ fn start_unload(id: &str, cx: &mut App) {
     plugin_panel::unload(id, cx);
     // Its schema goes, so its settings problems go with it.
     republish_plugin_settings(cx);
+    kiln::host_keys::remove(cx, id);
     let shut_down = cx.background_spawn(async move { lock(&loaded.plugin).shutdown() });
     let id = id.to_owned();
     cx.spawn(async move |cx| {
@@ -1955,7 +1956,108 @@ fn loaded_plugin(id: &str, finished: Finished, cx: &mut App) {
     }
     // Its settings schema, and the problems in the files it now knows about.
     republish_plugin_settings(cx);
+    // Its key bindings, now that `init` has said which commands it really
+    // registered. Called even when the load failed or is not the one
+    // wanted, so a load replacing a running one leaves none of its keys
+    // behind (T2106).
+    set_bindings(id, wanted, cx);
     drive(id, cx);
+}
+
+/// Whether any keystroke of `keys` carries this platform's secondary
+/// modifier: cmd on macOS and ctrl elsewhere, as `secondary` in a keymap
+/// file resolves.
+fn carries_secondary(keys: &KeySequence) -> bool {
+    // `Os::secondary_is_cmd` is where this is decided for keymaps, so a
+    // plugin's keys are judged by the same rule rather than a copy of it.
+    let cmd = kiln::core::Os::current().secondary_is_cmd();
+    (keys.keystrokes().iter()).any(|keystroke| match cmd {
+        true => keystroke.modifiers.cmd,
+        false => keystroke.modifiers.ctrl,
+    })
+}
+
+/// Whether `keys` and a binding the app or kiln ships are the same keys,
+/// or either starts the other.
+///
+/// All three cases take something away: the same keys shadow the built-in;
+/// keys that start it make a chord of it unreachable; and keys it starts
+/// could never be reached themselves. Contexts are deliberately not
+/// consulted - a plugin must not have the app's shortcut anywhere.
+fn overlaps_builtin(keys: &KeySequence, builtin: &[KeySequence]) -> bool {
+    let wanted = keys.keystrokes();
+    builtin.iter().any(|theirs| {
+        let theirs = theirs.keystrokes();
+        wanted.starts_with(theirs) || theirs.starts_with(wanted)
+    })
+}
+
+/// Sets plugin `id`'s declared key bindings as its own host layer, having
+/// dropped the ones the host must not set: one naming a command the
+/// plugin's `init` never registered, and one carrying the secondary
+/// modifier whose keys a built-in binding already has. Each drop is a
+/// warning in the plugin's own log naming the keys and why, and the rest
+/// of the plugin loads (T2106).
+///
+/// The commands it did register go in whether or not it declared any
+/// binding of its own, so a binding the USER writes to one of them binds
+/// as soon as the plugin loads, with no edit to their keymap.
+fn set_bindings(id: &str, wanted: bool, cx: &mut App) {
+    let loaded = match wanted {
+        true => (cx.try_global::<PluginHost>())
+            .and_then(|host| host.slots.get(id))
+            .and_then(|slot| slot.loaded.as_ref()),
+        // Not the load wanted, or it failed: it has no keys here.
+        false => None,
+    };
+    let Some(loaded) = loaded else {
+        kiln::host_keys::remove(cx, id);
+        return;
+    };
+    let declared = loaded.artifact.manifest.bindings.clone();
+    let registered: Vec<CommandId> = (loaded.commands.iter())
+        .map(|command| command.id().clone())
+        .collect();
+    let builtin = match declared.is_empty() {
+        // Nothing to check against, and reading them is not free.
+        true => Vec::new(),
+        false => kiln::host_keys::builtin_keys(cx),
+    };
+    let mut bindings = Vec::new();
+    let mut refused = Vec::new();
+    for declaration in &declared {
+        let keys = declaration.keys.to_string();
+        // The manifest only accepts a well-formed id in the plugin's own
+        // namespace, so this cannot fail for a manifest the host loaded.
+        let Ok(command) = CommandId::parse(&declaration.command) else {
+            continue;
+        };
+        if !registered.contains(&command) {
+            refused.push(
+                tr!(
+                    "workbench-extensions-plugin-binding-unregistered",
+                    keys = keys,
+                    command = declaration.command.clone()
+                )
+                .to_string(),
+            );
+            continue;
+        }
+        if carries_secondary(&declaration.keys) && overlaps_builtin(&declaration.keys, &builtin) {
+            refused
+                .push(tr!("workbench-extensions-plugin-binding-builtin", keys = keys).to_string());
+            continue;
+        }
+        bindings.push(kiln::host_keys::HostBinding {
+            keys: declaration.keys.clone(),
+            command,
+            context: declaration.context.clone(),
+        });
+    }
+    for warning in refused {
+        plugin_log::push(id, log::Level::Warn, warning, cx);
+    }
+    kiln::host_keys::set(cx, id, bindings, registered);
 }
 
 /// Plugin `id`'s running load, for a test to call into.
@@ -2011,6 +2113,7 @@ fn stopped_running(id: &str, load: u64, diagnostic: Diagnostic, cx: &mut App) {
     plugin_diagnostics::unload(id, cx);
     plugin_format::unload(id, cx);
     plugin_panel::unload(id, cx);
+    kiln::host_keys::remove(cx, id);
     cx.refresh_windows();
 }
 
@@ -3876,6 +3979,10 @@ mod plugin_host_paint_tests;
 #[cfg(test)]
 #[path = "plugin_host_tests.rs"]
 mod plugin_host_tests;
+
+#[cfg(test)]
+#[path = "plugin_bindings_tests.rs"]
+mod plugin_bindings_tests;
 
 #[cfg(test)]
 mod programs_tests {

@@ -1383,6 +1383,9 @@ impl Shipped {
 pub(crate) fn shipped_catalog(config: &Config, cx: &App) -> Rc<dyn CommandCatalog> {
     let mut catalogs = vec![crate::catalog(cx)];
     catalogs.extend(config.catalogs.iter().cloned());
+    // Last: an owner's command must not shadow one kiln or the app has
+    // (T2106).
+    catalogs.extend(crate::host_keys::catalog(cx));
     Rc::new(Catalogs(catalogs))
 }
 
@@ -1435,15 +1438,20 @@ pub(crate) fn shipped(config: &Config, os: Os, catalog: &dyn CommandCatalog, cx:
     }
 }
 
-/// The keymap layers `config` ships on `os`, with what's contributed,
-/// checked against `catalog`, then the extensions' over them: the
-/// layers, their diagnostics, and the extensions' apart.
-fn shipped_layers(
+/// The layers the app and kiln themselves ship on `os`: kiln's bundled
+/// keys, the contributed commands' defaults, and the app's own keymap -
+/// everything the app is responsible for, and nothing an extension, a
+/// plugin or the user added.
+///
+/// Split out of [`shipped_layers`] so [`builtin_layers`] can have exactly
+/// this set without the extensions' layers or a host's, and so there is
+/// one definition of what "the app's own keys" means rather than two.
+fn own_layers(
     config: &Config,
     os: Os,
     catalog: &dyn CommandCatalog,
     cx: &App,
-) -> (Vec<KeymapLayer>, Vec<Diagnostic>, Vec<Diagnostic>) {
+) -> (Vec<KeymapLayer>, Vec<Diagnostic>) {
     let this = cx.try_global::<Contributions>();
     let bindings: Vec<KeyBinding> = match this.and_then(|this| this.key_table.as_ref()) {
         Some(table) => table.bindings.clone(),
@@ -1456,10 +1464,47 @@ fn shipped_layers(
             .collect(),
     };
     let (contributed, mut keymap_diagnostics) = keymap_layer(&bindings, os, catalog);
-    let (mut layers, found) = config.own_keymap(os, Some(catalog), Some(contributed));
+    let (layers, found) = config.own_keymap(os, Some(catalog), Some(contributed));
     keymap_diagnostics.extend(found);
+    (layers, keymap_diagnostics)
+}
+
+/// The layers of [`own_layers`] as resolved for this app and platform now,
+/// or none before [`crate::init`] has set the app up.
+///
+/// This is what a host checks a binding it did not write against: the keys
+/// the app and kiln have spoken for, whatever the context. It deliberately
+/// leaves out the extensions' layers, a host's own and the user's - a
+/// plugin's binding losing to one of those at runtime is ordinary, but
+/// clashing with the app's own keys is a mistake worth refusing at load.
+pub(crate) fn builtin_layers(cx: &App) -> Vec<KeymapLayer> {
+    let Some(resolver) = cx
+        .try_global::<Contributions>()
+        .and_then(|this| this.resolver.as_ref())
+    else {
+        return Vec::new();
+    };
+    let catalog = shipped_catalog(&resolver.config, cx);
+    own_layers(&resolver.config, resolver.os, &*catalog, cx).0
+}
+
+/// The keymap layers `config` ships on `os`, with what's contributed,
+/// checked against `catalog`, then the extensions' over them: the
+/// layers, their diagnostics, and the extensions' apart.
+fn shipped_layers(
+    config: &Config,
+    os: Os,
+    catalog: &dyn CommandCatalog,
+    cx: &App,
+) -> (Vec<KeymapLayer>, Vec<Diagnostic>, Vec<Diagnostic>) {
+    let (mut layers, keymap_diagnostics) = own_layers(config, os, catalog, cx);
     let (extension_layers, extension_diagnostics) = extensions::keymap_layers(cx, os, catalog);
     layers.extend(extension_layers);
+    // Last of the defaults, and so still under the user's file, which is
+    // read over all of them: their keys lose to any other layer's by
+    // `Binding::host`, not by order, and going in last leaves every other
+    // layer's index alone (T2106).
+    layers.extend(crate::host_keys::layers(cx));
     (layers, keymap_diagnostics, extension_diagnostics)
 }
 

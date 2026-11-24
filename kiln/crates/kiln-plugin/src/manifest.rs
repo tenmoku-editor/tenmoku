@@ -12,8 +12,8 @@ use std::{
     time::Duration,
 };
 
-use kiln_command::{Capability, CapabilityError, Grants};
-use kiln_core::{AppKind, extension::Manifest};
+use kiln_command::{Capability, CapabilityError, ContextPredicate, Grants};
+use kiln_core::{AppKind, Key, KeySequence, Os, extension::Manifest};
 use kiln_l10n::tr;
 use serde_json::json;
 use toml::Value;
@@ -40,6 +40,7 @@ pub fn plugin_kind() -> AppKind {
                 "signature": { "type": "string" },
                 "settings": { "type": "string" },
                 "panels": { "type": "array", "items": { "type": "object" } },
+                "bindings": { "type": "array", "items": { "type": "object" } },
                 "background": {
                     "type": "object",
                     "properties": {
@@ -105,6 +106,10 @@ pub enum PluginManifestError {
         id: String,
         reason: PanelError,
     },
+    Binding {
+        id: String,
+        reason: BindingError,
+    },
     SettingsNotString {
         id: String,
     },
@@ -150,6 +155,11 @@ impl std::fmt::Display for PluginManifestError {
             ),
             Self::Panel { id, reason } => tr!(
                 "kiln-plugin-manifest-panel",
+                id = id,
+                reason = reason.to_string()
+            ),
+            Self::Binding { id, reason } => tr!(
+                "kiln-plugin-manifest-binding",
                 id = id,
                 reason = reason.to_string()
             ),
@@ -270,6 +280,11 @@ impl std::fmt::Display for WasmPathError {
 /// Panels one plugin may declare.
 pub const MAX_PANELS: usize = 8;
 
+/// The most `[[contributes.plugin.bindings]]` entries a plugin may declare.
+/// A key binding is a claim on the user's keyboard, so the cap is a limit on
+/// how much of it one extension can take.
+pub const MAX_BINDINGS: usize = 32;
+
 /// What `tick_ms` may be, in milliseconds. The floor keeps a plugin from
 /// asking for a tick faster than the panel update rate the stage-3 record
 /// allows; the ceiling keeps `tick_ms` meaning "a timer" rather than "a
@@ -359,6 +374,184 @@ impl std::fmt::Display for PanelError {
     }
 }
 
+/// A key binding a plugin declares in `[[contributes.plugin.bindings]]`:
+/// keys bound to one of the plugin's own commands, at the lowest precedence
+/// of any layer (T2106).
+///
+/// `keys` and `context` are parsed here rather than kept as text, so that
+/// what reaches the host is already known to be a keymap entry it can use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BindingDecl {
+    pub keys: KeySequence,
+    /// A full command id starting with the plugin's own id and a dot.
+    pub command: String,
+    /// A predicate, as a keymap entry's `context`.
+    pub context: Option<ContextPredicate>,
+}
+
+/// Why a `[[contributes.plugin.bindings]]` entry is refused. Every one of
+/// these is decided while the manifest is read, before the plugin loads:
+/// a binding commits the host to taking the user's keystrokes, which is the
+/// same reasoning `panel_decl` applies to `tick_ms` and `keys`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BindingError {
+    NotATable,
+    Missing(&'static str),
+    NotAString(&'static str),
+    Empty(&'static str),
+    UnknownKey(String),
+    /// `keys` did not parse as a keymap `keys` value. Carries it as written.
+    BadKeys(String),
+    /// `context` did not parse as a keymap `context` predicate.
+    BadContext(String),
+    /// The command is not this plugin's. Carries the command as written.
+    ForeignCommand(String),
+    /// Bindings were declared without the `commands` capability.
+    WithoutCapability,
+    /// Two entries share keys and context, so one could never run.
+    Duplicate(String),
+    TooMany,
+    /// The first keystroke is a bare typing key, or carries only alt or
+    /// shift. Carries the keys as written.
+    BadFirstKeystroke(String),
+}
+
+/// In the active locale.
+impl std::fmt::Display for BindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&match self {
+            Self::NotATable => tr!("kiln-plugin-binding-not-a-table"),
+            Self::Missing(key) => tr!("kiln-plugin-binding-missing", key = *key),
+            Self::NotAString(key) => tr!("kiln-plugin-binding-not-a-string", key = *key),
+            Self::Empty(key) => tr!("kiln-plugin-binding-empty", key = *key),
+            Self::UnknownKey(key) => tr!("kiln-plugin-binding-unknown-key", key = key.as_str()),
+            Self::BadKeys(keys) => tr!("kiln-plugin-binding-bad-keys", keys = format!("{keys:?}")),
+            Self::BadContext(context) => tr!(
+                "kiln-plugin-binding-bad-context",
+                context = format!("{context:?}")
+            ),
+            Self::ForeignCommand(command) => tr!(
+                "kiln-plugin-binding-foreign-command",
+                command = format!("{command:?}")
+            ),
+            Self::WithoutCapability => tr!(
+                "kiln-plugin-binding-without-capability",
+                capability = Capability::Commands.to_string()
+            ),
+            Self::Duplicate(keys) => {
+                tr!("kiln-plugin-binding-duplicate", keys = format!("{keys:?}"))
+            }
+            Self::TooMany => tr!("kiln-plugin-binding-too-many", max = MAX_BINDINGS),
+            Self::BadFirstKeystroke(keys) => tr!(
+                "kiln-plugin-binding-bad-first-keystroke",
+                keys = format!("{keys:?}")
+            ),
+        })
+    }
+}
+
+/// Whether a plugin may take `keys` as its first keystroke.
+///
+/// It must be a function key, or carry ctrl or this platform's secondary
+/// modifier (cmd on macOS, where ctrl is also allowed). Everything else is
+/// typing: a bare or shift-only key, escape, tab and enter all belong to the
+/// editor, and so does alt alone - on macOS Option composes characters, so a
+/// plugin holding alt-x would eat what the user types. The rule is the same
+/// on every OS, which also makes it one rule for a plugin author to read.
+///
+/// Only the FIRST keystroke is restricted. A chord may continue with a bare
+/// key, as the app's own `secondary-k z` does.
+fn first_keystroke_is_allowed(keys: &KeySequence) -> bool {
+    keys.keystrokes().first().is_some_and(|first| {
+        matches!(first.key, Key::F(_)) || first.modifiers.ctrl || first.modifiers.cmd
+    })
+}
+
+/// The `keys` of one entry: a string, or a table by platform with an
+/// optional `default`. A table naming neither this platform nor a default
+/// binds nothing here, which is how a macOS-only binding is written.
+fn binding_keys(table: &toml::map::Map<String, Value>) -> Result<Option<String>, BindingError> {
+    let this = Os::current().name();
+    match table.get("keys") {
+        None => Err(BindingError::Missing("keys")),
+        Some(Value::String(text)) if text.trim().is_empty() => Err(BindingError::Empty("keys")),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(Value::Table(by_platform)) => {
+            if let Some(key) = by_platform
+                .keys()
+                .find(|key| !matches!(key.as_str(), "macos" | "linux" | "windows" | "default"))
+            {
+                return Err(BindingError::UnknownKey(key.clone()));
+            }
+            match by_platform.get(this).or_else(|| by_platform.get("default")) {
+                None => Ok(None),
+                Some(Value::String(text)) if text.trim().is_empty() => {
+                    Err(BindingError::Empty("keys"))
+                }
+                Some(Value::String(text)) => Ok(Some(text.clone())),
+                Some(_) => Err(BindingError::NotAString("keys")),
+            }
+        }
+        Some(_) => Err(BindingError::NotAString("keys")),
+    }
+}
+
+/// One `[[contributes.plugin.bindings]]` entry, checked against `id`, the
+/// plugin's own extension id. `Ok(None)` is an entry whose platform table
+/// names nothing for this OS.
+fn binding_decl(entry: &Value, id: &str) -> Result<Option<BindingDecl>, BindingError> {
+    let Value::Table(table) = entry else {
+        return Err(BindingError::NotATable);
+    };
+    if let Some(key) = table
+        .keys()
+        .find(|key| !matches!(key.as_str(), "keys" | "command" | "context"))
+    {
+        return Err(BindingError::UnknownKey(key.clone()));
+    }
+    let Some(source) = binding_keys(table)? else {
+        return Ok(None);
+    };
+    let keys = KeySequence::parse(&source).map_err(|_| BindingError::BadKeys(source.clone()))?;
+    if !first_keystroke_is_allowed(&keys) {
+        return Err(BindingError::BadFirstKeystroke(source));
+    }
+    let command = match table.get("command") {
+        Some(Value::String(text)) if text.trim().is_empty() => {
+            return Err(BindingError::Empty("command"));
+        }
+        Some(Value::String(text)) => text.clone(),
+        Some(_) => return Err(BindingError::NotAString("command")),
+        None => return Err(BindingError::Missing("command")),
+    };
+    // Its own namespace only: the id plus a dot, with something after it.
+    // A plugin binding `editor.delete_all_right` would reach the whole app,
+    // and `acme.toolbar.run` belongs to a different extension than
+    // `acme.tool` even though it shares a textual prefix.
+    if command
+        .strip_prefix(id)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_none_or(str::is_empty)
+    {
+        return Err(BindingError::ForeignCommand(command));
+    }
+    let context = match table.get("context") {
+        None => None,
+        Some(Value::String(text)) if text.trim().is_empty() => {
+            return Err(BindingError::Empty("context"));
+        }
+        Some(Value::String(text)) => Some(
+            ContextPredicate::parse(text).map_err(|_| BindingError::BadContext(text.clone()))?,
+        ),
+        Some(_) => return Err(BindingError::NotAString("context")),
+    };
+    Ok(Some(BindingDecl {
+        keys,
+        command,
+        context,
+    }))
+}
+
 fn panel_decl(entry: &Value) -> Result<PanelDecl, PanelError> {
     let Value::Table(table) = entry else {
         return Err(PanelError::NotATable);
@@ -431,6 +624,9 @@ pub struct PluginManifest {
     pub background: BackgroundLimits,
     /// The panels `[[contributes.plugin.panels]]` declares, in order.
     pub panels: Vec<PanelDecl>,
+    /// The key bindings `[[contributes.plugin.bindings]]` declares, in
+    /// order. Those for another platform are already left out.
+    pub bindings: Vec<BindingDecl>,
     /// The settings schema `settings` names, checked.
     pub settings: Option<std::sync::Arc<SettingsSchema>>,
     /// Notes on capabilities that were accepted but are better written
@@ -576,6 +772,49 @@ impl PluginManifest {
                 });
             }
         }
+        let mut bindings: Vec<BindingDecl> = Vec::new();
+        match entry.get("bindings") {
+            None => {}
+            Some(Value::Array(items)) => {
+                let fail = |reason| PluginManifestError::Binding {
+                    id: id.clone(),
+                    reason,
+                };
+                // Checked here and not at the call, for the reason the
+                // panels above give: a binding commits the host to taking
+                // the user's keystrokes before the plugin runs at all.
+                if !items.is_empty() && !capabilities.allows(&Capability::Commands) {
+                    return Err(fail(BindingError::WithoutCapability));
+                }
+                for item in items {
+                    // `None` is an entry whose platform table names nothing
+                    // for this OS: a macOS-only binding is legitimate and
+                    // simply binds nothing here.
+                    let Some(binding) = binding_decl(item, id).map_err(fail)? else {
+                        continue;
+                    };
+                    // The cap goes before the duplicate scan and the push,
+                    // so a long list is refused at the 33rd binding rather
+                    // than compared pairwise in full first.
+                    if bindings.len() == MAX_BINDINGS {
+                        return Err(fail(BindingError::TooMany));
+                    }
+                    if bindings
+                        .iter()
+                        .any(|other| other.keys == binding.keys && other.context == binding.context)
+                    {
+                        return Err(fail(BindingError::Duplicate(binding.keys.to_string())));
+                    }
+                    bindings.push(binding);
+                }
+            }
+            Some(_) => {
+                return Err(PluginManifestError::Binding {
+                    id: id.clone(),
+                    reason: BindingError::NotATable,
+                });
+            }
+        }
         let settings = match entry.get("settings") {
             None => None,
             Some(Value::String(path)) => {
@@ -605,6 +844,7 @@ impl PluginManifest {
             signature,
             background,
             panels,
+            bindings,
             settings,
             warnings,
         }))
