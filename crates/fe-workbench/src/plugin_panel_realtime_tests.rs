@@ -1107,6 +1107,15 @@ fn the_apps_chords_still_run_from_a_focused_realtime_panel(cx: &mut TestAppConte
     reveal(&workbench, cx);
     assert!(focused_in(&mine, cx));
     drain(&events);
+    // `fe_gpui::init` installs the macOS keymap on every host; install the
+    // host's own so `secondary` means what the keymap binds.
+    let source = if cfg!(target_os = "macos") {
+        fe_keymap::DEFAULT_MACOS
+    } else {
+        fe_keymap::DEFAULT_LINUX
+    };
+    let keymap = fe_keymap::load_keymap(source, None).0;
+    cx.update(|_, cx| fe_gpui::set_user_keymap(cx, keymap));
     // `secondary-k secondary-t`: Change Color Theme.
     press("secondary-k", cx);
     press("secondary-t", cx);
