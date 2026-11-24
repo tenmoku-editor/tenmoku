@@ -19,7 +19,7 @@ use fe_project::{
 
 /// An upper bound only, for a loaded machine: each wait ends as soon as
 /// what it waits for arrives.
-const TIMEOUT: Duration = Duration::from_secs(10);
+const LOADED_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn write(root: &Path, rel: &str, text: &str) {
     let path = root.join(rel);
@@ -262,22 +262,205 @@ fn a_hosted_file_list_leaves_the_excluded_file_out() {
     assert_eq!(hosted_files(dir.path(), &filter), expected);
 }
 
+/// How long a watcher stays quiet before `last` is written again.
+const QUIET: Duration = Duration::from_secs(3);
+
+/// What one watcher delivered while `changes_through` waited on it.
+struct Wait {
+    /// Every change delivered, up to and including the batch naming `last`.
+    seen: HashSet<FsChange>,
+    /// Each batch (when, after how many rewrites, which changes), quiet
+    /// period and rewrite, in order.
+    timeline: Vec<String>,
+    /// Why the wait ended without `last`: the deadline or a disconnect.
+    failure: Option<&'static str>,
+}
+
+impl Wait {
+    /// One line per watcher for a failure message: how its wait ended, and
+    /// everything it delivered and when.
+    fn report(&self, label: &str) -> String {
+        let end = self.failure.unwrap_or("named the last file");
+        format!("{label}: {end}; {:#?}", self.timeline)
+    }
+}
+
 /// Every change `next` delivers up to and including the batch that names
 /// `last`: a watcher delivers a change after those made before it, so this
-/// is everything before `last` too. `None` if `last` didn't come by the
-/// deadline.
+/// is everything before `last` too. It never panics, so the caller can wait
+/// on every watcher and report all of their timelines together.
+///
+/// Under heavy load (a security scanner pinning the CPU) FSEvents has
+/// delivered a batch many seconds late or not at all; which, the timeline
+/// can't say, because a batch that comes after a rewrite may hold the
+/// original event delayed, not lost. So the wait is long, and when nothing
+/// arrives for `quiet` `last` is written again, which names it in a fresh
+/// event without changing the set of paths: the test tolerates either. A
+/// disconnected watcher fails at once, without writing anything.
 fn changes_through(
     last: &Path,
-    mut next: impl FnMut(Duration) -> Option<Vec<FsChange>>,
-) -> Option<HashSet<FsChange>> {
-    let deadline = Instant::now() + TIMEOUT;
-    let mut seen = HashSet::new();
+    quiet: Duration,
+    deadline: Duration,
+    mut next: impl FnMut(Duration) -> Result<Vec<FsChange>, mpsc::RecvTimeoutError>,
+) -> Wait {
+    let start = Instant::now();
+    let mut wait = Wait {
+        seen: HashSet::new(),
+        timeline: Vec::new(),
+        failure: None,
+    };
     let wanted = FsChange::Path(last.to_path_buf());
-    while !seen.contains(&wanted) {
-        let left = deadline.checked_duration_since(Instant::now())?;
-        seen.extend(next(left)?);
+    let mut rewrites = 0;
+    while !wait.seen.contains(&wanted) {
+        let Some(left) = deadline.checked_sub(start.elapsed()) else {
+            wait.failure = Some("no last file by the deadline");
+            break;
+        };
+        match next(left.min(quiet)) {
+            Ok(batch) => {
+                wait.timeline.push(format!(
+                    "{:?}: batch after {rewrites} rewrites: {batch:?}",
+                    start.elapsed()
+                ));
+                wait.seen.extend(batch);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                rewrites += 1;
+                wait.timeline
+                    .push(format!("{:?}: quiet, rewrote the file", start.elapsed()));
+                fs::write(last, "").unwrap();
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                wait.failure = Some("the watcher went away");
+                break;
+            }
+        }
     }
-    Some(seen)
+    if wait.failure.is_none() && rewrites > 0 {
+        eprintln!("{}", wait.report("named late"));
+    }
+    wait
+}
+
+/// `Err` with both watchers' reports unless each named `last` and delivered
+/// every path in `changed`. Only those are compared: the writes that built
+/// the project before the watchers started can still be in fseventsd's queue
+/// when a stream opens, and reach one watcher and not the other (the root,
+/// `src`, `main.rs`).
+fn compare(direct: &Wait, hosted: &Wait, changed: &HashSet<FsChange>) -> Result<(), String> {
+    let reports = format!("{}\n{}", direct.report("watcher"), hosted.report("host"));
+    for (label, wait) in [("watcher", direct), ("host", hosted)] {
+        if let Some(why) = wait.failure {
+            return Err(format!("the {label} failed ({why})\n{reports}"));
+        }
+        let missing: Vec<_> = changed.difference(&wait.seen).collect();
+        if !missing.is_empty() {
+            return Err(format!("the {label} missed {missing:?}\n{reports}"));
+        }
+    }
+    Ok(())
+}
+
+fn changed_set(root: &Path) -> HashSet<FsChange> {
+    [
+        "src/new.rs",
+        "src/old.rs",
+        "src/moved.rs",
+        "src/gone.rs",
+        "src/last.rs",
+    ]
+    .iter()
+    .map(|rel| FsChange::Path(root.join(rel)))
+    .collect()
+}
+
+fn batch(paths: &[&Path]) -> Vec<FsChange> {
+    paths
+        .iter()
+        .map(|p| FsChange::Path(p.to_path_buf()))
+        .collect()
+}
+
+#[test]
+fn a_disconnected_watcher_fails_without_rewriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let last = dir.path().join("last.rs");
+    let (tx, rx) = mpsc::channel::<Vec<FsChange>>();
+    drop(tx);
+    let wait = changes_through(&last, QUIET, LOADED_TIMEOUT, |left| rx.recv_timeout(left));
+    assert_eq!(wait.failure, Some("the watcher went away"));
+    assert!(!last.exists());
+}
+
+#[test]
+fn a_quiet_watcher_gets_the_file_rewritten_until_it_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let last = dir.path().join("last.rs");
+    let (tx, rx) = mpsc::channel();
+    let mut quiet_waits = 0;
+    let wait = changes_through(&last, Duration::from_millis(10), LOADED_TIMEOUT, |left| {
+        if last.exists() {
+            tx.send(batch(&[&last])).unwrap();
+        } else {
+            quiet_waits += 1;
+        }
+        rx.recv_timeout(left)
+    });
+    assert_eq!(wait.failure, None);
+    assert!(wait.seen.contains(&FsChange::Path(last.clone())));
+    assert_eq!(quiet_waits, 1);
+}
+
+#[test]
+fn a_watcher_that_never_names_the_file_fails_at_the_deadline_with_what_it_saw() {
+    let dir = tempfile::tempdir().unwrap();
+    let last = dir.path().join("last.rs");
+    let other = dir.path().join("other.rs");
+    let (tx, rx) = mpsc::channel();
+    tx.send(batch(&[&other])).unwrap();
+    let wait = changes_through(
+        &last,
+        Duration::from_millis(10),
+        Duration::from_millis(60),
+        |left| rx.recv_timeout(left),
+    );
+    assert_eq!(wait.failure, Some("no last file by the deadline"));
+    let report = wait.report("watcher");
+    assert!(report.contains("other.rs"), "{report}");
+    assert!(report.contains("rewrote the file"), "{report}");
+}
+
+#[test]
+fn a_failure_reports_both_watchers_timelines_and_batch_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let changed = changed_set(root);
+    let last = root.join("src/last.rs");
+    let named = Wait {
+        seen: changed.clone(),
+        timeline: vec![format!("1s: batch after 0 rewrites: {:?}", batch(&[&last]))],
+        failure: None,
+    };
+    let silent = Wait {
+        seen: HashSet::new(),
+        timeline: vec!["3s: quiet, rewrote the file".into()],
+        failure: Some("no last file by the deadline"),
+    };
+    // The direct watcher failing still shows what the host delivered.
+    let error = compare(&silent, &named, &changed).unwrap_err();
+    assert!(error.contains("the watcher failed"), "{error}");
+    assert!(error.contains("last.rs"), "{error}");
+    assert!(error.contains("rewrote the file"), "{error}");
+    // A host that named the last file but missed a path shows both too.
+    let partial = Wait {
+        seen: batch(&[&last]).into_iter().collect(),
+        timeline: vec!["1s: batch after 0 rewrites: [last]".into()],
+        failure: None,
+    };
+    let error = compare(&named, &partial, &changed).unwrap_err();
+    assert!(error.contains("the host missed"), "{error}");
+    assert!(error.contains("watcher: named the last file"), "{error}");
+    assert!(compare(&named, &named, &changed).is_ok());
 }
 
 #[test]
@@ -304,15 +487,16 @@ fn a_hosted_watch_delivers_the_watchers_changes() {
     fs::write(&last, "").unwrap();
 
     // Each watcher coalesces into batches as its own thread wakes, so the
-    // batches can differ; the changes they hold don't.
-    let from_watcher = changes_through(&last, |left| direct.recv_timeout(left).ok())
-        .expect("the watcher saw the last file");
-    let from_host = changes_through(&last, |left| hosted.recv_timeout(left).ok())
-        .expect("the host saw the last file");
-    assert_eq!(from_host, from_watcher);
-    for rel in ["src/new.rs", "src/old.rs", "src/moved.rs", "src/gone.rs"] {
-        let change = FsChange::Path(root.join(rel));
-        assert!(from_host.contains(&change), "{change:?} in {from_host:?}");
+    // batches can differ; the changes they hold don't. Both are waited on
+    // before anything is judged, so a failure shows both timelines.
+    let from_watcher = changes_through(&last, QUIET, LOADED_TIMEOUT, |left| {
+        direct.recv_timeout(left)
+    });
+    let from_host = changes_through(&last, QUIET, LOADED_TIMEOUT, |left| {
+        hosted.recv_timeout(left)
+    });
+    if let Err(error) = compare(&from_watcher, &from_host, &changed_set(&root)) {
+        panic!("{error}");
     }
 }
 
