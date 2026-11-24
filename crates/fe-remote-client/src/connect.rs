@@ -157,11 +157,23 @@ pub struct Connection {
     welcome: Welcome,
     log: Log,
     /// The transport's, such as ssh's askpass session: after the mux, so
-    /// it outlives the link.
-    _keep: Option<Box<dyn Send>>,
+    /// it outlives the link. In a mutex only so a connection can be shared
+    /// between threads.
+    _keep: Mutex<Option<Box<dyn Send>>>,
 }
 
 impl Connection {
+    /// A connection over a link made another way than [`Connector::connect`]:
+    /// an in-process server's, say. Its log is empty.
+    pub fn over(mux: Mux, welcome: Welcome) -> Connection {
+        Connection {
+            mux,
+            welcome,
+            log: Log::default(),
+            _keep: Mutex::new(None),
+        }
+    }
+
     pub fn mux(&self) -> &Mux {
         &self.mux
     }
@@ -478,7 +490,7 @@ impl Connect<'_> {
                     mux,
                     welcome,
                     log: self.log.clone(),
-                    _keep: keep,
+                    _keep: Mutex::new(keep),
                 }))
             }
             Err(HandshakeError::Mismatch { build, .. }) => Ok(Err(Refusal { theirs: build })),

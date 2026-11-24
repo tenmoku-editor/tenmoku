@@ -55,9 +55,10 @@ pub use settings::{
     ChatEffort, ChatSettings, EditorSettings, ExtensionsSettings, FormatterPrefer,
     FormatterSettings, LocaleChoice, LocaleSetting, NotificationLevel, PROJECT_CHAT,
     PROJECT_EXTENSIONS, PROJECT_FORMATTERS, PROJECT_TERMINAL_SHELL, PROJECT_VIM_USER_ONLY,
-    Settings, SettingsEvent, SettingsStore, StickyScrollModel, StickyScrollSettings,
-    TerminalSettings, ThemeModeSetting, ThemeSettings, TreeSettings, VimJumpStyle, VimPreset,
-    VimRemap, VimRemapMode, VimRemapModes, VimSettings, VimWhichKeyGroup, settings_schema,
+    PluginSettingsSchema, Settings, SettingsEvent, SettingsStore, StickyScrollModel,
+    StickyScrollSettings, TerminalSettings, ThemeModeSetting, ThemeSettings, TreeSettings,
+    VimJumpStyle, VimPreset, VimRemap, VimRemapMode, VimRemapModes, VimSettings, VimWhichKeyGroup,
+    plugin_settings_problems, set_plugin_schemas, settings_schema,
 };
 pub use settings_edit::{SettingEditError, SettingScope, reset_setting, set_setting};
 pub use settings_model::{

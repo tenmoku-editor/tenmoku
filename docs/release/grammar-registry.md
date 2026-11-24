@@ -194,14 +194,24 @@ the first failure:
    checks the index against its signature, the index's `url_template` must be
    the target repository's, and every file the index names must be in the
    dist directory with that size and SHA-256.
-2. **Freshness.** If the `index` release already holds an `index.json`, the
-   script downloads it, and that index's `serial` must not be higher than the
-   new one's. A rerun of an older workflow run keeps its old commit, and so
-   its old serial, so it's refused and the newer index stays. An equal serial
-   is a retry of the same commit, and it goes ahead. The published serial
-   isn't checked against the signature: only the registry's App can write to
-   the release, and after a key rotation the published index is still signed
-   with the old key.
+2. **Freshness.** Two records say what was last published: the `index`
+   release's `index.json`, and a watermark line in the release's notes,
+   `Publication watermark: serial=<n> sha256=<digest of index.json>`, which
+   the script writes before it uploads any pack or index. The watermark is
+   there because `gh release upload --clobber` deletes the old asset before
+   the new one is up: a failed upload leaves a release with no `index.json`,
+   and without the watermark a rerun of an older workflow run (which keeps its
+   old commit, and so its old serial) would pass and replace the newer
+   packs and index. Each record that exists is checked: its `serial` must not
+   be higher than the new one's. An equal serial is a retry only if the new
+   `index.json` has the same bytes: a serial is a commit's committer time, in
+   whole seconds, not its identity, so another commit's index with the same
+   serial is refused. A published release with neither record can't be
+   judged and is refused (restore `index.json`, or add the watermark line by
+   hand); a release the script is about to create has none, and that is the
+   bootstrap. Neither record is checked against the signature: only the
+   registry's App can write to the release, and after a key rotation the
+   published index is still signed with the old key.
 3. It checks each language's release `<tag>`. A release that exists must hold
    exactly the entry's file names and sizes, and is skipped. One that doesn't
    match fails the run, naming the language, before anything is created.

@@ -1,6 +1,6 @@
 [package]
 name = "fe-remote-client"
-description = "The remote development client's connect: the transport seam, ssh with askpass, the bootstrap that installs and starts tenmoku-server, and the connection's states. Must not depend on GPUI."
+description = "The remote development client's connect: the transport seam, ssh with askpass, the bootstrap that installs and starts tenmoku-server, the connection's states, and RemoteHost: fe-host's FsHost, WatchHost and SearchHost over the connection. Must not depend on GPUI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,14 +24,22 @@ doc = false
 
 [dependencies]
 fe-git.workspace = true
+# The traits `RemoteHost` implements, and their types.
+fe-host.workspace = true
 fe-remote-proto.workspace = true
 # Packing a remote.dev_server binary as the archive the bootstrap unpacks.
 flate2.workspace = true
 tar.workspace = true
+serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# What a local window's hosts answer, to hold the remote's replies to; with
+# `test-support`, the in-process server's trashes go to a test trash of the
+# process's own, never the user's.
+fe-project = { workspace = true, features = ["test-support"] }
+fe-remote-proto = { workspace = true, features = ["test-support"] }
 # Turns `test-support` on for the tests, so the fixture binary is built for
 # them.
 fe-remote-client = { path = ".", features = ["test-support"] }

@@ -29,6 +29,7 @@ use crate::{
     pane_group::{Axis, Destination, Direction, RESIZE_STEP},
     pane_toolbar::ToolbarRequest,
     picker::Picker,
+    plugin_panel::PluginPanel,
     terminal_panel::{RenameTerminal, TERMINAL, TerminalPanel, TerminalPanelEvent},
     workbench::Palette,
 };
@@ -229,6 +230,41 @@ impl Workbench {
         [exited, hid, shown]
     }
 
+    /// Puts `panel`, a plugin's, in the dock its manifest's `dock` names:
+    /// the sidebar for `left` and `right`, with a button on the rail's top
+    /// group, or the bottom panel for `bottom`, with a button at the rail's
+    /// foot that shows it there, or hides it while it shows. A panel of its
+    /// id there already (the plugin reloaded) stays, and this one isn't
+    /// added.
+    pub fn add_plugin_panel(&mut self, panel: Entity<PluginPanel>, cx: &mut Context<Self>) {
+        let added = (self.dock).update(cx, |dock, cx| dock.add_plugin_panel(panel.clone(), cx));
+        if !added || !panel.read(cx).in_bottom_panel() {
+            return;
+        }
+        let id = panel.read(cx).dock_id();
+        let bottom = self.terminal_dock.downgrade();
+        panel.update(cx, |panel, _| {
+            panel.set_shown_by(move |cx| {
+                (bottom.upgrade()).is_some_and(|bottom| bottom.read(cx).dock().is_shown(id))
+            })
+        });
+        (self.terminal_dock).update(cx, |dock, cx| dock.add_panel(panel, cx));
+    }
+
+    /// Takes plugin `plugin`'s panels out of both docks: it was unloaded.
+    pub(crate) fn remove_plugin_panels(&mut self, plugin: &str, cx: &mut Context<Self>) {
+        let bottom = (self.dock).update(cx, |dock, cx| dock.remove_plugin_panels(plugin, cx));
+        if bottom.is_empty() {
+            return;
+        }
+        self.terminal_dock.update(cx, |dock, cx| {
+            for id in bottom {
+                dock.dock_mut().take_panel(id);
+            }
+            cx.notify();
+        });
+    }
+
     /// Shows the tool window `panel` in whichever dock holds it, focused
     /// if it focuses on show: the bottom dock unless it was moved to the
     /// sidebar ([`Place`]).
@@ -407,8 +443,11 @@ impl Workbench {
             id if id == TERMINAL.0 => self.terminal.focus_handle(cx),
             _ => {
                 let sidebar = self.dock.read(cx);
-                let panel = crate::DockPanel::of(panel)?;
-                sidebar.panel_focus(panel, cx)?
+                match crate::DockPanel::of(panel) {
+                    Some(panel) => sidebar.panel_focus(panel, cx)?,
+                    // A plugin's, in either dock.
+                    None => sidebar.plugin_panel_focus(panel, cx)?,
+                }
             }
         })
     }
@@ -598,6 +637,13 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A plugin's bottom panel's has no command: it's shown here.
+        if self.dock.read(cx).plugin_place(PanelId(id)) == Some(Place::Bottom) {
+            if !self.hide_bottom_tool(PanelId(id), window, cx) {
+                self.show_bottom_panel(PanelId(id), window, cx);
+            }
+            return;
+        }
         if !self.hide_bottom_tool(PanelId(id), window, cx) {
             // Once this update is over: the command is the workbench's.
             window.defer(cx, move |window, cx| {

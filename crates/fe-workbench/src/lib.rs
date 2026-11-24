@@ -109,6 +109,7 @@ mod plugin_host;
 mod plugin_log;
 mod plugin_manage;
 mod plugin_paint;
+mod plugin_panel;
 mod plugin_prompt;
 mod pre_commit_checks;
 mod preserve_case;
@@ -208,6 +209,7 @@ pub use plugin_host::{
     StopReason, pending_plugin_grants, plugin_kind, plugin_states, reevaluate, set_plugin_dirs,
     set_plugin_extensions, unload_plugin,
 };
+pub use plugin_panel::{PanelEvent as PluginPanelEvent, PanelEvents, PluginPanel, QueuedEvent};
 pub use plugin_prompt::{
     PendingPluginGrant, PluginAnswer, PluginAsk, plugin_prompt_text, show_plugin_prompt,
 };
@@ -247,6 +249,7 @@ pub fn init(cx: &mut App) {
     // `kiln::init` has run: the test apps never run it.
     module(cx);
     picker::init(cx);
+    plugin_panel::init(cx);
     search_panel::init(cx);
     find_commands::init(cx);
     path_commands::init(cx);

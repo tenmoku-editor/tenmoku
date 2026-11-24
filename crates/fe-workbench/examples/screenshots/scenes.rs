@@ -256,6 +256,7 @@ pub(crate) fn main() -> ExitCode {
         None => check_scene(&mut cx)
             .and_then(|matched| Ok(crate::token_probe::check(&mut cx)? && matched))
             .and_then(|matched| Ok(crate::markdown_scene::check(&mut cx)? && matched))
+            .and_then(|matched| Ok(crate::plugin_panel_scene::check(&mut cx)? && matched))
             .and_then(|matched| Ok(crate::setup_scene::check(&mut cx)? && matched))
             .and_then(|matched| Ok(crate::icons_scene::check(&mut cx)? && matched)),
         Some(_) => {

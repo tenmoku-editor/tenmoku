@@ -732,3 +732,54 @@ fn a_pick_doesnt_undo_a_close_awaiting_the_discard_prompt(cx: &mut TestAppContex
     let titles = pane.read_with(cx_, |pane, _| pane.tabs().len());
     assert_eq!(titles, 1);
 }
+
+/// C2 of T2094. This one of C2's three tests is here and not in
+/// `tests/plugin_settings_problems.rs` with the other two: picking a row
+/// needs `Workbench::config_problems()`, which is `#[cfg(test)]
+/// pub(crate)`, so an integration test in another crate cannot reach it.
+/// Widening it would mean editing `src/workbench.rs`, outside this card's
+/// --scope.
+#[gpui::test]
+fn plugin_settings_problem_pick_opens_file_at_key(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("settings.toml");
+    // `token` is a secret key of the `acme` plugin: it may not be set in a
+    // settings file. The problem is positioned at the KEY, line 2 column 1.
+    let text = "[plugins.\"acme\"]\ntoken = \"s3cret\"\n";
+    fs::write(&settings, text).unwrap();
+    init(cx);
+    let (workbench, mut cx_) = open(dir.path(), cx);
+    let cx_ = &mut cx_;
+
+    set_problems(
+        vec![problem(
+            Severity::Warning,
+            &settings,
+            2,
+            1,
+            "\"token\" is a secret and can't be set in a settings file; ignored",
+        )],
+        cx,
+    );
+    dispatch(super::SHOW, cx_);
+
+    // The row reads like any other config problem: the message, then where
+    // it is. Exact equality, as the sibling tests here do, so the severity
+    // and the 1-based position are both pinned and not merely present.
+    let rows = labels(&workbench, cx_);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].0,
+        "\"token\" is a secret and can't be set in a settings file; ignored"
+    );
+    assert_eq!(rows[0].1, "settings.toml:2:1 · warning");
+
+    // Picking it opens the settings file with the caret on the key, which is
+    // the first byte of line 2.
+    confirm(&workbench, 0, cx_);
+    // The pick opens the file on the next draw, as the sibling tests here do
+    // it: reading the caret without flushing finds no active editor at all.
+    draw(cx_);
+    let offset = text.find("token").expect("the key is in the file");
+    assert_eq!(caret(&workbench, cx_), (settings.clone(), offset));
+}

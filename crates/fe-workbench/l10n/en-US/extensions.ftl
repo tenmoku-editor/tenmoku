@@ -357,6 +357,12 @@ workbench-extensions-plugin-shut-down-preview-off = shut down: the plugins previ
 workbench-extensions-plugin-loaded = loaded { $version }
 workbench-extensions-plugin-reloaded = reloaded { $version }
 workbench-extensions-plugin-log-stopped = stopped: { $diagnostic }
+
+# A key binding the plugin declared that the host would not set, logged in
+# the plugin's own log. `$keys` is the binding's keys as written in the
+# manifest; `$command` is the command it names.
+workbench-extensions-plugin-binding-unregistered = the key binding { $keys } was dropped: this plugin registered no command { $command }
+workbench-extensions-plugin-binding-builtin = the key binding { $keys } was refused: those keys are the editor's own
 workbench-extensions-plugin-answer-unrecorded = can't record the answer to its prompt: { $message }
 workbench-extensions-plugin-thread-stopped-loading = its thread stopped while loading it
 workbench-extensions-plugin-thread-stopped = its thread stopped
@@ -367,3 +373,12 @@ workbench-extensions-plugin-shutdown-failed = its shutdown failed: { $diagnostic
 workbench-extensions-plugin-deadline = a call ran past its { $deadline } deadline
 workbench-extensions-plugin-no-ticker = no thread to enforce plugins' deadlines: { $error }
 workbench-extensions-plugin-load-cancelled = its load was cancelled
+
+## A plugin's panel in the dock (plugin_panel.rs).
+
+# A progress bar's accessible name; its percent is its value.
+workbench-extensions-panel-progress = Progress
+# A progress bar's value, read after its name.
+workbench-extensions-panel-percent = { $percent }%
+# The accessible name of a tree a plugin's panel shows outside a list.
+workbench-extensions-panel-tree = Tree

@@ -309,3 +309,29 @@ fn settings_root_metadata_and_items_on_other_kinds_are_refused() {
         );
     }
 }
+
+/// C3 of T2094. The same problems used to reach the plugin's log at every
+/// `settings.get`; they are positioned config problems now, so the log keeps
+/// one warning of each per load. The values `get` returns do not change.
+#[test]
+fn settings_problems_are_logged_once_per_load_not_per_call() {
+    let (mut host, logs) = host("token = \"hunter2\"\ncheck_command = 5", &[]);
+    let first = get(&mut host, None);
+    // The guard is taken once and dropped before the assertion: a failing
+    // `assert_eq!` formats its arguments while the receiver's temporary guard
+    // is still alive, and std's Mutex is not reentrant, so locking twice in
+    // one assert expression deadlocks on failure instead of reporting it.
+    let seen = logs.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+
+    // Three more calls: the same two problems, already logged.
+    for _ in 0..3 {
+        assert_eq!(get(&mut host, None), first, "the values are unchanged");
+    }
+    let seen = logs.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        2,
+        "logged once each, not once per call: {seen:?}"
+    );
+}

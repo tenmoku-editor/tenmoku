@@ -12,6 +12,7 @@ mod contributions;
 mod cx;
 mod ext;
 pub mod extensions;
+pub mod host_keys;
 mod item;
 pub mod l10n;
 pub mod model;

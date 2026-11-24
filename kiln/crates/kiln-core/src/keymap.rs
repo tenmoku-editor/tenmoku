@@ -36,6 +36,29 @@ use toml::de::{DeTable, DeValue};
 
 use crate::keystroke::{Key, KeySequence, Keystroke};
 
+/// The start of the `path` of a keymap layer a host set for one owner, as
+/// in `<host keys: acme.tool>`. Build one with [`KeymapLayer::host_path`].
+///
+/// Host-ness travels with the layer's path rather than a field on
+/// [`KeymapLayer`] on purpose. These layers are handed to the keymap store
+/// like any other and are rebuilt by [`Keymap::from_layers`] far from
+/// whoever set them, and the path is the one part of a layer that already
+/// says where it came from: `<contributed keys>`, `<kiln keymap>` and
+/// `<default keymap>` are the same idiom. It also puts the owner's name in
+/// any diagnostic the layer produces.
+//
+// `verbatim!` and not an `l10n-allow.toml` entry, which is how the sibling
+// `<default keymap>` and `<default menus>` paths are excused: that file is
+// outside T2106's scope. Raised with the Mac lead; moving it to the
+// allow-list later changes nothing but the bookkeeping.
+const HOST_KEYS_PREFIX: &str = kiln_l10n::verbatim!("<host keys: ");
+
+/// Whether `path` names a host layer: see [`HOST_KEYS_PREFIX`].
+fn is_host_path(path: &Path) -> bool {
+    path.to_str()
+        .is_some_and(|path| path.starts_with(HOST_KEYS_PREFIX))
+}
+
 /// Where something is in a keymap file.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Location {
@@ -84,6 +107,11 @@ pub struct Binding {
     /// The index of the layer it came from in [`Keymap::from_layers`]:
     /// 0 for the defaults.
     pub layer: usize,
+    /// Whether it came from a layer a host set per owner
+    /// ([`HOST_KEYS_PREFIX`]). Such a binding runs only where no other
+    /// layer's binding for the same keys - or for a chord either of them
+    /// starts - applies, whatever the contexts' depths (T2106).
+    pub host: bool,
     pub location: Location,
 }
 
@@ -148,6 +176,7 @@ impl Keymap {
     pub fn from_layers<L: Borrow<KeymapLayer>>(layers: impl IntoIterator<Item = L>) -> Self {
         let mut bindings: Vec<Binding> = Vec::new();
         for (layer_ix, layer) in layers.into_iter().enumerate() {
+            let host = layer.borrow().is_host();
             for entry in &layer.borrow().entries {
                 match &entry.command {
                     None => bindings.retain(|binding| {
@@ -159,6 +188,7 @@ impl Keymap {
                         command: command.clone(),
                         args: entry.args.clone(),
                         layer: layer_ix,
+                        host,
                         location: entry.location.clone(),
                     }),
                 }
@@ -206,13 +236,30 @@ impl Keymap {
     /// invocation's source is [`kiln_command::Source::Keyboard`] and its
     /// context `stack`; a host dispatching a click sets the source.
     pub fn lookup(&self, keystroke: &Keystroke, stack: &ContextStack) -> Option<Invocation> {
+        // A host layer's binding is invisible wherever another layer's
+        // binding for the same keys, or for a chord starting with them,
+        // applies in `stack` - whatever the contexts' depths, so this is a
+        // filter and not another rank (T2106).
+        let taken = self.host_keys_taken(&[*keystroke], stack);
         self.bindings
             .iter()
             .enumerate()
+            .filter(|(_, binding)| !(taken && binding.host))
             .filter(|(_, binding)| binding.keys.keystrokes() == [*keystroke])
             .filter_map(|(ix, binding)| Some(((binding.depth(stack)?, ix), binding)))
             .max_by_key(|(rank, _)| *rank)
             .map(|(_, binding)| binding.invocation(stack))
+    }
+
+    /// Whether a layer other than a host's has `keys` spoken for in
+    /// `stack`: a binding of the same keys, or of a chord that starts with
+    /// them. A host binding then does not run, whatever its context depth.
+    pub(crate) fn host_keys_taken(&self, keys: &[Keystroke], stack: &ContextStack) -> bool {
+        self.bindings.iter().any(|binding| {
+            !binding.host
+                && binding.keys.keystrokes().starts_with(keys)
+                && binding.depth(stack).is_some()
+        })
     }
 
     /// The keys that go on from `held`, the keystrokes of a chord in
@@ -226,7 +273,13 @@ impl Keymap {
         // Each next key's continuation, with the rank of the binding that
         // gave its command.
         let mut next: Vec<(Continuation, Option<(usize, usize)>)> = Vec::new();
+        // Offering a host binding's next key where another layer has the
+        // chord would show the user a key that cannot run.
+        let taken = self.host_keys_taken(held, stack);
         for (ix, binding) in self.bindings.iter().enumerate() {
+            if taken && binding.host {
+                continue;
+            }
             let keys = binding.keys.keystrokes();
             if keys.len() <= held.len() || !keys.starts_with(held) {
                 continue;
@@ -330,6 +383,22 @@ impl<C: CommandCatalog + ?Sized> CommandCatalog for Arc<C> {
 }
 
 impl KeymapLayer {
+    /// The `path` a layer of `owner`'s host bindings has, which marks every
+    /// binding read from it as a host's: see [`HOST_KEYS_PREFIX`].
+    ///
+    /// This is an inherent method rather than a free function because
+    /// `KeymapLayer` is already part of kiln-core's public surface, so a
+    /// host crate can reach it without kiln-core's `lib.rs` re-exporting
+    /// anything new - and that file is outside T2106's scope.
+    pub fn host_path(owner: &str) -> PathBuf {
+        PathBuf::from(format!("{HOST_KEYS_PREFIX}{owner}>"))
+    }
+
+    /// Whether this layer is one a host set, by its [`KeymapLayer::path`].
+    pub fn is_host(&self) -> bool {
+        is_host_path(&self.path)
+    }
+
     /// Parses a keymap file's `source`, read from `path`. Returns the layer
     /// if it has no errors, and the diagnostics either way.
     ///

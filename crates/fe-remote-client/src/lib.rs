@@ -14,9 +14,17 @@
 //! Where the server comes from is a [`ServerSource`]: a release archive the
 //! caller has downloaded and verified, a `remote.dev_server` binary, or, for
 //! a development build without one, nowhere.
+//!
+//! Once connected, a [`RemoteHost`] is a remote window's fe-host
+//! `FsHost`, `WatchHost` and `SearchHost` (D § 5), over a [`Conn`]: the
+//! connection now, which whoever reconnects the window replaces. A read
+//! whose link drops runs once more on the next connection, and a write
+//! fails with [`LinkError::Lost`] (D § 7).
 
 pub mod bootstrap;
 mod connect;
+#[cfg(unix)]
+mod remote;
 mod source;
 #[cfg(unix)]
 mod ssh;
@@ -28,6 +36,8 @@ pub use bootstrap::{Asset, Probe};
 pub use connect::{
     Answer, ConnectError, Connection, Connector, Failed, SignIn, State, server_build,
 };
+#[cfg(unix)]
+pub use remote::{Conn, LinkError, RemoteHost};
 pub use source::{Archive, DevServer, Payload, Release, ServerSource, is_dev_build, pack};
 #[cfg(unix)]
 pub use ssh::{OPTIONS, SshTransport, remote_word};

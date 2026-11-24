@@ -7,7 +7,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, RwLock},
 };
 
 use kiln_core::{ProjectFilter, SettingsOptions};
@@ -1938,6 +1938,22 @@ impl SettingsStore {
         ))
     }
 
+    /// [`SettingsStore::load`] with `schemas` as the installed plugins'
+    /// settings contributions, in place of the ones
+    /// [`set_plugin_schemas`] holds: for a caller that has them to hand,
+    /// and for tests, which then share no state.
+    pub fn load_with_plugins(
+        user: Option<PathBuf>,
+        project: Option<PathBuf>,
+        schemas: Vec<PluginSettingsSchema>,
+    ) -> Self {
+        Self(kiln_core::SettingsStore::load_with(
+            user,
+            project,
+            options_with(Arc::from(schemas)),
+        ))
+    }
+
     pub fn settings(&self) -> &Arc<Settings> {
         self.0.settings()
     }
@@ -1982,9 +1998,185 @@ impl SettingsStore {
 /// ([`drop_theme`], [`drop_extensions`]); any file's bad formatters and spell
 /// check scopes are dropped too ([`drop_bad_formatters`],
 /// [`drop_bad_spell_scopes`]).
+/// One installed plugin's settings contribution, as the plugin host hands
+/// it to the config store (T2094).
+///
+/// `schema` is the JSON schema the plugin's `[plugins."<id>"]` table is
+/// checked against, so an unknown key or a value of the wrong type is a
+/// positioned diagnostic from [`Layer::check_schema`] like any other.
+/// `secret_keys` and `user_only_keys` are what no file, and what no project
+/// file, may set: this crate drops them with the warning each one carries.
+///
+/// The warnings come in already in the active locale. They belong to
+/// kiln-plugin's catalogue, which this crate doesn't depend on, so the host
+/// writes the text and fe-config only puts a position on it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PluginSettingsSchema {
+    /// The plugin's id, the `<id>` of `[plugins."<id>"]`.
+    pub id: String,
+    /// The JSON schema of the plugin's own table.
+    pub schema: Arc<serde_json::Value>,
+    /// Key -> warning: a secret, never read from a settings file.
+    pub secret_keys: BTreeMap<String, String>,
+    /// Key -> warning: a `user`-scope key, which a project file may not set.
+    pub user_only_keys: BTreeMap<String, String>,
+}
+
+/// The installed plugins' schemas, which [`set_plugin_schemas`] replaces as
+/// plugins load and unload. The plugin host is app-wide and has no handle on
+/// the store the config service owns, so this is where the two meet.
+static PLUGIN_SCHEMAS: RwLock<Option<Arc<[PluginSettingsSchema]>>> = RwLock::new(None);
+
+/// The schemas of the plugins installed now, for a store that
+/// [`SettingsStore::load`] builds.
+pub fn plugin_schemas() -> Arc<[PluginSettingsSchema]> {
+    PLUGIN_SCHEMAS
+        .read()
+        .ok()
+        .and_then(|schemas| schemas.clone())
+        .unwrap_or_else(|| Arc::from(Vec::new()))
+}
+
+/// Replaces the installed plugins' schemas: the plugin host calls it when a
+/// plugin that contributes settings loads or unloads, and then has the
+/// config service re-read the settings files, which re-checks them.
+pub fn set_plugin_schemas(schemas: Vec<PluginSettingsSchema>) {
+    if let Ok(mut held) = PLUGIN_SCHEMAS.write() {
+        *held = Some(Arc::from(schemas));
+    }
+}
+
+/// Whether `key` names something in a `[plugins."<id>"]` table.
+fn is_plugin_key(key: Option<&str>) -> bool {
+    key.is_some_and(|key| key == "plugins" || key.starts_with("plugins."))
+}
+
+/// The problems in the `[plugins."<id>"]` tables of `user` and `project`,
+/// checked against `schemas`: what the config service reports for them at
+/// its next read of the files, for a caller that has to publish them now.
+///
+/// A plugin loading or unloading changes these problems with no file
+/// changed, so the plugin host computes them itself and puts them in
+/// `ConfigDiagnostics` in place of the ones it published before. Everything
+/// else in the files is the service's to report, so nothing else is
+/// returned.
+pub fn plugin_settings_problems(
+    user: Option<PathBuf>,
+    project: Option<PathBuf>,
+    schemas: Vec<PluginSettingsSchema>,
+) -> Vec<Diagnostic> {
+    let store = SettingsStore::load_with_plugins(user, project, schemas);
+    store
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| is_plugin_key(diagnostic.key.as_deref()))
+        .cloned()
+        .collect()
+}
+
+/// [`schema_for`], with a `plugins` property holding each installed plugin's
+/// own schema, so its table is checked like any other.
+///
+/// Ids that no installed plugin has are accepted and not descended into (an
+/// empty `additionalProperties` schema): settings for a plugin that isn't
+/// loaded yet are not a problem to report.
+fn schema_with_plugins(table: &Table, schemas: &[PluginSettingsSchema]) -> Arc<serde_json::Value> {
+    // `plugins` is declared even when nothing is installed: a table for a
+    // plugin that is not loaded right now (disabled, or not yet started) is
+    // not a mistake in the file, and must not be reported as an unknown key.
+    // That is what `additionalProperties: {}` below is for.
+    let mut schema = serde_json::Value::clone(&schema_for(table));
+    let properties: serde_json::Map<String, serde_json::Value> = schemas
+        .iter()
+        .map(|plugin| (plugin.id.clone(), serde_json::Value::clone(&plugin.schema)))
+        .collect();
+    schema["properties"][kiln_l10n::verbatim!("plugins")] = serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": {},
+    });
+    Arc::new(schema)
+}
+
+/// Drops from `layer` each `[plugins."<id>"]` key in `keys` for an installed
+/// plugin, with that key's warning at the key itself. `keys` picks the map
+/// to use for a plugin: its secrets, or its user-only keys.
+fn drop_plugin_keys(
+    layer: &mut Layer,
+    schemas: &[PluginSettingsSchema],
+    keys: impl Fn(&PluginSettingsSchema) -> &BTreeMap<String, String>,
+) {
+    let Some(toml::Value::Table(plugins)) = layer.table.get_mut("plugins") else {
+        return;
+    };
+    let mut dropped: Vec<(Vec<String>, String)> = Vec::new();
+    for plugin in schemas {
+        let Some(toml::Value::Table(table)) = plugins.get_mut(&plugin.id) else {
+            continue;
+        };
+        for (key, warning) in keys(plugin) {
+            if table.remove(key).is_some() {
+                dropped.push((
+                    vec!["plugins".to_owned(), plugin.id.clone(), key.clone()],
+                    warning.clone(),
+                ));
+            }
+        }
+    }
+    for (path, warning) in dropped {
+        let diagnostic = layer.key_diagnostic(Severity::Warning, &path, warning);
+        layer.diagnostics.push(diagnostic);
+    }
+}
+
+/// Which plugin schemas a [`SettingsOptions`] checks against: the installed
+/// set as it stands at each check, or a fixed set a caller passes in.
+///
+/// The app's path is [`Schemas::Live`], and it has to be. The options' filters
+/// and `schema_for` outlive the store they are built into, so capturing the
+/// set once at construction would pin the store to whatever was installed at
+/// that moment: a plugin loading or unloading afterwards could never change a
+/// re-read, and the service's own re-check would then disagree with the
+/// problems `republish_plugin_settings` publishes directly. One source of
+/// truth, read at each check.
+#[derive(Clone)]
+enum Schemas {
+    Live,
+    Fixed(Arc<[PluginSettingsSchema]>),
+}
+
+impl Schemas {
+    fn get(&self) -> Arc<[PluginSettingsSchema]> {
+        match self {
+            Self::Live => plugin_schemas(),
+            Self::Fixed(schemas) => schemas.clone(),
+        }
+    }
+}
+
 fn options() -> SettingsOptions {
+    options_for(Schemas::Live)
+}
+
+/// [`options`], with `schemas` as the installed plugins\' settings
+/// contributions: their tables are checked, and the keys no file (or no
+/// project file) may set are dropped with a positioned warning.
+fn options_with(schemas: Arc<[PluginSettingsSchema]>) -> SettingsOptions {
+    options_for(Schemas::Fixed(schemas))
+}
+
+fn options_for(schemas: Schemas) -> SettingsOptions {
+    let for_schema = schemas.clone();
+    let for_secrets = schemas.clone();
+    let for_user_only = schemas;
     SettingsOptions::new()
-        .schema_for(schema_for)
+        .schema_for(move |table| schema_with_plugins(table, &for_schema.get()))
+        .layer_filter(ProjectFilter::new("plugins", move |layer| {
+            drop_plugin_keys(layer, &for_secrets.get(), |plugin| &plugin.secret_keys);
+        }))
+        .project_filter(ProjectFilter::new("plugins", move |layer| {
+            drop_plugin_keys(layer, &for_user_only.get(), |plugin| &plugin.user_only_keys);
+        }))
         .layer_filter(ProjectFilter::new(
             "agents.project_permissions",
             drop_project_permissions,

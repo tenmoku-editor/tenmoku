@@ -28,7 +28,8 @@
 //! Without one, all of that is the plain behaviour above. An element can
 //! also keep keystrokes from the keymap while it reads them itself: see
 //! [`HOLDS_KEYS`], or [`HOLDS_ALL_KEYS`] to keep the platform modifier's
-//! keystrokes too. What goes on from a chord held, for a which-key popup,
+//! keystrokes too, or [`HOLDS_PLAIN_KEYS`] to leave the app only the
+//! secondary modifier's keystrokes and a chord's continuations. What goes on from a chord held, for a which-key popup,
 //! is [`pending_continuations`]; the owner hears of each change to it
 //! ([`KeyOwner::chord_changed`]). [`hold_chord`] stops it timing out.
 //!
@@ -63,6 +64,20 @@ pub const HOLDS_KEYS: &str = "holds_keys";
 /// where `cmd-w` must not close the tab. Beside [`HOLDS_KEYS`], which
 /// leaves the platform modifier's bindings to the app.
 pub const HOLDS_ALL_KEYS: &str = "holds_all_keys";
+
+/// A key context identifier: while the focused element's own context
+/// carries it, the keymap is consulted only for keystrokes with the
+/// secondary modifier (the platform's command key: `cmd` on macOS, `ctrl`
+/// elsewhere), for Tab with any modifiers (moving focus, `ctrl-tab`'s
+/// switcher, stays the app's; a Tab bound to nothing still reaches the
+/// listener) and, while a chord is pending, for its next keystroke, so a
+/// chord such as `secondary-k z` completes, times out and replays as
+/// anywhere else. Every other keystroke goes on to the element's key
+/// listener, whatever the bindings around it: for a view that reads plain
+/// keys itself, such as a game, while the app keeps its shortcuts.
+/// Beside [`HOLDS_KEYS`], which leaves the app the platform modifier,
+/// `super` off macOS rather than `ctrl`.
+pub const HOLDS_PLAIN_KEYS: &str = "holds_plain_keys";
 
 /// An app's say in key input, registered with [`set_key_owner`]. Each hook
 /// is called at the point its doc names, in the order the module doc
@@ -419,7 +434,8 @@ fn match_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
         // The owner's key listener has it.
         return;
     }
-    if holds_keys(event) {
+    let chord_pending = cx.global::<KeyInput>().pending.is_some();
+    if holds_keys(event, chord_pending) {
         // The focused element's key listener has it.
         cx.global_mut::<KeyInput>().abandon();
         return;
@@ -454,7 +470,8 @@ fn match_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
         replay(owner, std::mem::take(&mut swallowed), window, cx);
         let held;
         (stack, held) = owner.live_stack(gpui_stack, window, cx);
-        if held {
+        // Afresh, with no chord pending, the focused element may hold it.
+        if held || holds_keys(event, false) {
             return;
         }
         outcome = cx.global_mut::<KeyInput>().matcher.push(keystroke, &stack);
@@ -575,12 +592,17 @@ fn replay(
 }
 
 /// Whether the focused element holds `event`'s keystroke ([`HOLDS_KEYS`],
-/// [`HOLDS_ALL_KEYS`]).
-fn holds_keys(event: &KeystrokeEvent) -> bool {
+/// [`HOLDS_ALL_KEYS`], [`HOLDS_PLAIN_KEYS`]), with a chord pending or not.
+fn holds_keys(event: &KeystrokeEvent, chord_pending: bool) -> bool {
     let own = event.context_stack.last();
-    own.is_some_and(|context| context.contains(HOLDS_ALL_KEYS))
-        || (!event.keystroke.modifiers.platform
-            && own.is_some_and(|context| context.contains(HOLDS_KEYS)))
+    let has = |flag: &str| own.is_some_and(|context| context.contains(flag));
+    let modifiers = &event.keystroke.modifiers;
+    has(HOLDS_ALL_KEYS)
+        || (!modifiers.platform && has(HOLDS_KEYS))
+        || (!chord_pending
+            && !modifiers.secondary()
+            && event.keystroke.key != "tab"
+            && has(HOLDS_PLAIN_KEYS))
 }
 
 /// Whether `keystroke` is a modifier pressed and released alone, which GPUI
