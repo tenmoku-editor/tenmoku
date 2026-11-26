@@ -1,0 +1,68 @@
+<!-- The order list: bindings, pipes and Angular's control flow. -->
+<section class="orders" [class.active]="isActive" [attr.aria-busy]="loading">
+  <header>
+    <h1>{{ title | uppercase }}</h1>
+    <p>Updated {{ updatedAt | date: 'shortTime' }}, {{ orders.length }} orders</p>
+    <input #search type="search" [(ngModel)]="query" (keyup.enter)="find(search.value)" />
+    <button type="button" [disabled]="!canRefresh" (click)="refresh($event)">Refresh</button>
+  </header>
+
+  @let total = subtotal + shipping;
+  <p class="total">Total: {{ total | currency: 'EUR' : 'symbol' }}</p>
+
+  @if (user?.isAdmin) {
+    <a [routerLink]="['/admin', user.id]">Administer</a>
+  } @else if (user) {
+    <span>Signed in as {{ user.name ?? 'guest' }}</span>
+  } @else {
+    <button (click)="login()">Sign in</button>
+  }
+
+  <ul>
+    @for (order of orders; track order.id; let i = $index, last = $last) {
+      <li [class.last]="last" (click)="select(order, i)">
+        {{ i + 1 }}. {{ order.customer }}: {{ order.amount | number: '1.2-2' }}
+      </li>
+    } @empty {
+      <li class="empty">No orders yet</li>
+    }
+  </ul>
+
+  @switch (status) {
+    @case ('shipped') {
+      <span class="badge">Shipped</span>
+    }
+    @case ('pending') {
+      <span class="badge warn">Pending</span>
+    }
+    @default {
+      <span class="badge">Unknown</span>
+    }
+  }
+
+  @defer (on viewport) {
+    <app-order-chart [data]="orders" />
+  } @placeholder {
+    <div class="skeleton">Loading chart</div>
+  }
+
+  <div *ngIf="notes.length > 0; else noNotes" class="notes">
+    <p *ngFor="let note of notes; index as n">{{ n }}: {{ note.text }}</p>
+  </div>
+  <ng-template #noNotes>
+    <p>No notes</p>
+  </ng-template>
+
+  <ng-container *ngTemplateOutlet="footer; context: { $implicit: total }"></ng-container>
+  <ng-template #footer let-sum>
+    <footer>Sum {{ sum > 100 ? 'large' : 'small' }}, done: {{ done === true }}</footer>
+  </ng-template>
+</section>
+
+<style>
+  .orders .badge { color: #3a7; }
+</style>
+
+<script>
+  console.log("orders loaded", 42);
+</script>

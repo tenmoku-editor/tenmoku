@@ -1,0 +1,16 @@
+id = "tenmoku.grammar_angular"
+name = "Angular template syntax"
+version = "0.9.2"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "angular"
+wasm = "tree-sitter-angular.wasm"
+extensions = ["component.html"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+block_comment = ["<!--", "-->"]
+earlier_patterns_win = false
