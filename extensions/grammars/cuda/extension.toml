@@ -1,0 +1,17 @@
+id = "tenmoku.grammar_cuda"
+name = "CUDA syntax"
+version = "0.21.2"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "cuda"
+wasm = "tree-sitter-cuda.wasm"
+extensions = ["cu", "cuh"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false
+line_comment = "//"
+block_comment = ["/*", "*/"]

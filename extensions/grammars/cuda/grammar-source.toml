@@ -1,0 +1,4 @@
+git = "https://github.com/tree-sitter-grammars/tree-sitter-cuda"
+rev = "d58080a327756e4d1d16ec329ba7cb2048f6c6cd"
+src = "src"
+grammar = "cuda"
