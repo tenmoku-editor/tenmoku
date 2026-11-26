@@ -1,0 +1,35 @@
+%% A sequence diagram: signing in.
+sequenceDiagram
+    autonumber
+    actor User
+    participant App as Web app
+    participant Auth
+    title: Signing in
+    User->>App: Open the page
+    App->>+Auth: Request a session
+    Auth-->>-App: Session token
+    Note right of Auth: Tokens expire hourly
+    Note over User,App: The page is ready
+    activate App
+    loop Every minute
+        App->Auth: Ping
+        Auth-->App: Pong
+    end
+    alt token valid
+        App-)User: Show the dashboard
+    else
+        App--)User: Ask again
+    end
+    opt remember me
+        App-xAuth: Store a refresh token
+    end
+    par notify
+        App--xUser: Email sent
+    and audit
+        App->>Auth: Log the sign in
+    end
+    rect rgb(240, 240, 240)
+        User->>App: Sign out
+    end
+    deactivate App
+    link Auth: Dashboard @ https://auth.example.com

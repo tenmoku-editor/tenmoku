@@ -1,0 +1,22 @@
+%% A state diagram: a download.
+stateDiagram-v2
+    direction LR
+    hide empty description
+    [*] --> Idle
+    Idle --> Fetching : start
+    Fetching --> Done : complete
+    Fetching --> Failed : error
+    Failed --> Idle : retry
+    Done --> [*]
+    state "Waiting for the network" as Waiting
+    Idle : Nothing queued
+    state Fetching {
+        [*] --> Headers
+        Headers --> Body
+        --
+        [*] --> Progress
+    }
+    state split<<fork>>
+    state merged<<join>>
+    state decide<<choice>>
+    note right of Failed : Three attempts at most

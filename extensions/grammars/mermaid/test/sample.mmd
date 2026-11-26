@@ -1,0 +1,40 @@
+%% A flowchart: how a pull request reaches the main branch.
+%%{init: {"theme": "forest", "flowchart": {"curve": "basis"}}}%%
+flowchart TD
+    %% Node shapes
+    start([Open request]) --> lint[Run linters]
+    lint --> tests(Run tests)
+    tests --> gate{Green?}
+    gate -->|yes| review((Review))
+    gate -->|no| fix>Fix the code]
+    fix --> lint
+
+    %% Labelled and styled edges
+    review -- approved --> merge[[Merge]]
+    review -. changes .-> fix
+    review == blocked ==> park{{Parked}}
+    merge --- store[(Artifacts)]
+    merge --> notes[/Release notes/]
+    merge --> badge[\Status badge\]
+    notes --> wide[/Publish\]
+    badge --> narrow[\Archive/]
+    store --> quoted["Nightly build (signed)"]
+
+    %% Subgraphs, with their own direction
+    subgraph ci [Continuous integration]
+        direction LR
+        build --> unit & e2e
+        unit --> report
+        e2e --> report
+    end
+
+    subgraph deploy
+        direction TB
+        staging --> canary
+        canary ==> production
+    end
+
+    merge --> ci
+    ci -->|passed| deploy
+    deploy --x rollback
+    rollback o--o start; park --> start

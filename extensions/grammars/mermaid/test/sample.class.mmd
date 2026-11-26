@@ -1,0 +1,27 @@
+%% A class diagram: shapes.
+classDiagram
+    Shape <|-- Circle
+    Shape <|-- Polygon
+    Canvas "1" *-- "many" Shape : holds
+    Canvas o-- Layer
+    Canvas --> Renderer : draws with
+    Renderer ..> Theme
+    Printable <|.. Polygon
+    Circle -- Point
+    Shape : +String name
+    Shape : +area() float
+    class Circle {
+        -float radius
+        #Point centre
+        ~int id
+        +area() float
+        +unit()$
+        +draw()*
+    }
+    class Printable {
+        <<interface>>
+        +print()
+    }
+    class Layer~Shape~
+    class Theme:::dark
+    <<service>> Renderer

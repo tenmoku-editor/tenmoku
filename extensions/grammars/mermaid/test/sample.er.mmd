@@ -1,0 +1,12 @@
+%% An entity relationship diagram: a shop.
+erDiagram
+    CUSTOMER ||--o{ ORDER : places
+    ORDER ||--|{ LINE-ITEM : contains
+    PRODUCT |o..o| LINE-ITEM : "appears in"
+    CUSTOMER }|..|{ ADDRESS : uses
+    CUSTOMER {
+        string email PK "Unique per account"
+        string name
+        int referrer FK
+    }
+    COUPON

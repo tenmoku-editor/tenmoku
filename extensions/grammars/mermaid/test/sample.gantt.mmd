@@ -1,0 +1,14 @@
+%% A Gantt chart: a release.
+gantt
+    title Release plan
+    dateFormat YYYY-MM-DD
+    axisFormat %d %b
+    excludes weekends
+    includes 2026-03-07
+    todayMarker off
+    section Build
+    Design review       :done, des1, 2026-03-02, 3d
+    Implement features  :active, imp1, after des1, 10d
+    section Ship
+    Release candidate   :crit, rc1, after imp1, 5d
+    Announce            :milestone, 2026-03-27, 0d

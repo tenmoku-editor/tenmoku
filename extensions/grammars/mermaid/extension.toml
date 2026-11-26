@@ -1,0 +1,16 @@
+id = "tenmoku.grammar_mermaid"
+name = "Mermaid syntax"
+version = "0.0.2"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "mermaid"
+wasm = "tree-sitter-mermaid.wasm"
+extensions = ["mmd", "mermaid"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false
+line_comment = "%%"
