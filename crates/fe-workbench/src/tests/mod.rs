@@ -134,6 +134,7 @@ mod lsp_folds_single_request;
 mod lsp_fragments_locale;
 mod lsp_hover;
 mod lsp_message_request;
+mod lsp_message_tone;
 mod lsp_nav;
 mod lsp_quit;
 mod lsp_resolve_retry;

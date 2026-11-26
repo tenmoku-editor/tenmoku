@@ -672,6 +672,7 @@ impl Server {
                 signal: signal.clone(),
                 refresh: refresh.clone(),
                 log: self.log.clone(),
+                warned: Cell::new(0),
                 diagnostics: diagnostics.clone(),
                 edits: edits.clone(),
                 session: self.session.clone(),
@@ -2036,18 +2037,21 @@ async fn drain_stderr(
 ) {
     let Some(mut stderr) = stderr else { return };
     let mut buf = vec![0; 4096];
-    let keep = |bytes: &[u8]| {
+    let mut errors = ErrorLines::default();
+    // Errors are classified first, so a line in the ring has been warned.
+    let keep = |errors: &mut ErrorLines, bytes: &[u8]| {
+        errors.feed(&name, bytes);
         lock(&ring).push(bytes);
         log::debug!(
             "{name} stderr: {}",
             String::from_utf8_lossy(bytes).trim_end()
         );
     };
-    {
+    let drained = {
         let drain = async {
             let mut budget = Budget::default();
             while let Ok(n @ 1..) = stderr.read(&mut buf).await {
-                keep(&buf[..n]);
+                keep(&mut errors, &buf[..n]);
                 budget.spend().await;
             }
         }
@@ -2055,9 +2059,13 @@ async fn drain_stderr(
         pin_mut!(drain);
         let mut over = over.fuse();
         select_biased! {
-            _ = over => {}
-            () = drain => return,
+            _ = over => false,
+            () = drain => true,
         }
+    };
+    if drained {
+        errors.flush(&name);
+        return;
     }
     let mut grace = clock.sleep(STDERR_GRACE);
     let mut budget = Budget::default();
@@ -2065,9 +2073,65 @@ async fn drain_stderr(
         && grace.as_mut().now_or_never().is_none()
         && let Some(Ok(n @ 1..)) = stderr.read(&mut buf).now_or_never()
     {
-        keep(&buf[..n]);
+        keep(&mut errors, &buf[..n]);
         budget.spend().await;
     }
+    errors.flush(&name);
+}
+
+/// How many error lines per session reach the app log.
+pub(crate) const FORWARDED_ERRORS: usize = 50;
+
+/// Whether a server's output line looks like an error.
+fn looks_like_error(line: &str) -> bool {
+    line.contains(" ERROR ") || line.starts_with("ERROR") || line.contains("panicked")
+}
+
+/// Splits stderr into lines (one may span reads) and forwards those that
+/// look like errors to the app log at warn, up to [`FORWARDED_ERRORS`].
+#[derive(Default)]
+struct ErrorLines {
+    partial: Vec<u8>,
+    forwarded: usize,
+}
+
+impl ErrorLines {
+    fn feed(&mut self, name: &str, bytes: &[u8]) {
+        self.partial.extend_from_slice(bytes);
+        while let Some(end) = self.partial.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.partial.drain(..=end).collect();
+            self.line(name, &String::from_utf8_lossy(&line));
+        }
+        let over = self.partial.len().saturating_sub(crate::event::LOG_BYTES);
+        self.partial.drain(..over);
+    }
+
+    /// Classifies the unterminated last line, once nothing more is read.
+    fn flush(&mut self, name: &str) {
+        let tail = std::mem::take(&mut self.partial);
+        self.line(name, &String::from_utf8_lossy(&tail));
+    }
+
+    fn line(&mut self, name: &str, line: &str) {
+        let line = line.trim_end();
+        if !looks_like_error(line) {
+            return;
+        }
+        warn_capped(&mut self.forwarded, name, "stderr", line);
+    }
+}
+
+/// Warns `message` unless `count` has reached the cap, where it warns once
+/// that further error output is only in the server's log.
+pub(crate) fn warn_capped(count: &mut usize, name: &str, source: &str, text: &str) {
+    if *count < FORWARDED_ERRORS {
+        log::warn!("{name} {source}: {text}");
+    } else if *count == FORWARDED_ERRORS {
+        log::warn!(
+            "{name}: further error output is only in the server's log (Show Language Server Log)"
+        );
+    }
+    *count = count.saturating_add(1);
 }
 
 /// How long stderr that never stops being ready is read after its

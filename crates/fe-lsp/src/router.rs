@@ -32,8 +32,8 @@ use lsp_types::request::{
     WorkspaceFoldersRequest,
 };
 use lsp_types::{
-    LogMessageParams, ProgressParams, ProgressParamsValue, ShowDocumentResult, ShowMessageParams,
-    WorkspaceFolder,
+    LogMessageParams, MessageType, ProgressParams, ProgressParamsValue, ShowDocumentResult,
+    ShowMessageParams, WorkspaceFolder,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -121,6 +121,8 @@ pub(crate) struct ClientState {
     /// every open document again (pull.rs).
     pub(crate) refresh: Rc<Signal>,
     pub(crate) log: SharedLog,
+    /// How many `window/logMessage` errors went to the app log.
+    pub(crate) warned: Cell<usize>,
     /// Where publications wait for the actor to decode them.
     pub(crate) diagnostics: Rc<Inbox>,
     /// Where `workspace/applyEdit`s wait for the actor to decode them.
@@ -231,6 +233,16 @@ impl ClientState {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(line.as_bytes());
+                if params.typ == MessageType::ERROR {
+                    let mut warned = self.warned.get();
+                    crate::server::warn_capped(
+                        &mut warned,
+                        &self.name,
+                        "logMessage",
+                        params.message.trim_end(),
+                    );
+                    self.warned.set(warned);
+                }
             }),
             ShowMessage::METHOD => parse(notif.params).map(|params: ShowMessageParams| {
                 let mut sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner);

@@ -30,6 +30,7 @@ mod registry;
 mod restart;
 mod router;
 mod status;
+mod stderr_errors;
 mod stdout_stall;
 mod sync;
 mod teardown_clears;
@@ -322,8 +323,21 @@ fn logs_from(thread: &str) -> Vec<String> {
         .unwrap_or_else(PoisonError::into_inner)
         .records
         .iter()
-        .filter(|(from, _)| from == thread)
-        .map(|(_, message)| message.clone())
+        .filter(|(from, _, _)| from == thread)
+        .map(|(_, _, message)| message.clone())
+        .collect()
+}
+
+/// Like [`logs_from`], only the records at `level`.
+fn logs_at(thread: &str, level: log::Level) -> Vec<String> {
+    LOGGER
+        .get_or_init(install_logger)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .records
+        .iter()
+        .filter(|(from, at, _)| from == thread && *at == level)
+        .map(|(_, _, message)| message.clone())
         .collect()
 }
 
@@ -341,7 +355,7 @@ fn capture_logs(thread: &str) {
 #[derive(Default)]
 struct Log {
     threads: Vec<String>,
-    records: Vec<(String, String)>,
+    records: Vec<(String, log::Level, String)>,
 }
 
 type Captured = Mutex<Log>;
@@ -361,7 +375,8 @@ impl log::Log for Capture {
         };
         let mut log = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if log.threads.contains(&thread) {
-            log.records.push((thread, record.args().to_string()));
+            log.records
+                .push((thread, record.level(), record.args().to_string()));
         }
     }
 

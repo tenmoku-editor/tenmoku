@@ -507,7 +507,7 @@ pub(crate) struct Lsp {
     servers: HashMap<ServerId, (String, ServerStatus)>,
     /// Each server's latest `window/showMessage`, shown in place of its
     /// status until its next one.
-    messages: HashMap<ServerId, String>,
+    messages: HashMap<ServerId, (StatusTone, String)>,
     /// The log tab open for each server name and root.
     log_tabs: HashMap<(String, PathBuf), WeakEntity<fe_gpui::EditorView>>,
     /// Each server's diagnostics for files it doesn't have open, by the
@@ -886,15 +886,31 @@ impl Lsp {
     }
 }
 
+/// A server's message and the tone its level gives it. A bare `&str` is
+/// taken as an error.
+pub(crate) struct Said<'a>(pub(crate) StatusTone, pub(crate) &'a str);
+
+impl<'a> From<&'a str> for Said<'a> {
+    fn from(message: &'a str) -> Self {
+        Said(StatusTone::Error, message)
+    }
+}
+
+impl<'a> From<&'a (StatusTone, String)> for Said<'a> {
+    fn from((tone, message): &'a (StatusTone, String)) -> Self {
+        Said(*tone, message)
+    }
+}
+
 /// The status item's text and tone for server `name` in `status`, or its
 /// `message` if it has one: none for a server running with nothing to say.
-pub(crate) fn status_text(
+pub(crate) fn status_text<'a>(
     name: &str,
     status: &ServerStatus,
-    message: Option<&str>,
+    message: Option<impl Into<Said<'a>>>,
 ) -> Option<(String, StatusTone)> {
-    if let Some(message) = message {
-        return Some((message.to_owned(), StatusTone::Error));
+    if let Some(Said(tone, message)) = message.map(Into::into) {
+        return Some((message.to_owned(), tone));
     }
     let (text, tone) = match status {
         ServerStatus::Starting => (
@@ -994,7 +1010,7 @@ fn python_status(
     name: &str,
     env: &PythonEnv,
     status: &ServerStatus,
-    message: Option<&str>,
+    message: Option<&(StatusTone, String)>,
 ) -> (String, StatusTone, ItemTooltip) {
     let name: String = tr!(
         "workbench-lsp-status-python-env-name",
@@ -1978,15 +1994,15 @@ impl Workbench {
                 log::info!("{name} says ({typ:?}): {message}");
                 // fe-workbench has no lsp_types of its own; its Debug is the
                 // level's name.
-                let toast = match format!("{typ:?}").as_str() {
-                    "Error" => Some(Toast::error(name.clone())),
-                    "Warning" => Some(Toast::warning(name.clone())),
-                    _ => None,
+                let (toast, tone) = match format!("{typ:?}").as_str() {
+                    "Error" => (Some(Toast::error(name.clone())), StatusTone::Error),
+                    "Warning" => (Some(Toast::warning(name.clone())), StatusTone::Warning),
+                    _ => (None, StatusTone::Default),
                 };
                 if let Some(toast) = toast {
                     toast::show(cx, toast.detail(message.clone()));
                 }
-                lsp.messages.insert(server, message);
+                lsp.messages.insert(server, (tone, message));
             }
             LspEvent::ShowMessageRequest {
                 name,
@@ -2189,7 +2205,10 @@ impl Workbench {
         let (server, ..) = self.lsp.server(buffer).expect("the buffer has a server");
         self.lsp.servers.get_mut(&server).unwrap().1 = status;
         match message {
-            Some(message) => self.lsp.messages.insert(server, message),
+            Some(message) => self
+                .lsp
+                .messages
+                .insert(server, (StatusTone::Error, message)),
             None => self.lsp.messages.remove(&server),
         };
         self.show_lsp_status(cx);
@@ -2213,7 +2232,7 @@ impl Workbench {
         let shown = match self.untrusted_root(buffer, cx) {
             Some((name, root)) => Some(untrusted_status(&name, &root)),
             None => lsp.server(buffer).and_then(|(server, name, status)| {
-                let message = lsp.messages.get(&server).map(String::as_str);
+                let message = lsp.messages.get(&server);
                 match lsp.python_env(buffer, server) {
                     Some(env) => Some(python_status(name, &env, status, message)),
                     None => status_text(name, status, message)
@@ -2278,7 +2297,7 @@ impl Workbench {
         let Some(manager) = lsp.manager.clone() else {
             return;
         };
-        let status = status_text(&name, &status, message.as_deref())
+        let status = status_text(&name, &status, message.as_ref())
             .map_or_else(String::new, |(text, _)| text);
         let output = lock(&manager).log(&name, &root);
         let text = log_text(&name, &root, &status, &output);
