@@ -1,0 +1,17 @@
+id = "tenmoku.grammar_gdscript"
+name = "GDScript syntax"
+version = "6.0.0"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "gdscript"
+wasm = "tree-sitter-gdscript.wasm"
+extensions = ["gd"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false
+license = "MIT"
+line_comment = "#"
