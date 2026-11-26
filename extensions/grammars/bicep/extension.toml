@@ -1,0 +1,17 @@
+id = "tenmoku.grammar_bicep"
+name = "Bicep syntax"
+version = "1.1.0"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "bicep"
+wasm = "tree-sitter-bicep.wasm"
+extensions = ["bicep", "bicepparam"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false
