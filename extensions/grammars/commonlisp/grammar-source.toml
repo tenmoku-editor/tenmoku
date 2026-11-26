@@ -1,0 +1,4 @@
+git = "https://github.com/tree-sitter-grammars/tree-sitter-commonlisp"
+rev = "32323509b3d9fe96607d151c2da2c9009eb13a2f"
+src = "src"
+grammar = "commonlisp"
