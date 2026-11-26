@@ -1,0 +1,7 @@
+git = "https://github.com/RubixDev/tree-sitter-asm"
+# The full 40-hex commit.
+rev = "839741fef4dab5128952334624905c82b40c7133"
+# The directory holding parser.c, relative to the repository.
+src = "src"
+# The export tree_sitter_asm.
+grammar = "asm"
