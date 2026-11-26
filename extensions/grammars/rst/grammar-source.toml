@@ -1,0 +1,5 @@
+git = "https://github.com/stsewd/tree-sitter-rst"
+rev = "a60f1070b824cb8bb8409b4b6d7da0d07997c30e"
+src = "src"
+grammar = "rst"
+parity_needs = ["latex"]

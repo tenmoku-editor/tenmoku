@@ -1,0 +1,16 @@
+id = "tenmoku.grammar_rst"
+name = "reStructuredText syntax"
+version = "0.2.0"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "rst"
+wasm = "tree-sitter-rst.wasm"
+extensions = ["rst", "rest"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false
+license = "MIT"
