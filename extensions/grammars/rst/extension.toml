@@ -9,7 +9,7 @@ tenmoku = "1.0"
 [[contributes.grammars]]
 language = "rst"
 wasm = "tree-sitter-rst.wasm"
-extensions = ["rst", "rest"]
+extensions = ["rst"]
 highlights = "highlights.scm"
 injections = "injections.scm"
 earlier_patterns_win = false
