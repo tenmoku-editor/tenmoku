@@ -3,9 +3,13 @@
 //! Download button when it's newer. It only runs when asked: there is no
 //! polling, no download and nothing kept.
 //!
-//! A release counts if it's neither a draft nor a prerelease, its tag is
-//! `vMAJOR.MINOR.PATCH` and its page is under [`RELEASE_PAGES`], as what's
-//! opened comes from the reply. Anything else is no release found.
+//! `update.channel` picks what counts. On stable, GitHub's latest release,
+//! which is neither a draft nor a prerelease, with a tag of `vMAJOR.MINOR.PATCH`.
+//! On preview, the newest by [`ReleaseVersion`] of the recent releases that
+//! aren't drafts, tagged `vX.Y.Z` or `vX.Y.Z-preview.N`. A release's page must
+//! be under [`RELEASE_PAGES`], as what's opened comes from the reply. Anything
+//! else is no release found. A release is offered only if it's newer than the
+//! running version, a preview being older than its own stable release.
 //!
 //! The network is behind [`UpdateSource`]: the app reaches GitHub through
 //! `fe-net`, and anything on the test scheduler reaches only the fake it set,
@@ -20,6 +24,11 @@
 
 use std::{sync::Arc, time::Duration};
 
+use fe_config::{
+    Settings,
+    settings::ReleaseChannel,
+    whats_new::{ReleaseVersion, parse_release_version},
+};
 use futures::{Stream, StreamExt as _, future::BoxFuture};
 use gpui::{App, AppContext as _, AsyncApp, Entity, Global, SharedString};
 use kiln::command::{Capability, Grants};
@@ -31,6 +40,11 @@ use crate::workbench::toast::{self, Toast, ToastLayer};
 /// The latest release: GitHub answers this directly, as `fe-net` follows no
 /// redirects.
 const LATEST_RELEASE: &str = "https://api.github.com/repos/tenmoku-editor/tenmoku/releases/latest";
+
+/// The recent releases, newest first, for the preview channel, which GitHub
+/// answers directly as well.
+const RECENT_RELEASES: &str =
+    "https://api.github.com/repos/tenmoku-editor/tenmoku/releases?per_page=10";
 
 /// What a release's page must start with to be opened.
 const RELEASE_PAGES: &str = "https://github.com/tenmoku-editor/tenmoku/releases/";
@@ -63,21 +77,20 @@ pub(crate) fn download() -> SharedString {
 
 /// What a fetcher got: the HTTP status, and the body if that's 200.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Fetched {
-    pub(crate) status: u16,
-    pub(crate) body: Vec<u8>,
+pub struct Fetched {
+    pub status: u16,
+    pub body: Vec<u8>,
 }
 
-/// Asks for the latest release; `Err` is why there's no reply to go by. Called
+/// Asks for the latest release, or on the preview channel the recent ones; `Err` is why there's no reply to go by. Called
 /// on the background executor.
-pub(crate) type Fetcher =
-    Arc<dyn Fn() -> BoxFuture<'static, Result<Fetched, String>> + Send + Sync>;
+pub type Fetcher = Arc<dyn Fn() -> BoxFuture<'static, Result<Fetched, String>> + Send + Sync>;
 
 /// Where a check gets its answer, and the version it compares that with.
 #[derive(Clone)]
-pub(crate) struct UpdateSource {
-    pub(crate) fetch: Fetcher,
-    pub(crate) running: String,
+pub struct UpdateSource {
+    pub fetch: Fetcher,
+    pub running: String,
 }
 
 impl Global for UpdateSource {}
@@ -86,7 +99,7 @@ impl UpdateSource {
     /// The one set, else the app's: GitHub, and this build's version. On the
     /// test scheduler, a fetcher that only fails, so that nothing but a fake
     /// answers a test.
-    fn of(cx: &App) -> UpdateSource {
+    fn of(cx: &App, channel: ReleaseChannel) -> UpdateSource {
         if let Some(source) = cx.try_global::<UpdateSource>() {
             return source.clone();
         }
@@ -94,7 +107,7 @@ impl UpdateSource {
             true => Arc::new(|| {
                 Box::pin(async { Err(kiln_l10n::verbatim!("no fake fetcher is set").to_owned()) })
             }),
-            false => Arc::new(|| Box::pin(fetch_latest())),
+            false => Arc::new(move || Box::pin(fetch_latest(channel))),
         };
         UpdateSource {
             fetch,
@@ -129,6 +142,7 @@ enum Outcome {
         version: String,
         page: String,
         running: String,
+        channel: ReleaseChannel,
     },
     UpToDate {
         running: String,
@@ -153,12 +167,15 @@ pub(crate) fn run(layer: &Entity<ToastLayer>, cx: &mut App) {
         return toast::show(cx, Toast::info(already_checking()));
     }
     cx.default_global::<Checking>().0 = true;
-    let UpdateSource { fetch, running } = UpdateSource::of(cx);
+    let channel = kiln_platform::config::settings::<Settings>(cx)
+        .update
+        .channel;
+    let UpdateSource { fetch, running } = UpdateSource::of(cx, channel);
     let going = layer.update(cx, |layer, cx| {
         layer.push(Toast::info(tr!("workbench-extensions-update-checking")), cx)
     });
     let layer = layer.downgrade();
-    let outcome = cx.background_spawn(async move { judge(fetch().await, &running) });
+    let outcome = cx.background_spawn(async move { judge(fetch().await, &running, channel) });
     cx.spawn(async move |cx: &mut AsyncApp| {
         let outcome = outcome.await;
         cx.update(|cx| {
@@ -178,7 +195,8 @@ fn tell(outcome: Outcome, cx: &mut App) {
             version,
             page,
             running,
-        } => return offer(&version, &running, page, cx),
+            channel,
+        } => return offer(&version, &running, channel, page, cx),
         Outcome::UpToDate { running } => Toast::info(tr!(
             "workbench-extensions-update-up-to-date",
             running = running
@@ -200,13 +218,20 @@ fn tell(outcome: Outcome, cx: &mut App) {
 /// Toasts that `version` is available, with a button opening `page`. It's a
 /// toast's question, as its command-naming action couldn't carry the page, so
 /// it stays until it's answered.
-fn offer(version: &str, running: &str, page: String, cx: &mut App) {
+fn offer(version: &str, running: &str, channel: ReleaseChannel, page: String, cx: &mut App) {
     let (answer, answered) = futures::channel::oneshot::channel();
-    let message = tr!(
-        "workbench-extensions-update-available",
-        version = version,
-        running = running
-    );
+    let message = match channel {
+        ReleaseChannel::Stable => tr!(
+            "workbench-extensions-update-available",
+            version = version,
+            running = running
+        ),
+        ReleaseChannel::Preview => tr!(
+            "workbench-extensions-update-available-preview",
+            version = version,
+            running = running
+        ),
+    };
     let offer = Toast::info(message).choices(vec![download().into()], move |choice| {
         answer.send(choice).ok();
     });
@@ -220,7 +245,7 @@ fn offer(version: &str, running: &str, page: String, cx: &mut App) {
 }
 
 /// What `fetched` says, at version `running`.
-fn judge(fetched: Result<Fetched, String>, running: &str) -> Outcome {
+fn judge(fetched: Result<Fetched, String>, running: &str, channel: ReleaseChannel) -> Outcome {
     let Fetched { status, body } = match fetched {
         Ok(fetched) => fetched,
         Err(reason) => return Outcome::Failed(one_line(&reason)),
@@ -260,10 +285,19 @@ fn judge(fetched: Result<Fetched, String>, running: &str) -> Outcome {
             .into(),
         );
     };
-    let Some((version, latest, page)) = release_of(&release) else {
+    let found = match channel {
+        ReleaseChannel::Stable => release_of(&release, false),
+        ReleaseChannel::Preview => release.as_array().and_then(|releases| {
+            (releases
+                .iter()
+                .filter_map(|release| release_of(release, true)))
+            .max_by_key(|found| found.1)
+        }),
+    };
+    let Some((version, latest, page)) = found else {
         return Outcome::NoRelease { status: None };
     };
-    let Some(current) = parse_version(running) else {
+    let Some(current) = parse_release_version(running) else {
         return Outcome::Failed(
             tr!(
                 "workbench-extensions-update-version-not-comparable",
@@ -278,37 +312,27 @@ fn judge(fetched: Result<Fetched, String>, running: &str) -> Outcome {
             version: version.to_owned(),
             page: page.to_owned(),
             running,
+            channel,
         },
         false => Outcome::UpToDate { running },
     }
 }
 
-/// The version, as written and as numbers, and the page of the release in
-/// `reply`, if it counts as one.
-fn release_of(reply: &Value) -> Option<(&str, (u64, u64, u64), &str)> {
+/// The version, as written and ordered, and the page of the release in
+/// `reply`, if it counts as one: not a draft, and not a prerelease unless
+/// `previews` (GitHub flags a preview build as one), with a tag of `vX.Y.Z`,
+/// or on `previews` `vX.Y.Z-preview.N`.
+fn release_of(reply: &Value, previews: bool) -> Option<(&str, ReleaseVersion, &str)> {
     let flag = |key: &str| reply[key].as_bool().unwrap_or(false);
-    if flag("draft") || flag("prerelease") {
+    if flag("draft") || (flag("prerelease") && !previews) {
         return None;
     }
     let version = reply["tag_name"].as_str()?.strip_prefix('v')?;
-    let numbers = parse_version(version)?;
+    let ordered =
+        parse_release_version(version).filter(|ordered| previews || ordered.pre.is_none())?;
     let page = reply["html_url"].as_str()?;
     page.starts_with(RELEASE_PAGES)
-        .then_some((version, numbers, page))
-}
-
-/// `MAJOR.MINOR.PATCH` as numbers, which compare as versions do: each part is
-/// plain digits, with no sign or leading zero, and fits.
-fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = text.split('.');
-    let mut part = || {
-        let part = parts.next()?;
-        let digits = !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-        let plain = part == "0" || !part.starts_with('0');
-        (digits && plain).then(|| part.parse().ok()).flatten()
-    };
-    let version = (part()?, part()?, part()?);
-    parts.next().is_none().then_some(version)
+        .then_some((version, ordered, page))
 }
 
 /// `text` on one line, as a toast's reason.
@@ -316,8 +340,8 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Asks GitHub for the latest release.
-async fn fetch_latest() -> Result<Fetched, String> {
+/// Asks GitHub for the latest release, or on the preview channel the recent ones.
+async fn fetch_latest(channel: ReleaseChannel) -> Result<Fetched, String> {
     let capability = Capability::parse(CAPABILITY).map_err(|error| error.to_string())?;
     let grants: Grants = std::iter::once(capability).collect();
     let client = fe_net::Client::new(&grants).with_idle_timeout(IDLE_TIMEOUT);
@@ -333,7 +357,11 @@ async fn fetch_latest() -> Result<Fetched, String> {
     let method = "GET"
         .parse()
         .map_err(|_| tr!("workbench-extensions-update-no-get").to_string())?;
-    let reply = client.request(method, LATEST_RELEASE, headers, Vec::new());
+    let url = match channel {
+        ReleaseChannel::Stable => LATEST_RELEASE,
+        ReleaseChannel::Preview => RECENT_RELEASES,
+    };
+    let reply = client.request(method, url, headers, Vec::new());
     let reply = reply.await.map_err(|error| error.to_string())?;
     read_reply(reply.status.as_u16(), reply.body).await
 }

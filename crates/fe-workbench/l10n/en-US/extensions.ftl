@@ -19,6 +19,7 @@ workbench-extensions-update-failed = Couldn't check for updates: { $reason }
 workbench-extensions-update-download = Download
 workbench-extensions-update-up-to-date = Tenmoku is up to date (you have { $running })
 workbench-extensions-update-available = Tenmoku { $version } is available (you have { $running })
+workbench-extensions-update-available-preview = Tenmoku { $version } (preview) is available (you have { $running })
 workbench-extensions-update-refused = GitHub refused it, usually its rate limit, so try again later (HTTP { $status })
 workbench-extensions-update-http-status = GitHub answered HTTP { $status }
 workbench-extensions-update-invalid-json = GitHub's reply isn't valid JSON (HTTP { $status })
