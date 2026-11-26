@@ -364,7 +364,8 @@ pub(crate) struct Offer {
     pub(crate) text: Rc<SnippetText>,
     /// The languages it's offered in: every one if none.
     pub(crate) languages: Rc<[String]>,
-    /// Whose it is: the extension's name, or [`user_snippet`].
+    /// The extension's name, if it's one's. Empty for the user's, whose
+    /// item says [`user_snippet`] in the language of the moment.
     pub(crate) detail: Rc<str>,
     /// Whether it's the user's, which comes before an extension's that
     /// matches as well.
@@ -589,7 +590,11 @@ fn item(snippet: &Offer, range: Range<usize>) -> CompletionItem {
         label_detail: (snippet.text.description.as_ref())
             .map(|description| format!(" {}", description)),
         kind: Some("snippet".to_owned()),
-        detail: Some(snippet.detail.to_string()),
+        // Resolved now: the offer was built perhaps in another language.
+        detail: Some(match snippet.user {
+            true => user_snippet().into(),
+            false => snippet.detail.to_string(),
+        }),
         sort_text: snippet.user.then(|| format!("\0{}", snippet.prefix)),
         group: SNIPPET_GROUP,
         edit: (range, snippet.text.body.clone()),

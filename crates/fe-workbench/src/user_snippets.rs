@@ -21,7 +21,7 @@ use fe_config::user_snippets::{DirStamp, UserSnippet, load_snippets, snippets_di
 use gpui::{App, Global};
 
 use crate::{
-    extension_snippets::{Offer, SnippetText, user_snippet},
+    extension_snippets::{Offer, SnippetText},
     snippet_body_error,
 };
 
@@ -97,11 +97,11 @@ fn current(cx: &mut App) -> &Loaded {
     let texts: Rc<[Rc<SnippetText>]> = (read.snippets.iter())
         .map(|snippet| SnippetText::new(&snippet.body, snippet.description.as_deref()))
         .collect();
-    let detail = user_snippet();
     let offers = (read.snippets.iter().zip(texts.iter()))
         .flat_map(|(snippet, text)| {
             let (prefixes, languages) = (&snippet.prefixes, &snippet.languages);
-            Offer::each_prefix(prefixes, text.clone(), languages, &detail, true)
+            // No detail kept: an item's is resolved as it's offered.
+            Offer::each_prefix(prefixes, text.clone(), languages, "", true)
         })
         .collect();
     *loaded = Loaded {

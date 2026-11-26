@@ -6,7 +6,8 @@
 //! invocations (extensions record §1, §3, §6), then those of a workspace
 //! folder that isn't trusted, skipped ([`kiln::extensions::skipped`]).
 //! One the settings disable ([`kiln::extensions::disabled`]) is listed as
-//! such. The rows follow the extensions and the consents while it shows.
+//! such. The rows follow the extensions, the consents, the plugins and the
+//! language while it shows: their text is resolved as they're read.
 //! Enter on one waiting on the user's consent, or that they declined, asks
 //! about each of its servers in turn, those waiting first, through the
 //! consent prompt ([`crate::lsp_consent_prompt::ask_in`]). A code plugin's
@@ -30,6 +31,7 @@ use gpui::{
 use kiln::{
     core::{LicenseClass, Manifest, extension::ExtensionSource as Installed},
     extensions::Skipped,
+    platform::locale::ActiveLocale,
 };
 use kiln_l10n::tr;
 
@@ -474,9 +476,9 @@ pub(crate) struct ExtensionsPicker {
     query: String,
     /// What was focused before it opened, focused again once it closes.
     previous_focus: Option<FocusHandle>,
-    /// The follow of the extensions, the consents and the plugins while
-    /// it shows.
-    following: Option<[Subscription; 3]>,
+    /// The follow of the extensions, the consents, the plugins and the
+    /// language while it shows.
+    following: Option<[Subscription; 4]>,
 }
 
 impl ExtensionsPicker {
@@ -494,8 +496,8 @@ impl ExtensionsPicker {
     /// The picker is opening, with `previous_focus` focused until now, or
     /// opening afresh, keeping what was focused before, if that's `None`,
     /// for what [`open_next_for`] said, else to show the extensions. From
-    /// now until it closes, a change to the extensions, the consents or the
-    /// plugins shows in the rows.
+    /// now until it closes, a change to the extensions, the consents, the
+    /// plugins or the language shows in the rows.
     pub(crate) fn opened(
         &mut self,
         previous_focus: Option<FocusHandle>,
@@ -512,7 +514,8 @@ impl ExtensionsPicker {
             });
             let consents = cx.observe_global::<ExtensionConsent>(refresh_rows);
             let plugins = cx.observe_global::<PluginHost>(refresh_rows);
-            self.following = Some([extensions, consents, plugins]);
+            let language = cx.observe_global::<ActiveLocale>(refresh_rows);
+            self.following = Some([extensions, consents, plugins, language]);
         }
     }
 
@@ -773,3 +776,179 @@ mod extensions_picker_workspace_tests;
 #[cfg(test)]
 #[path = "extensions_picker_disable_tests.rs"]
 mod extensions_picker_disable_tests;
+
+/// The text that outlives the moment it's resolved in follows a change of
+/// language, what it's made from unchanged: the open picker's rows, a user
+/// snippet's detail and a plugin log's tabs.
+#[cfg(test)]
+mod locale_tests {
+    use std::fs;
+
+    use fe_lsp::ServerSpec;
+    use gpui::{TestAppContext, VisualTestContext};
+    use kiln::{
+        Config,
+        core::{ApiVersion, extension::MANIFEST_FILE},
+        platform::config::batch_channel,
+    };
+    use kiln_shell::PaneItem as _;
+
+    use super::extensions_picker_tests::{dispatch, draw, picker, rows, workbench};
+    use crate::{
+        ExtensionServer, extension_snippets::snippet_completions, open::ConfigDirOverride,
+        plugin_kind, set_extension_servers,
+    };
+
+    /// The user snippet's detail is `tests::lsp_fragments_locale`'s, in this
+    /// binary too.
+    static FAKE_LOCALE: kiln_l10n::Resources = kiln_l10n::Resources {
+        crate_name: "fe-workbench-extensions-fake-locale",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
+        declared_in: file!(),
+        files: &[kiln_l10n::ResourceFile {
+            locale: "qps-ploc",
+            path: "qps-ploc/extensions-picker.ftl",
+            source: "workbench-extensions-kind-themes = ⟦{ $count } thémé⟧\n\
+                     workbench-extensions-server-pending = ⟦{ $server }: { $invocation } péñdíñg⟧\n\
+                     workbench-extensions-plugin-row-asks = ⟦Áskś: { $capabilities }⟧\n\
+                     workbench-extensions-plugin-capability = ⟦{ $capability } → { $description }⟧\n\
+                     workbench-extensions-plugin-needs-preview = ⟦Túrñ óñ { $setting }⟧\n\
+                     workbench-extensions-plugin-log-title = ⟦Lóg óf { $name }⟧\n",
+        }],
+        dynamic_prefixes: &[],
+    };
+
+    kiln_l10n::__private::inventory::submit! { kiln_l10n::Registered(&FAKE_LOCALE) }
+
+    fn set_locale(tag: Option<&str>, cx: &mut VisualTestContext) {
+        let tags: Vec<kiln_l10n::LanguageIdentifier> =
+            tag.into_iter().map(|tag| tag.parse().unwrap()).collect();
+        cx.update(|_, cx| kiln_platform::locale::set_locale(cx, &tags));
+        draw(cx);
+    }
+
+    #[gpui::test]
+    fn extension_text_follows_a_change_of_language(cx: &mut TestAppContext) {
+        // One extension with a theme, a language server and a plugin, and a
+        // user snippet.
+        let host = tempfile::tempdir().unwrap();
+        let extension = host.path().join("extensions/tool");
+        fs::create_dir_all(extension.join("themes")).unwrap();
+        fs::write(
+            extension.join("themes/night.toml"),
+            "name = \"Night\"\nappearance = \"dark\"\n",
+        )
+        .unwrap();
+        fs::write(extension.join("plugin.wasm"), "").unwrap();
+        fs::write(
+            extension.join(MANIFEST_FILE),
+            "id = \"acme.tool\"\nname = \"Tool\"\nversion = \"1.0.0\"\nlicense = \"MIT\"\n\n\
+             [engine]\ntenmoku = \"1.0\"\n\n\
+             [contributes]\nthemes = [\"themes/night.toml\"]\n\n\
+             [contributes.lsp.zls]\ncommand = \"zls\"\n\n\
+             [contributes.plugin]\nwasm = \"plugin.wasm\"\ncapabilities = [\"commands\"]\n",
+        )
+        .unwrap();
+        let config = host.path().join("config");
+        fs::create_dir_all(config.join("snippets")).unwrap();
+        fs::write(
+            config.join("snippets/all.code-snippets"),
+            r#"{ "Todo": { "prefix": "todo", "body": "TODO $1" } }"#,
+        )
+        .unwrap();
+        let (_sender, batches) = batch_channel();
+        let plugin = plugin_kind();
+        let app = Config::new("dev.fastedit.test", "fastedit")
+            .extensions(
+                host.path().join("extensions"),
+                &fe_config::paths::app_id().short,
+                ApiVersion { major: 1, minor: 0 },
+            )
+            .extension_kind("lsp", serde_json::json!({ "type": "object" }))
+            .extension_kind(plugin.name, plugin.schema)
+            .watch_with(batches);
+        cx.update(|cx| assert_eq!(kiln::init(cx, app), []));
+        let (workbench, mut cx) = workbench(&host, cx);
+        let server = ExtensionServer {
+            extension_id: "acme.tool".into(),
+            extension_name: "Tool".into(),
+            extension_version: "1.0.0".into(),
+            extension_license: "MIT".into(),
+            extension_dir: dunce::canonicalize(&extension).unwrap(),
+            spec: ServerSpec::new("zls", "/opt/zls"),
+        };
+        cx.update(|_, cx| {
+            cx.set_global(ConfigDirOverride(Some(config)));
+            set_extension_servers(cx, vec![server]);
+        });
+
+        // The picker, open through both changes.
+        dispatch("workbench.show_extensions", &mut cx);
+        let picker = picker(&workbench, &mut cx);
+        let detail = |cx: &mut VisualTestContext| rows(&picker, cx)[0].detail();
+        let english = detail(&mut cx);
+        for part in [
+            "1 theme",
+            "zls: /opt/zls (pending)",
+            "Asks to: commands: ",
+            "Turn on extensions.plugins_preview",
+        ] {
+            assert!(english.contains(part), "{part} in {english}");
+        }
+        set_locale(Some("qps-ploc"), &mut cx);
+        let fake = detail(&mut cx);
+        for part in [
+            "⟦1 thémé⟧",
+            "⟦zls: /opt/zls péñdíñg⟧",
+            "⟦Áskś: ⟦commands → ",
+            "⟦Túrñ óñ extensions.plugins_preview⟧",
+        ] {
+            assert!(fake.contains(part), "{part} in {fake}");
+        }
+        set_locale(None, &mut cx);
+        assert_eq!(detail(&mut cx), english);
+        cx.simulate_keystrokes("escape");
+        draw(&mut cx);
+
+        // The snippet, read once: its files don't change.
+        dispatch("workbench.new_file", &mut cx);
+        let weak = workbench.downgrade();
+        let snippet_detail = |cx: &mut VisualTestContext| {
+            let editor = workbench.read_with(cx, |w, cx| w.active_editor(cx).cloned());
+            let editor = editor.expect("the new file's");
+            let (buffer, version) = editor.read_with(cx, |editor, _| {
+                let snapshot = editor.model().snapshot();
+                (snapshot.id(), snapshot.version())
+            });
+            let list = cx.update(|_, cx| snippet_completions(cx, &weak, buffer, version, 0));
+            list.items[0].detail.clone().unwrap()
+        };
+        assert_eq!(snippet_detail(&mut cx), "User snippet");
+        set_locale(Some("qps-ploc"), &mut cx);
+        assert_eq!(snippet_detail(&mut cx), "⟦Úsér sñíppét⟧");
+        set_locale(None, &mut cx);
+        assert_eq!(snippet_detail(&mut cx), "User snippet");
+
+        // The plugin's log, in a tab and a split of it.
+        cx.update(|window, cx| {
+            workbench.update(cx, |workbench, cx| {
+                workbench.show_plugin_log("acme.tool", "Tool", window, cx)
+            })
+        });
+        draw(&mut cx);
+        dispatch("pane.split_right", &mut cx);
+        let titles = |cx: &mut VisualTestContext| {
+            workbench.read_with(cx, |workbench, cx| {
+                (workbench.open_editors(cx).into_iter())
+                    .map(|editor| editor.read(cx).tab_title(cx).to_string())
+                    .filter(|title| title.contains("Tool"))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(titles(&mut cx), ["Tool Log", "Tool Log"]);
+        set_locale(Some("qps-ploc"), &mut cx);
+        assert_eq!(titles(&mut cx), ["⟦Lóg óf Tool⟧", "⟦Lóg óf Tool⟧"]);
+        set_locale(None, &mut cx);
+        assert_eq!(titles(&mut cx), ["Tool Log", "Tool Log"]);
+    }
+}

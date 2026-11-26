@@ -7,7 +7,7 @@
 //! and opens its log in a read-only tab, as Language Server Log opens a
 //! server's, that follows the lines written after: each is added at the
 //! end, and the oldest dropped past [`MAX_LINES`], while the log shows in
-//! any tab, a split of it too.
+//! any tab, a split of it too. Their titles follow the language.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -19,7 +19,8 @@ use std::{
 use fe_buffer::{Buffer, BufferId, Origin};
 use fe_editor::EditorModel;
 use fe_gpui::EditorView;
-use gpui::{App, Context, Entity, Focusable as _, Global, Window};
+use gpui::{App, Context, Entity, Focusable as _, Global, SharedString, Subscription, Window};
+use kiln::platform::locale::ActiveLocale;
 use kiln_l10n::tr;
 
 use crate::Workbench;
@@ -169,6 +170,26 @@ fn stamp(time: SystemTime) -> String {
     )
 }
 
+/// The title of plugin `name`'s log tab, in the language of the moment.
+fn title(name: &str) -> SharedString {
+    tr!("workbench-extensions-plugin-log-title", name = name)
+}
+
+/// What the tab's icon is a file's of that name's.
+const ICON_BY: &str = "plugin.log";
+
+/// Titles each tab showing buffer `id` again, plugin `name`'s log, whenever
+/// the language changes, while the subscription is held.
+fn follow_locale(name: String, id: BufferId, cx: &mut App) -> Subscription {
+    cx.observe_global::<ActiveLocale>(move |cx| {
+        for editor in showing(id, cx) {
+            editor.update(cx, |editor, cx| {
+                editor.set_tab_title(title(&name), ICON_BY, cx)
+            });
+        }
+    })
+}
+
 /// `lines`, a line each.
 fn text(lines: &[LogLine]) -> String {
     lines.iter().map(|line| format!("{}\n", line)).collect()
@@ -214,28 +235,31 @@ impl Workbench {
             let editor = pane.new_editor(model, cx);
             editor.update(cx, |editor, cx| {
                 editor.set_read_only(true, cx);
-                let title = tr!("workbench-extensions-plugin-log-title", name = name);
-                editor.set_tab_title(title, "plugin.log", cx);
+                editor.set_tab_title(title(name), ICON_BY, cx);
             });
             pane.add_item(Box::new(editor.clone()), cx);
             editor
         });
         window.focus(&editor.focus_handle(cx), cx);
         let buffer = editor.read(cx).model().buffer().id();
-        follow(id.to_owned(), seen, woken, buffer, cx);
+        let titles = follow_locale(name.to_owned(), buffer, cx);
+        follow(id.to_owned(), seen, woken, buffer, titles, cx);
     }
 }
 
 /// Adds plugin `id`'s lines after number `seen` to `buffer` each time
-/// `woken` wakes, through an editor showing it, until none does.
+/// `woken` wakes, through an editor showing it, until none does: `titles`,
+/// the follow of its tabs' titles, is held until then.
 fn follow(
     id: String,
     mut seen: u64,
     woken: async_channel::Receiver<()>,
     buffer: BufferId,
+    titles: Subscription,
     cx: &mut Context<Workbench>,
 ) {
     cx.spawn(async move |_, cx| {
+        let _titles = titles;
         while woken.recv().await.is_ok() {
             let shown = cx.update(|cx| {
                 let editors = showing(buffer, cx);
