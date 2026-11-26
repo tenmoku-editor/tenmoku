@@ -10,16 +10,16 @@ use fe_project::LocalTreeFs;
 use fe_remote_client::{Conn, Connection, LinkError, RemoteHost};
 use fe_remote_proto::testing::{Latency, delayed};
 use fe_remote_proto::window::INITIAL_WINDOW;
-use fe_remote_proto::{Config as MuxConfig, Location, Mux, PathBytes};
+use fe_remote_proto::{Config as MuxConfig, Link, Location, Mux, PathBytes};
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tempfile::TempDir;
 use tenmoku_server::{Config, Hosts};
 
@@ -36,6 +36,12 @@ struct Served {
 
 impl Served {
     fn new(hosts: Hosts, one_way: Duration) -> Served {
+        Served::wrapped(hosts, one_way, |link| link)
+    }
+
+    /// As [`Served::new`], with the client's delayed link passed through
+    /// `wrap`.
+    fn wrapped(hosts: Hosts, one_way: Duration, wrap: impl FnOnce(Link) -> Link) -> Served {
         let (client, server) = UnixStream::pair().unwrap();
         let config = Config {
             hosts: Arc::new(move || hosts.clone()),
@@ -57,7 +63,7 @@ impl Served {
             destination: "test".into(),
             path: PathBytes(b"/".to_vec()),
         };
-        let (mux, welcome) = Mux::client(link, config, location, None).unwrap();
+        let (mux, welcome) = Mux::client(wrap(link), config, location, None).unwrap();
         Served {
             connection: Connection::over(mux, welcome),
             cut,
@@ -496,29 +502,69 @@ fn a_restore_onto_a_taken_path_fails_and_keeps_the_record() {
     );
 }
 
-/// D § 11: "Its content appears in one round trip for ≤ 1 MiB (50.7 ms at
-/// 25 ms one way)" with the 1.25 MiB window. A 1 MiB window takes two
-/// (about 101 ms here), so the bound is one round trip and half of another
-/// for slack, under the two; the best of three, so one scheduling stall on
-/// a loaded machine doesn't count.
+/// A client's writer which, once `armed`, sends one more write and drops
+/// every later one, reporting each on `dropped`. The mux flushes a request
+/// as soon as it's queued, so the write let through is the next request.
+struct LastWrite {
+    inner: Box<dyn Write + Send>,
+    armed: Arc<AtomicBool>,
+    passed: bool,
+    dropped: mpsc::Sender<usize>,
+}
+
+impl Write for LastWrite {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.armed.load(Ordering::SeqCst) && std::mem::replace(&mut self.passed, true) {
+            let _ = self.dropped.send(buf.len());
+        } else {
+            self.inner.write_all(buf)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// D § 11: "Its content appears in one round trip for ≤ 1 MiB" with the
+/// 1.25 MiB window. Nothing the client sends after the request arrives, so
+/// the read ends only if the server needs no more from it: no second
+/// request, and no credit, which a 1 MiB window would leave it waiting for.
+/// No clock decides it, so load can't.
 #[test]
 fn a_one_mib_read_takes_one_round_trip() {
-    let one_way = Duration::from_millis(25);
-    let rtt = 2 * one_way;
-    let slack = rtt / 2;
-    let host = RemoteHost::new(Conn::new(Served::new(Hosts::local(), one_way).connection));
+    let armed = Arc::new(AtomicBool::new(false));
+    let (dropped, drops) = mpsc::channel();
+    let served = Served::wrapped(Hosts::local(), ONE_WAY, {
+        let armed = armed.clone();
+        |mut link| {
+            link.writer = Box::new(LastWrite {
+                inner: link.writer,
+                armed,
+                passed: false,
+                dropped,
+            });
+            link
+        }
+    });
+    let host = RemoteHost::new(Conn::new(served.connection));
     let project = Project::new();
     let path = project.at("one.mib");
     std::fs::write(&path, vec![7u8; 1 << 20]).unwrap();
-    let mut best = Duration::MAX;
-    for _ in 0..3 {
-        let started = Instant::now();
-        let (bytes, _) = host.read(&path).unwrap();
-        best = best.min(started.elapsed());
-        assert_eq!(bytes.len(), 1 << 20);
-    }
-    assert!(best >= rtt, "{best:?} is under a round trip");
-    assert!(best < rtt + slack, "{best:?} is more than one round trip");
+    armed.store(true, Ordering::SeqCst);
+    let (done, read) = mpsc::channel();
+    thread::spawn(move || done.send(host.read(&path)));
+    // Only a hang runs into this: the reply is on its way or never comes.
+    let (bytes, _) = read
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the read needs more than one round trip")
+        .unwrap();
+    assert_eq!(bytes.len(), 1 << 20);
+    // The client did have more to say (its credit), and it was dropped.
+    drops
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the client sent nothing after its request");
 }
 
 /// A host that holds up its reads and writes of `held` until the test lets
