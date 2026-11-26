@@ -1,0 +1,72 @@
+% A bibliography for the thesis. Everything outside an entry is ignored by
+% BibTeX itself, so these lines are free-form notes.
+
+@preamble{ "\newcommand{\noopsort}[1]{}" }
+
+@string{ acm = {Association for Computing Machinery} }
+@string{ tocs = {ACM Transactions on Computer Systems} }
+
+@comment{ Journal articles. }
+
+@article{lamport1978time,
+  author  = {Lamport, Leslie},
+  title   = {Time, Clocks, and the Ordering of Events in a Distributed System},
+  journal = tocs,
+  year    = 1978,
+  volume  = 21,
+  number  = 7,
+  pages   = {558--565},
+  doi     = {10.1145/359545.359563},
+  url     = {https://dl.acm.org/doi/10.1145/359545.359563},
+  publisher = acm
+}
+
+@article{dijkstra1968goto,
+  author  = "Dijkstra, Edsger W.",
+  title   = "Go To Statement Considered Harmful",
+  journal = "Communications of the ACM",
+  year    = 1968,
+  volume  = 11,
+  pages   = "147--148",
+  note    = {Reprinted in \emph{Classics in Software Engineering}}
+}
+
+% A book, with a concatenated title and a LaTeX command in a value.
+
+@book{mittelbach2004latex,
+  author    = {Mittelbach, Frank and Goossens, Michel},
+  title     = {The \LaTeX{} Companion},
+  edition   = {2},
+  year      = 2004,
+  publisher = {Addison-Wesley},
+  series    = {Tools and Techniques for Computer Typesetting},
+  isbn      = {0-201-36299-6}
+}
+
+@book{knuth1984texbook,
+  author    = {Knuth, Donald E.},
+  title     = {The \TeX{}book},
+  year      = 1984,
+  publisher = {Addison-Wesley},
+  annote    = {Cited everywhere as } # {the} # { reference}
+}
+
+Stray text between entries: BibTeX skips it, and so does the editor.
+
+@inproceedings{ongaro2014raft,
+  author    = {Ongaro, Diego and Ousterhout, John},
+  title     = {In Search of an Understandable Consensus Algorithm},
+  booktitle = {Proceedings of the USENIX Annual Technical Conference},
+  year      = 2014,
+  pages     = {305--319},
+  address   = {Philadelphia, PA},
+  organization = acm # { and USENIX}
+}
+
+@inproceedings(gray1981transaction,
+  author = {Gray, Jim},
+  title  = {The Transaction Concept: Virtues and Limitations},
+  year   = 1981
+)
+
+% The last line is a comment, to check the file ends cleanly.

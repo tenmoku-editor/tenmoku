@@ -1,0 +1,17 @@
+id = "tenmoku.grammar_bibtex"
+name = "BibTeX syntax"
+version = "0.1.0"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "bibtex"
+wasm = "tree-sitter-bibtex.wasm"
+extensions = ["bib", "bibtex"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = true
+license = "MIT"
+line_comment = "%"
