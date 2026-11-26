@@ -75,6 +75,7 @@ for everyone.
 | Keyword | `#c7a5e6` | `#7b36a8` | Jun splash | |
 | Function | `#f2c77a` | `#925a00` | Ame | Bold at its definition |
 | Type | `#7fc9be` | `#0d6e66` | Seiji | |
+| Tag | `#7fc9be` | `#0d6e66` | Seiji | HTML/XML/JSX element names |
 | String | `#b5cf86` | `#2f6f1f` | Oribe | |
 | Number, constant | `#f0a3c2` | `#a32f6b` | Peach bloom | |
 | Macro, attribute | `#8db1f2` | `#2457c5` | Lapis | |

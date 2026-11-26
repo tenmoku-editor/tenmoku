@@ -138,6 +138,29 @@ fn bundled_palettes() {
     assert_eq!(names(dark), names(light));
 }
 
+/// The house themes give HTML tags a glaze of their own, so a template's
+/// keywords and delimiters stand apart from the markup around them.
+#[test]
+fn tags_stand_apart_from_keywords_and_template_delimiters() {
+    for (id, source, want) in [
+        ("yohen", include_str!("../themes/yohen.toml"), "#7fc9be"),
+        ("hakuji", include_str!("../themes/hakuji.toml"), "#0d6e66"),
+        (
+            "tenmoku-ember",
+            include_str!("../themes/tenmoku-ember.toml"),
+            "#d9b36c",
+        ),
+    ] {
+        let (data, diagnostics) = theme(source);
+        assert_eq!(diagnostics, 0, "{id}");
+        let (palette, _) = EditorPalette::for_theme(&data);
+        let tag = palette.syntax_color("tag");
+        assert_ne!(tag, palette.syntax_color("keyword"), "{id}");
+        assert_ne!(tag, palette.syntax_color("punctuation.special"), "{id}");
+        assert_eq!(tag, Some(color(want)), "{id}");
+    }
+}
+
 #[test]
 fn extension_tables_override() {
     let (theme, diagnostics) = theme(

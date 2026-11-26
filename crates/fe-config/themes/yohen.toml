@@ -271,9 +271,10 @@ ansi_15 = "#f8f2e8"  # ink, one step lighter
 # name take the nearest token's colour: constructors, modules and type
 # parameters the type's; escapes, placeholders and enum members the
 # constant's; labels and links the macro's; operators the punctuation's;
-# builtin variables, tags and special punctuation the keyword's. A markup
-# deletion is peach bloom, the reddest syntax colour, since shinsha is under
-# 6:1 on the cursor line.
+# builtin variables and special punctuation the keyword's; tags the type's,
+# so markup stands apart from a template's syntax. A markup deletion is
+# peach bloom, the reddest syntax colour, since shinsha is under 6:1 on the
+# cursor line.
 # Markdown's strong and emphasised text is ink, in its bold and italic faces;
 # struck text the comment's; quotes the string's; list markers the
 # keyword's, as special punctuation; link labels the link's.
@@ -322,7 +323,7 @@ ansi_15 = "#f8f2e8"  # ink, one step lighter
 "string.placeholder" = "#f0a3c2"
 "string.special" = "#7fc9be"
 "string.special.key" = "#8db1f2"
-"tag" = "#c7a5e6"
+"tag" = "#7fc9be"
 "type" = "#7fc9be"
 "type.parameter" = "#7fc9be"
 "variable.builtin" = "#c7a5e6"

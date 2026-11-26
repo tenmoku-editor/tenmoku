@@ -54,6 +54,7 @@ const ROLES: &[(&str, &[&str])] = &[
     ("Keyword", &["syntax.keyword", "editor.bracket_2"]),
     ("Function", &["syntax.function", "editor.bracket_1"]),
     ("Type", &["syntax.type", "editor.bracket_3"]),
+    ("Tag", &["syntax.tag"]),
     ("String", &["syntax.string"]),
     ("Number, constant", &["syntax.number", "syntax.constant"]),
     (
@@ -153,7 +154,7 @@ fn every_design_role_has_the_design_value() {
     named.sort_unstable();
     mapped.sort_unstable();
     assert_eq!(named, mapped, "every role of the design, and no other");
-    assert_eq!(design.len(), 7 + 11 + 10 + 3);
+    assert_eq!(design.len(), 7 + 12 + 10 + 3);
 
     for (id, column) in [("yohen", 1), ("hakuji", 2)] {
         let bundled = themes::find(id).unwrap();
