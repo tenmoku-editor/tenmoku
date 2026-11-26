@@ -798,6 +798,11 @@ const GAME: &str = r#"
 
 const GAME_ID: &str = "acme.game";
 
+/// [`GAME`]'s call deadline in the test. Its load and every ordinary call run
+/// under it too, and under load a starved thread overruns the real 100 ms,
+/// which stops the plugin for good. Only the spinning tick should.
+const GAME_CALL_DEADLINE: Duration = Duration::from_secs(2);
+
 /// [`GAME`] installed in `dir`'s extensions, its panel `board` in the
 /// sidebar with keys and a 50 ms tick, granted `panels` and
 /// `panels.realtime`.
@@ -899,6 +904,9 @@ fn a_running_game_gets_keys_and_is_unloaded_when_a_tick_overruns(cx: &mut TestAp
         crate::init(cx);
         crate::plugin_host::set_plugin_dirs(cx, state, cache);
         crate::plugin_host::set_preview(cx, true);
+        cx.global_mut::<crate::plugin_host::PluginHost>()
+            .limits
+            .call_deadline = GAME_CALL_DEADLINE;
     });
     let found = install_game(dir.path());
     let launch = crate::Launch {
@@ -935,6 +943,10 @@ fn a_running_game_gets_keys_and_is_unloaded_when_a_tick_overruns(cx: &mut TestAp
     until_done(cx, "the panel to tick", |cx| {
         panel.read_with(cx, |panel, _| panel.is_ticking())
     });
+    // The dock alone holds the panel from here, as in the app: removed, it is
+    // released, and its poll with it. Held here past that, the poll would find
+    // it not shown and queue `hidden` for the plugin that's gone.
+    drop(panel);
     // Ticks come and go back before any key: the plugin keeps running.
     for _ in 0..6 {
         cx.executor().advance_clock(MIN_UPDATE_INTERVAL);
@@ -980,6 +992,10 @@ fn a_running_game_gets_keys_and_is_unloaded_when_a_tick_overruns(cx: &mut TestAp
                 .is_none()
         })
     });
+    // Past when a removed panel's poll would next run: still nothing queued
+    // for the plugin that's gone.
+    cx.executor().advance_clock(MIN_UPDATE_INTERVAL);
+    cx.run_until_parked();
     assert_eq!(super::events().queued(GAME_ID), 0);
 }
 
