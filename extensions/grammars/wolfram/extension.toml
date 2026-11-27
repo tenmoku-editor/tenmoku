@@ -1,0 +1,17 @@
+id = "tenmoku.grammar_wolfram"
+name = "Wolfram syntax"
+version = "0.0.1"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "wolfram"
+wasm = "tree-sitter-wolfram.wasm"
+extensions = ["wl", "wls", "wlt", "mt"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false
+block_comment = ["(*", "*)"]
+shebangs = ["wolframscript"]

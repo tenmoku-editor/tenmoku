@@ -1,0 +1,8 @@
+git = "https://github.com/WolframResearch/tree-sitter-wolfram"
+# The full 40-hex commit: master on 2026-11-25.
+rev = "f7e561abf9ca78c511e629290c7245dbfaf7a8f8"
+# The directory holding parser.c and scanner.c.
+src = "src"
+# The export tree_sitter_<grammar>, which fixes the file name
+# tree-sitter-<grammar>.wasm.
+grammar = "wolfram"
