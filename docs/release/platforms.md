@@ -15,9 +15,9 @@ it, built by `.github/workflows/release.yml` (one job per platform, then one pub
 
 The installers are made by [Velopack](https://velopack.io) (`vpk`), which also does the updates
 on Windows and Linux. Its update feeds are release files too: `releases.<os>-<arch>-stable.json`
-(`windows-x64`, `windows-arm64`, `linux-x86_64`) and the `.nupkg` each lists; you never download
-those by hand. Nothing here needs administrator rights. Every build job runs what it built before
-uploading it: `--version` on each binary, a silent install, run and uninstall of each Setup.exe,
+(`windows-x64`, `windows-arm64`, `linux-x86_64`), the `-preview.json` ones beside them, and the
+`.nupkg` each lists; you never download those by hand. Nothing here needs administrator
+rights. Every build job runs what it built before uploading it: `--version` on each binary, a silent install, run and uninstall of each Setup.exe,
 and a 5 s launch under Xvfb of the Linux binary and of the AppImage.
 
 **These builds are not signed with a publisher certificate yet** (no Authenticode certificate,
@@ -31,6 +31,16 @@ to accept one, and **Check for Updates…** (in the Tenmoku menu, or from the co
 instead asks GitHub for the latest release and offers its download page. An app built with the
 key refuses an unsigned or altered feed ("the feed has no signature") and installs nothing from
 it.
+
+**Update channels.** Settings > Update > Channel picks Stable (the default) or Preview. Each
+reads its own feed, under:
+
+- stable: `https://github.com/tenmoku-editor/tenmoku/releases/latest/download`
+- preview: `https://github.com/tenmoku-editor/tenmoku/releases/download/preview`
+
+(macOS reads `appcast.xml` under the first and `appcast-preview.xml` under the second.) Choosing
+Stable again never downgrades. [channels.md](channels.md) has how to switch, which builds follow
+the setting, how to get back to stable at once, and how to cut a preview.
 
 ## Check the download
 

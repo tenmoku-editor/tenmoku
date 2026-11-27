@@ -113,7 +113,8 @@ expected for local builds.
 `.github/workflows/release.yml` does the steps above on a GitHub macOS arm64 runner, beside
 jobs that build the Windows x64, Windows ARM64 and Linux x86_64 downloads
 ([platforms.md](platforms.md)); one publish job attaches every job's files. To cut a
-release `X.Y.Z`:
+release `X.Y.Z` (for a preview, `X.Y.Z-preview.N`, and what each channel gets, see
+[channels.md](channels.md)):
 
 1. Draft its notes: `scripts/draft-release-notes.sh --out release-notes/X.Y.Z.md` lists each
    commit since the last `v*` tag (or `--since vA.B.C`) under `## New` (feature tasks),
@@ -191,7 +192,11 @@ Installed copies find updates through `appcast.xml`, a feed with one item, the r
 its EdDSA signature; `scripts/make-appcast.sh` writes it (`scripts/test-appcast.sh` tests it). One
 item is enough, since Sparkle updates any older version straight to the latest. By default it is
 at `https://github.com/<owner>/<repo>/releases/latest/download/appcast.xml`, which always follows
-the newest release, and the zip is next to it under that release's tag. GitHub answers 404 to
+the newest stable release, and the zip is next to it under that release's tag. Copies with
+`update.channel` set to `preview` read a second feed,
+`https://github.com/<owner>/<repo>/releases/download/preview/appcast-preview.xml`, in the rolling
+`preview` release: a stable release writes both appcasts, a preview only the preview one
+([channels.md](channels.md)). GitHub answers 404 to
 anyone outside a private repository, so while the repository is private, or to use another host,
 set the two variables below.
 
@@ -205,11 +210,12 @@ that file afterwards.
 | `SPARKLE_ED_PRIVATE_KEY` | secret | the exported private key. It reaches `sign_update` on stdin only. |
 | `SPARKLE_ED_PUBLIC_KEY` | variable | the public key, built into the app as `SUPublicEDKey` |
 | `TENMOKU_FEED_URL` | variable | optional: the feed built into the app as `SUFeedURL`, instead of the URL above |
-| `DOWNLOAD_URL_PREFIX` | variable | optional: the https directory the zip is published under, instead of the release's own download URL; the appcast's enclosure is this plus the zip's name |
+| `TENMOKU_PREVIEW_FEED_URL` | variable | optional: the preview feed built into the app as `TenmokuPreviewFeedURL`, instead of the preview URL above |
+| `DOWNLOAD_URL_PREFIX` | variable | optional: the https directory the zip is published under, instead of the release's own download URL; the appcast's enclosure is this plus the zip's name. The `preview-feed` job then fails: it accepts only the tagged GitHub release's zip |
 
 Variables are on the same settings page, under the Variables tab. The workflow only publishes to
-the GitHub Release: with either optional variable, copying `appcast.xml` and the zip to that host
-is up to you.
+the GitHub Release (and the rolling `preview` one): with any of the optional variables, copying
+the appcasts and the zip to that host is up to you.
 
 - No `SPARKLE_ED_PRIVATE_KEY`: the log says `skipping Sparkle signing`, and the release has no
   `appcast.xml`. It is still `latest`, so the default feed answers 404 and installed copies find
