@@ -1,0 +1,7 @@
+git = "https://github.com/joelspadin/tree-sitter-devicetree"
+# The full 40-hex commit.
+rev = "e78bf56f206cb47bee28a217423acb651e076848"
+# The directory holding parser.c, relative to the repository.
+src = "src"
+# The export tree_sitter_devicetree.
+grammar = "devicetree"

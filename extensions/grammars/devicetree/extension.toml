@@ -1,0 +1,24 @@
+id = "tenmoku.grammar_devicetree"
+name = "Devicetree syntax"
+# MAJOR.MINOR.PATCH: the grammar's version, where it has one.
+version = "0.1.0"
+# The grammar's SPDX licence.
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "devicetree"
+wasm = "tree-sitter-devicetree.wasm"
+# Not "overlay" (Zephyr) or "its": both are generic names other tools use.
+extensions = ["dts", "dtsi", "dtso"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+# Upstream's query refines by PRECEDING: the catch-all (identifier) @variable
+# is written last, after the node/property/call patterns, so it must not be
+# allowed to override them.
+earlier_patterns_win = true
+license = "MIT"

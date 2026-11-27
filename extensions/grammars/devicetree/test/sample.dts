@@ -1,0 +1,90 @@
+/dts-v1/;
+
+// A devicetree source for the highlight golden. It is not a real board.
+
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include "board-common.dtsi"
+
+#define CLOCK_FREQ_HZ 24000000
+#define UART_IRQ 5
+
+/*
+ * Block comments are C style here, and may span lines.
+ * The grammar treats both forms as comments.
+ */
+
+/ {
+	compatible = "acme,demo-board", "acme,demo";
+	model = "ACME demo board";
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	chosen {
+		stdout-path = &uart0;
+	};
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x10000000>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		ranges;
+
+		uart0: serial@10000 {
+			compatible = "acme,uart";
+			reg = <0x10000 0x1000>;
+			clock-frequency = <CLOCK_FREQ_HZ>;
+			interrupts = <GIC_SPI UART_IRQ IRQ_TYPE_LEVEL_HIGH>;
+			status = "okay";
+			current-speed = <115200>;
+		};
+
+		spi1: spi@11000 {
+			compatible = "acme,spi";
+			reg = <0x11000 0x100>;
+			interrupt-parent = <&gic>;
+			cs-gpios = <&gpio0 3 0>;
+			dmas = <&dma0 (1 << 2)>;
+			wakeup-source;
+
+			flash@0 {
+				compatible = "jedec,spi-nor";
+				reg = <0>;
+				spi-max-frequency = <(CLOCK_FREQ_HZ / 2)>;
+				local-mac-address = [00 11 22 33 44 55];
+				read-only;
+			};
+		};
+
+		gpio0: gpio@12000 {
+			compatible = "acme,gpio";
+			reg = <0x12000 0x80>;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+	};
+};
+
+&uart0 {
+	/* An override, written against the label rather than the path. */
+	status = "disabled";
+	pinctrl-0 = <&uart0_default>;
+};
+
+&spi1 {
+	status = "okay";
+};
+
+/ {
+	/delete-node/ aliases;
+};
+
+&gpio0 {
+	/delete-property/ gpio-controller;
+};
