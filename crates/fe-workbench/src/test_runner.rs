@@ -955,7 +955,7 @@ fn nextest_on_path(path: &OsStr, cwd: &Path) -> bool {
 
 /// Whether `file` is a program that can run: a file, with an execute bit on
 /// Unix.
-fn runnable(file: &Path) -> bool {
+pub(crate) fn runnable(file: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(file) else {
         return false;
     };

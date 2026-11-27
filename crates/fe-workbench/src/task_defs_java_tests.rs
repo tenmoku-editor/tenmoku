@@ -5,19 +5,33 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::task_defs::{Group, ProjectFiles, Source, Task, TaskCommand, load};
+#[cfg(unix)]
+use crate::test_runner::runnable;
 
 const ROOT: &str = "/project";
 
-struct Files(BTreeSet<PathBuf>);
+/// The files there, and those among them without an execute bit.
+struct Files {
+    present: BTreeSet<PathBuf>,
+    not_executable: BTreeSet<PathBuf>,
+}
 
 impl Files {
     fn with(names: &[&str]) -> Self {
-        Self(
-            names
+        Self {
+            present: names
                 .iter()
                 .map(|name| Path::new(ROOT).join(name))
                 .collect(),
-        )
+            not_executable: BTreeSet::new(),
+        }
+    }
+
+    fn without_execute_bit(mut self, name: &str) -> Self {
+        let path = Path::new(ROOT).join(name);
+        assert!(self.present.contains(&path), "no {name}");
+        self.not_executable.insert(path);
+        self
     }
 
     fn tasks(&self) -> Vec<Task> {
@@ -27,7 +41,7 @@ impl Files {
 
 impl ProjectFiles for Files {
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
-        if self.0.contains(path) {
+        if self.present.contains(path) {
             Ok(String::new())
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))
@@ -35,7 +49,11 @@ impl ProjectFiles for Files {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        self.0.contains(path)
+        self.present.contains(path)
+    }
+
+    fn is_executable(&self, path: &Path) -> bool {
+        self.exists(path) && !self.not_executable.contains(path)
     }
 }
 
@@ -75,6 +93,69 @@ fn gradle_without_wrapper_uses_gradle() {
     let gradle = from(&tasks, Source::Gradle);
     assert_eq!(argv(gradle[0]), ["gradle", "build"]);
     assert!(gradle.iter().all(|task| argv(task)[0] == "gradle"));
+}
+
+#[test]
+fn gradle_with_a_non_executable_wrapper_uses_gradle() {
+    let tasks = Files::with(&["build.gradle", "gradlew"])
+        .without_execute_bit("gradlew")
+        .tasks();
+    let got: Vec<_> = from(&tasks, Source::Gradle)
+        .iter()
+        .map(|task| argv(task).join(" "))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            "gradle build",
+            "gradle test",
+            "gradle run",
+            "gradle clean",
+            "gradle check",
+        ]
+    );
+}
+
+#[test]
+fn maven_with_a_non_executable_wrapper_uses_mvn() {
+    let tasks = Files::with(&["pom.xml", "mvnw"])
+        .without_execute_bit("mvnw")
+        .tasks();
+    let got: Vec<_> = from(&tasks, Source::Maven)
+        .iter()
+        .map(|task| argv(task).join(" "))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            "mvn compile",
+            "mvn test",
+            "mvn package",
+            "mvn verify",
+            "mvn clean",
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn only_a_file_with_an_execute_bit_is_runnable_on_disk() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let wrapper = dir.path().join("gradlew");
+    assert!(!runnable(&wrapper));
+    std::fs::write(&wrapper, "#!/bin/sh\n").expect("a wrapper");
+    let mode = |mode| {
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(mode))
+            .expect("its mode");
+    };
+    mode(0o644);
+    assert!(!runnable(&wrapper));
+    mode(0o755);
+    assert!(runnable(&wrapper));
+    // A folder has execute bits and still isn't a program.
+    assert!(!runnable(dir.path()));
 }
 
 #[test]

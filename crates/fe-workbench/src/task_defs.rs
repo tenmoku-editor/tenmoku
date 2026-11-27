@@ -39,9 +39,11 @@
 //!   beside it `pnpm run <name>`, `yarn <name>` or `bun run <name>`.
 //! - `build.gradle`, `build.gradle.kts`, `settings.gradle` or
 //!   `settings.gradle.kts`: `build`, `test`, `run`, `clean` and `check`, as
-//!   `./gradlew <task>` when a `gradlew` is beside it, else `gradle <task>`.
+//!   `./gradlew <task>` when an executable `gradlew` is beside it (on Unix, a
+//!   file with an execute bit), else `gradle <task>`.
 //! - `pom.xml`: `compile`, `test`, `package`, `verify` and `clean`, as
-//!   `./mvnw <goal>` when an `mvnw` is beside it, else `mvn <goal>`.
+//!   `./mvnw <goal>` when an executable `mvnw` is beside it (as for
+//!   `gradlew`), else `mvn <goal>`.
 //! - .NET: each `.sln` or `.slnx` at the root, or else in any immediate
 //!   subfolder, as `dotnet build|test|clean|restore <solution>`
 //!   (the path relative to the root). With no solution, each root `.csproj`,
@@ -130,6 +132,12 @@ pub trait ProjectFiles {
     /// Whether a file is at `path`.
     fn exists(&self, path: &Path) -> bool;
 
+    /// Whether a file that can be run as a program is at `path`. A source
+    /// that can't tell counts any file that [`exists`](Self::exists).
+    fn is_executable(&self, path: &Path) -> bool {
+        self.exists(path)
+    }
+
     /// The entries (files and folders) directly in `dir`; empty when it
     /// isn't a readable folder, or when the source can't list.
     fn list_dir(&self, _dir: &Path) -> Vec<PathBuf> {
@@ -151,6 +159,10 @@ impl ProjectFiles for DiskFiles {
 
     fn exists(&self, path: &Path) -> bool {
         path.is_file()
+    }
+
+    fn is_executable(&self, path: &Path) -> bool {
+        crate::test_runner::runnable(path)
     }
 
     fn list_dir(&self, dir: &Path) -> Vec<PathBuf> {
@@ -597,7 +609,8 @@ fn cargo_tasks(files: &dyn ProjectFiles, root: &Path) -> Vec<Task> {
     .collect()
 }
 
-/// Gradle's fixed task list, by the wrapper when the root holds one.
+/// Gradle's fixed task list, by the wrapper when the root holds one that can
+/// run.
 fn gradle_tasks(files: &dyn ProjectFiles, root: &Path) -> Vec<Task> {
     let marked = [
         "build.gradle",
@@ -610,7 +623,7 @@ fn gradle_tasks(files: &dyn ProjectFiles, root: &Path) -> Vec<Task> {
     if !marked {
         return Vec::new();
     }
-    let runner = if files.exists(&root.join("gradlew")) {
+    let runner = if files.is_executable(&root.join("gradlew")) {
         "./gradlew"
     } else {
         "gradle"
@@ -627,12 +640,13 @@ fn gradle_tasks(files: &dyn ProjectFiles, root: &Path) -> Vec<Task> {
     .collect()
 }
 
-/// Maven's fixed goal list, by the wrapper when the root holds one.
+/// Maven's fixed goal list, by the wrapper when the root holds one that can
+/// run.
 fn maven_tasks(files: &dyn ProjectFiles, root: &Path) -> Vec<Task> {
     if !files.exists(&root.join("pom.xml")) {
         return Vec::new();
     }
-    let runner = if files.exists(&root.join("mvnw")) {
+    let runner = if files.is_executable(&root.join("mvnw")) {
         "./mvnw"
     } else {
         "mvn"
