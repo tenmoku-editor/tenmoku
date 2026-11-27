@@ -22,7 +22,8 @@
 //! `git_log_panel` context), so the palette lists them while the panel has
 //! focus; from there they act on the selected row: the commit's for a row
 //! under one, the file's for a file row (else they do nothing). Up and
-//! Down move the open menu's highlight, wrapping, and Enter chooses it.
+//! Down move the open menu's highlight, wrapping, Home and End go to its
+//! first and last item, and Enter chooses it ([`PopupMenu`]).
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -30,11 +31,11 @@ use fe_buffer::Buffer;
 use fe_editor::EditorModel;
 use fe_git::{CommitInfo, Repo};
 use fe_gpui::EditorView;
-use fe_ui::{MenuEntry, MenuPanel, step_wrapping};
+use fe_ui::{MenuEntry, MenuInput, PopupMenu};
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EntityId, Focusable as _,
-    Global, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, SharedString,
-    WeakEntity, Window, anchored, deferred, div,
+    Global, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Point, SharedString, WeakEntity,
+    Window, anchored, deferred,
 };
 use kiln::Cx;
 use kiln_l10n::tr;
@@ -84,9 +85,9 @@ pub(super) struct RowMenu {
     /// The row it's for, wherever that is by now.
     line: Line,
     items: &'static [MenuItem],
-    /// The item Up and Down moved to, or the pointer is over, which Enter
-    /// chooses: none until either does.
-    highlighted: Option<usize>,
+    /// The menu drawn for them, whose highlight Up and Down move, or the
+    /// pointer does, and Enter chooses: none until either does.
+    menu: PopupMenu,
     /// Where it was asked for, in the window.
     position: Point<Pixels>,
 }
@@ -193,38 +194,43 @@ impl GitLogPanel {
             Line::Note(_) => return,
         };
         self.select(ix, cx);
+        let entries = (items.iter())
+            .map(|item| MenuEntry::Item {
+                title: item.title(),
+                shortcut: None,
+            })
+            .collect();
         self.menu = Some(RowMenu {
             line,
             items,
-            highlighted: None,
+            menu: PopupMenu::new(entries),
             position,
         });
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
-    /// Moves the open menu's highlight to the next item, or with `down`
-    /// false the one before, wrapping; from none, the first or the last.
-    pub(super) fn move_menu_highlight(&mut self, down: bool, cx: &mut Context<Self>) {
+    /// A key while the menu is open: Up and Down move its highlight,
+    /// wrapping, Home and End go to its first and last item, Enter chooses
+    /// it and Escape closes it ([`PopupMenu::key`]); any other key without
+    /// a modifier does nothing. Whether the menu held the key.
+    pub(super) fn on_menu_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(menu) = &mut self.menu else {
-            return;
+            return false;
         };
-        let count = menu.items.len();
-        let Some(next) = step_wrapping(count, menu.highlighted, down, |_| true) else {
-            return;
-        };
-        menu.highlighted = Some(next);
-        cx.notify();
-    }
-
-    /// Enter in the open menu: runs the highlighted item, if any, as a
-    /// click on it does.
-    pub(super) fn choose_menu_highlight(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let menu = self.menu.as_ref();
-        let item = menu.and_then(|menu| menu.items.get(menu.highlighted?).copied());
-        if let Some(item) = item {
-            self.run_menu_item(item, window, cx);
+        if event.keystroke.modifiers.modified() {
+            return false;
         }
+        if let Some(input) = menu.menu.key(event) {
+            cx.stop_propagation();
+            self.on_menu_input(input, window, cx);
+        }
+        true
     }
 
     /// Closes the open menu, if there's one.
@@ -301,48 +307,35 @@ impl GitLogPanel {
         }
     }
 
+    /// What the open menu's keys and pointer ask: see the module docs.
+    fn on_menu_input(&mut self, input: MenuInput, window: &mut Window, cx: &mut Context<Self>) {
+        match input {
+            MenuInput::Handled => cx.notify(),
+            MenuInput::Chosen(ix) => {
+                let menu = self.menu.as_ref();
+                if let Some(item) = menu.and_then(|menu| menu.items.get(ix).copied()) {
+                    self.run_menu_item(item, window, cx);
+                }
+            }
+            MenuInput::Escape | MenuInput::PressedOutside(_) => self.close_menu(cx),
+        }
+    }
+
     /// The open menu, drawn over the window where it was asked for.
     pub(super) fn render_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
-        let items = menu.items;
-        let entries = (items.iter())
-            .map(|item| MenuEntry::Item {
-                title: item.title(),
-                shortcut: None,
-            })
-            .collect();
-        let panel = cx.entity().downgrade();
-        let hovered = panel.clone();
-        let ui = fe_ui::ui_theme(cx);
-        let menu_panel = MenuPanel::new(entries, &ui)
-            .highlighted(menu.highlighted)
-            .on_click(move |ix, window, cx| {
-                let Some(&item) = items.get(ix) else {
-                    return;
-                };
-                (panel.update(cx, |panel, cx| panel.run_menu_item(item, window, cx))).ok();
-            })
-            .on_hover(move |ix, _, cx| {
-                (hovered.update(cx, |panel, cx| {
-                    if let Some(menu) = &mut panel.menu
-                        && menu.highlighted != Some(ix)
-                    {
-                        menu.highlighted = Some(ix);
-                        cx.notify();
-                    }
-                }))
-                .ok();
-            });
-        let wrapper = div()
-            .debug_selector(|| "git-log-menu".into())
-            .on_mouse_down_out(cx.listener(|panel, _, _, cx| panel.close_menu(cx)))
-            .child(menu_panel);
+        let element = menu.menu.render(
+            "git-log-menu",
+            cx,
+            |panel| Some(&mut panel.menu.as_mut()?.menu),
+            Self::on_menu_input,
+        );
         Some(
             deferred(
                 anchored()
                     .position(menu.position)
                     .snap_to_window()
-                    .child(wrapper),
+                    .child(element),
             )
             .with_priority(1)
             .into_any_element(),

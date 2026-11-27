@@ -19,17 +19,18 @@
 //!
 //! The menu is drawn where it was asked for, over the window. A click
 //! outside it, Escape, focus leaving the panel, a refresh or its row going
-//! closes it; Up and Down move its highlight, wrapping, and Enter chooses
-//! it. While it's open the panel's key context is [`MENU_KEY_CONTEXT`], so
-//! the tree's own keys (vim's included) wait. A right click while a name
+//! closes it; Up and Down move its highlight, wrapping, Home and End go to
+//! its first and last item, and Enter chooses it ([`PopupMenu`]). While
+//! it's open the panel keeps focus, with [`MENU_KEY_CONTEXT`] for its key
+//! context, so the tree's own keys (vim's included) wait. A right click while a name
 //! field is open does nothing: the field keeps focus and commits nothing.
 
 use fe_command::{ContextFrame, ContextStack};
 use fe_project::{EntryKind, NodeId};
-use fe_ui::{MenuEntry, MenuPanel, Role, step_wrapping};
+use fe_ui::{MenuEntry, MenuInput, PopupMenu, Role};
 use gpui::{
-    AnyElement, App, Context, InteractiveElement as _, IntoElement, KeyDownEvent,
-    ParentElement as _, Pixels, Point, SharedString, Subscription, Window, anchored, deferred, div,
+    AnyElement, App, Context, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Point,
+    SharedString, Subscription, Window, anchored, deferred,
 };
 use kiln_l10n::{tr, verbatim};
 
@@ -161,9 +162,9 @@ pub(super) struct TreeMenu {
     target: Option<NodeId>,
     /// Its items; `None` is a separator.
     entries: Vec<Option<MenuItem>>,
-    /// The entry Up and Down moved to, or the pointer is over, which Enter
-    /// chooses: none until either does.
-    highlighted: Option<usize>,
+    /// The menu drawn for them, whose highlight Up and Down move, or the
+    /// pointer does, and Enter chooses: none until either does.
+    menu: PopupMenu,
     /// Where it was asked for, in the window.
     position: Point<Pixels>,
     /// Closes it when focus leaves the panel.
@@ -254,10 +255,11 @@ impl ProjectPanel {
         let focus_out = cx.on_focus_out(&self.focus, window, |panel, _, _, cx| {
             panel.close_menu(cx);
         });
+        let menu = PopupMenu::new(menu_entries(&entries, cx));
         self.menu = Some(TreeMenu {
             target: id,
             entries,
-            highlighted: None,
+            menu,
             position,
             _focus_out: focus_out,
         });
@@ -282,7 +284,7 @@ impl ProjectPanel {
         }
     }
 
-    /// Escape, Up, Down and Enter while the menu is open: see the module
+    /// The keys the open menu takes ([`PopupMenu::key`]): see the module
     /// docs. Other keys do nothing then.
     pub(super) fn on_menu_key(
         &mut self,
@@ -290,44 +292,24 @@ impl ProjectPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.menu.is_none() {
-            return;
-        }
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.modified() {
-            return;
-        }
-        match keystroke.key.as_str() {
-            "escape" => self.close_menu(cx),
-            "up" | "down" => self.move_menu_highlight(keystroke.key == "down", cx),
-            "enter" => self.choose_menu_highlight(window, cx),
-            _ => return,
-        }
-        cx.stop_propagation();
-    }
-
-    /// Moves the open menu's highlight to the next item, or with `down`
-    /// false the one before, wrapping and passing separators over; from
-    /// none, the first or the last.
-    fn move_menu_highlight(&mut self, down: bool, cx: &mut Context<Self>) {
-        let Some(menu) = &mut self.menu else {
+        let Some(input) = (self.menu.as_mut()).and_then(|menu| menu.menu.key(event)) else {
             return;
         };
-        let count = menu.entries.len();
-        let is_item = |ix: usize| menu.entries[ix].is_some();
-        if let Some(next) = step_wrapping(count, menu.highlighted, down, is_item) {
-            menu.highlighted = Some(next);
-            cx.notify();
-        }
+        cx.stop_propagation();
+        self.on_menu_input(input, window, cx);
     }
 
-    /// Enter in the open menu: runs the highlighted item, if any, as a
-    /// click on it does.
-    fn choose_menu_highlight(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let menu = self.menu.as_ref();
-        let item = menu.and_then(|menu| *menu.entries.get(menu.highlighted?)?);
-        if let Some(item) = item {
-            self.run_menu_item(item, window, cx);
+    /// What the open menu's keys and pointer ask: see the module docs.
+    fn on_menu_input(&mut self, input: MenuInput, window: &mut Window, cx: &mut Context<Self>) {
+        match input {
+            MenuInput::Handled => cx.notify(),
+            MenuInput::Chosen(ix) => {
+                let menu = self.menu.as_ref();
+                if let Some(item) = menu.and_then(|menu| *menu.entries.get(ix)?) {
+                    self.run_menu_item(item, window, cx);
+                }
+            }
+            MenuInput::Escape | MenuInput::PressedOutside(_) => self.close_menu(cx),
         }
     }
 
@@ -354,36 +336,12 @@ impl ProjectPanel {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
-        let entries = menu_entries(&menu.entries, cx);
-        let items = menu.entries.clone();
-        let panel = cx.entity().downgrade();
-        let hovered = panel.clone();
-        let ui = fe_ui::ui_theme(cx);
-        let menu_panel = MenuPanel::new(entries, &ui)
-            .highlighted(menu.highlighted)
-            .on_click(move |ix, window, cx| {
-                let Some(Some(item)) = items.get(ix).copied() else {
-                    return;
-                };
-                (panel.update(cx, |panel, cx| panel.run_menu_item(item, window, cx))).ok();
-            })
-            .on_hover(move |ix, _, cx| {
-                (hovered.update(cx, |panel, cx| {
-                    if let Some(menu) = &mut panel.menu
-                        && menu.highlighted != Some(ix)
-                        && menu.entries.get(ix).is_some_and(Option::is_some)
-                    {
-                        menu.highlighted = Some(ix);
-                        cx.notify();
-                    }
-                }))
-                .ok();
-            });
-        let wrapper = div()
-            .id("project-tree-menu")
-            .debug_selector(|| "project-tree-menu".into())
-            .on_mouse_down_out(cx.listener(|panel, _, _, cx| panel.close_menu(cx)))
-            .child(menu_panel);
+        let wrapper = menu.menu.render(
+            "project-tree-menu",
+            cx,
+            |panel| Some(&mut panel.menu.as_mut()?.menu),
+            Self::on_menu_input,
+        );
         let wrapper = fe_ui::node(
             wrapper,
             window,
@@ -434,6 +392,6 @@ impl ProjectPanel {
     /// The open menu's highlighted item's command, if one is.
     pub(crate) fn menu_highlighted(&self) -> Option<&'static str> {
         let menu = self.menu.as_ref()?;
-        Some((*menu.entries.get(menu.highlighted?)?)?.command())
+        Some((*menu.entries.get(menu.menu.highlighted()?)?)?.command())
     }
 }

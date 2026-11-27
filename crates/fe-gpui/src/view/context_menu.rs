@@ -14,7 +14,7 @@
 //!   the press, the provider is asked ([`EditorMenuRequest`]). With no
 //!   provider the press does nothing; an answer with no items opens
 //!   nothing. Opening either menu closes the other.
-//! - **Focus** is the menu's own while it's open ([`super::menu_focus`]),
+//! - **Focus** is the menu's own while it's open ([`PopupMenu::take_focus`]),
 //!   so no key typed reaches the buffer, vim's included. Up and Down move
 //!   the highlight, wrapping and passing separators and disabled items;
 //!   Home and End go to the first and last item; Enter runs the highlighted
@@ -35,18 +35,14 @@ use std::{path::PathBuf, rc::Rc};
 
 use fe_buffer::Version;
 use fe_command::{ContextFrame, ContextStack, Invocation, Source};
-use fe_ui::{MenuEntry, MenuPanel, Role, step_wrapping};
+use fe_ui::{FocusReturn, MenuEntry, MenuInput, MenuModifiers, PopupMenu, Role};
 use gpui::{
-    AnyElement, App, Context, Global, InteractiveElement as _, IntoElement, Keystroke,
-    MouseDownEvent, ParentElement as _, Pixels, Point, SharedString, WeakEntity, Window, anchored,
-    deferred, div,
+    AnyElement, App, Context, Global, IntoElement, MouseDownEvent, ParentElement as _, Pixels,
+    Point, SharedString, WeakEntity, Window, anchored, deferred,
 };
 use kiln_l10n::tr;
 
-use super::{
-    EditorView, Press,
-    menu_focus::{FocusReturn, MenuFocus},
-};
+use super::{EditorView, Press};
 use crate::{KEY_CONTEXT, commands::RunCommand};
 
 /// The menu's key context while it has focus.
@@ -120,9 +116,9 @@ struct OpenMenu {
     /// Where it was asked for, in the window.
     position: Point<Pixels>,
     entries: Vec<Option<EditorMenuItem>>,
-    /// The item Up and Down moved to, or the pointer is over: none until
-    /// either does.
-    highlighted: Option<usize>,
+    /// The menu drawn for them, which has focus and highlights the item Up
+    /// and Down moved to, or the pointer is over: none until either does.
+    menu: PopupMenu,
     /// The buffer's version and file then: an edit or a Save As makes it
     /// stale.
     version: Version,
@@ -135,7 +131,6 @@ struct OpenMenu {
     /// The editor's context at the press, which an item's invocation that
     /// names none runs in.
     contexts: ContextStack,
-    focus: MenuFocus,
 }
 
 impl EditorView {
@@ -281,24 +276,28 @@ impl EditorView {
         self.cancel_composition(cx);
         self.close_breakpoint_menu_in(window, cx);
         let ticket = request.ticket;
-        let focus = MenuFocus::take(&self.focus, window, cx, move |view, window, cx| {
+        let (shown, disabled) = shown(&entries);
+        // Every key is the menu's, held with a modifier or not.
+        let menu =
+            (PopupMenu::new(shown).disabled(disabled).item_nodes()).modifiers(MenuModifiers::Any);
+        let left = move |view: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
             if (view.editor_menu.open.as_ref()).is_some_and(|menu| menu.ticket == ticket) {
                 view.close_editor_menu_in(window, cx);
                 // Told in the draw's focus phase, whose notify asks for no
                 // frame: the next one, once it's over, takes the menu away.
                 cx.defer_in(window, |_, _, cx| cx.notify());
             }
-        });
+        };
+        let menu = menu.take_focus(&self.focus, MENU_KEY_CONTEXT, window, cx, left);
         self.editor_menu.open = Some(OpenMenu {
             ticket,
             position,
             entries,
-            highlighted: None,
+            menu,
             version: self.model.snapshot().version(),
             scroll: None,
             path: self.model.path().map(Into::into),
             contexts: request.contexts.clone(),
-            focus,
         });
         cx.notify();
     }
@@ -353,18 +352,18 @@ impl EditorView {
                 .as_ref()
                 .is_some_and(|item| item.invocation.command.as_str() == anchor)
         });
-        let at = match found {
-            Some(ix) => ix + offset,
-            None => {
-                menu.entries.push(None);
-                menu.entries.len()
-            }
+        // With no such item, a new last group: a separator, then `items`,
+        // in the entries and their menu alike.
+        let (at, items) = match found {
+            Some(ix) => (ix + offset, items),
+            None => (
+                menu.entries.len(),
+                [None].into_iter().chain(items).collect(),
+            ),
         };
-        let count = items.len();
+        let (shown, disabled) = shown(&items);
+        menu.menu.insert(at, shown, disabled);
         menu.entries.splice(at..at, items);
-        if let Some(highlighted) = menu.highlighted.filter(|&ix| ix >= at) {
-            menu.highlighted = Some(highlighted + count);
-        }
         cx.notify();
     }
 
@@ -389,14 +388,14 @@ impl EditorView {
     /// The open menu's highlighted entry. For tests.
     #[doc(hidden)]
     pub fn editor_menu_highlighted(&self) -> Option<usize> {
-        self.editor_menu.open.as_ref()?.highlighted
+        self.editor_menu.open.as_ref()?.menu.highlighted()
     }
 
     /// The handle the open menu's element tracks, which has focus while it
     /// does. For tests.
     #[cfg(test)]
     pub(crate) fn editor_menu_focus(&self) -> Option<gpui::FocusHandle> {
-        Some(self.editor_menu.open.as_ref()?.focus.handle().clone())
+        self.editor_menu.open.as_ref()?.menu.focus_handle().cloned()
     }
 
     /// Closes the menu, if it's open. Focus, if the menu has it, goes back
@@ -404,7 +403,7 @@ impl EditorView {
     pub fn close_editor_menu(&mut self, cx: &mut Context<Self>) {
         self.editor_menu.asking = None;
         if let Some(menu) = self.editor_menu.open.take() {
-            self.editor_menu.give_back = Some(menu.focus.give_back_later());
+            self.editor_menu.give_back = menu.menu.close_later();
             cx.notify();
         }
     }
@@ -413,7 +412,7 @@ impl EditorView {
     pub(crate) fn close_editor_menu_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editor_menu.asking = None;
         if let Some(menu) = self.editor_menu.open.take() {
-            menu.focus.give_back(window, cx);
+            menu.menu.close(window, cx);
             cx.notify();
         }
     }
@@ -425,40 +424,20 @@ impl EditorView {
         }
     }
 
-    /// A key while the menu has focus: see the [module](self). Every key
-    /// is the menu's; the editor sees none.
-    fn editor_menu_key(
+    /// What the open menu's keys and pointer ask: see the [module](self).
+    fn on_editor_menu_input(
         &mut self,
-        keystroke: &Keystroke,
+        input: MenuInput,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self.editor_menu.open.as_mut() else {
-            return;
-        };
-        let enabled: Vec<bool> = (menu.entries.iter())
-            .map(|entry| entry.as_ref().is_some_and(|item| item.enabled))
-            .collect();
-        let first = enabled.iter().position(|&on| on);
-        let last = enabled.iter().rposition(|&on| on);
-        match keystroke.key.as_str() {
-            "escape" => return self.close_editor_menu_in(window, cx),
-            "up" | "down" => {
-                let down = keystroke.key == "down";
-                menu.highlighted =
-                    step_wrapping(enabled.len(), menu.highlighted, down, |ix| enabled[ix]);
+        match input {
+            MenuInput::Handled => cx.notify(),
+            MenuInput::Chosen(ix) => self.choose_editor_menu_item(ix, window, cx),
+            MenuInput::Escape | MenuInput::PressedOutside(_) => {
+                self.close_editor_menu_in(window, cx)
             }
-            "home" => menu.highlighted = first,
-            "end" => menu.highlighted = last,
-            "enter" => {
-                if let Some(ix) = menu.highlighted {
-                    self.choose_editor_menu_item(ix, window, cx);
-                }
-                return;
-            }
-            _ => return,
         }
-        cx.notify();
     }
 
     /// Chooses entry `ix` of the open menu: closes it, gives focus back to
@@ -480,10 +459,10 @@ impl EditorView {
         let OpenMenu {
             entries,
             contexts,
-            focus,
+            menu,
             ..
         } = menu;
-        focus.give_back(window, cx);
+        menu.close(window, cx);
         let Some(Some(item)) = entries.into_iter().nth(ix).filter(|_| current) else {
             return;
         };
@@ -530,54 +509,12 @@ impl EditorView {
                 menu.scroll.get_or_insert(scroll);
             }
         });
-        let shown = (menu.entries.iter())
-            .map(|entry| match entry {
-                Some(item) => MenuEntry::Item {
-                    title: item.title.clone(),
-                    shortcut: item.shortcut.clone(),
-                },
-                None => MenuEntry::Separator,
-            })
-            .collect();
-        let disabled = (menu.entries.iter().enumerate())
-            .filter(|(_, entry)| entry.as_ref().is_some_and(|item| !item.enabled))
-            .map(|(ix, _)| ix);
-        let (chooser, hover) = (cx.entity().downgrade(), cx.entity().downgrade());
-        let ui = fe_ui::ui_theme(cx);
-        let panel = MenuPanel::new(shown, &ui)
-            .highlighted(menu.highlighted)
-            .disabled(disabled)
-            .item_nodes()
-            .on_click(move |ix, window, cx| {
-                let choose = |view: &mut EditorView, cx: &mut Context<EditorView>| {
-                    view.choose_editor_menu_item(ix, window, cx)
-                };
-                (chooser.update(cx, choose)).ok();
-            })
-            .on_hover(move |ix, _, cx| {
-                (hover.update(cx, |view, cx| {
-                    if let Some(menu) = &mut view.editor_menu.open
-                        && menu.highlighted != Some(ix)
-                    {
-                        menu.highlighted = Some(ix);
-                        cx.notify();
-                    }
-                }))
-                .ok();
-            });
-        let wrapper = div()
-            .id("editor-menu")
-            .debug_selector(|| "editor-menu".into())
-            .track_focus(menu.focus.handle())
-            .key_context(super::menu_focus::key_context(MENU_KEY_CONTEXT))
-            .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
-                cx.stop_propagation();
-                view.editor_menu_key(&event.keystroke, window, cx);
-            }))
-            .on_mouse_down_out(
-                cx.listener(|view, _, window, cx| view.close_editor_menu_in(window, cx)),
-            )
-            .child(panel);
+        let wrapper = menu.menu.render(
+            "editor-menu",
+            cx,
+            |view| Some(&mut view.editor_menu.open.as_mut()?.menu),
+            Self::on_editor_menu_input,
+        );
         let wrapper = fe_ui::node(wrapper, window, cx, Role::Menu, tr!("gpui-editor-menu"));
         Some(
             deferred(
@@ -590,6 +527,24 @@ impl EditorView {
             .into_any_element(),
         )
     }
+}
+
+/// What the menu draws for `entries`, and which of them are disabled.
+fn shown(entries: &[Option<EditorMenuItem>]) -> (Vec<MenuEntry>, Vec<usize>) {
+    let shown = (entries.iter())
+        .map(|entry| match entry {
+            Some(item) => MenuEntry::Item {
+                title: item.title.clone(),
+                shortcut: item.shortcut.clone(),
+            },
+            None => MenuEntry::Separator,
+        })
+        .collect();
+    let disabled = (entries.iter().enumerate())
+        .filter(|(_, entry)| entry.as_ref().is_some_and(|item| !item.enabled))
+        .map(|(ix, _)| ix)
+        .collect();
+    (shown, disabled)
 }
 
 /// `entries` without separators at either end or two together.
@@ -609,3 +564,7 @@ fn tidy(entries: Vec<Option<EditorMenuItem>>) -> Vec<Option<EditorMenuItem>> {
 #[cfg(test)]
 #[path = "context_menu_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "context_menu_more_tests.rs"]
+mod more_tests;

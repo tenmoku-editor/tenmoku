@@ -21,6 +21,7 @@ mod list;
 mod menu_panel;
 mod module_folder_icons;
 mod nav_step;
+mod popup_menu;
 mod prompt;
 mod roles;
 mod tabs;

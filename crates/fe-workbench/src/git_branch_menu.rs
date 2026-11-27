@@ -29,7 +29,8 @@
 //!
 //! The widget's click, or `git.branches_menu` from a key, closes it while
 //! it shows. Up and Down move the highlight, wrapping, over the actions and the
-//! branches, or the open branch's actions; Enter chooses it. Escape, a press
+//! branches, or the open branch's actions; Enter chooses it ([`PopupMenu`],
+//! one for the rows and one for a branch's actions). Escape, a press
 //! outside it or focus leaving closes the menu; so does a new root. Each
 //! action closes it, then runs; how it went is a toast, and git is read
 //! again after each.
@@ -38,16 +39,15 @@ use std::{cell::Cell, path::Path, rc::Rc};
 
 use fe_git::{Branch, BranchError, BranchRef, MergeError, Repo, Upstream};
 use fe_ui::{
-    ActiveTheme as _, Icon, MenuEntry, MenuPanel, Role, States, TextInput, TextInputEvent,
-    step_wrapping,
+    ActiveTheme as _, Icon, MenuEntry, MenuInput, MenuModifiers, PopupMenu, Role, States,
+    TextInput, TextInputEvent,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, DismissEvent, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent,
-    MouseDownEvent, ParentElement as _, Pixels, Point, PromptButton, PromptLevel, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    WeakEntity, Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder as _, px,
-    svg,
+    ParentElement as _, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
+    anchored, canvas, deferred, div, point, prelude::FluentBuilder as _, px, svg,
 };
 use kiln_l10n::{text, tr, verbatim};
 use kiln_shell::ModalView;
@@ -186,7 +186,9 @@ struct Submenu {
     /// The branch's row.
     row: usize,
     items: Vec<BranchAction>,
-    highlighted: Option<usize>,
+    /// Their menu, drawn beside the row, its keys handed on by the
+    /// branches menu.
+    menu: PopupMenu,
     /// Where it was drawn last, which a press in doesn't close the menu.
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
@@ -211,8 +213,9 @@ pub(crate) struct BranchMenu {
     query: String,
     /// What it shows for `query`.
     rows: Vec<Row>,
-    /// The row Up and Down moved to, or the pointer is over.
-    highlighted: Option<usize>,
+    /// The rows' highlight, which Up and Down move, or the pointer does,
+    /// and their keys and presses outside: the rows are drawn here.
+    list: PopupMenu,
     submenu: Option<Submenu>,
     scroll: ScrollHandle,
     /// Where focus goes back to once an action it runs is done with.
@@ -282,7 +285,7 @@ impl Workbench {
                 now: now(),
                 query: String::new(),
                 rows: Vec::new(),
-                highlighted: None,
+                list: PopupMenu::new(Vec::new()).modifiers(MenuModifiers::Shift),
                 submenu: None,
                 scroll: ScrollHandle::new(),
                 back,
@@ -290,6 +293,7 @@ impl Workbench {
                 _input: typed,
             };
             menu.rows = menu.matching_rows();
+            menu.list.set_entries(menu.row_entries());
             menu
         });
         self.modals.update(cx, |layer, cx| {
@@ -670,19 +674,37 @@ impl BranchMenu {
         rows
     }
 
+    /// What the rows' menu holds for them: each item by its title, the
+    /// rows the highlight passes over as separators.
+    fn row_entries(&self) -> Vec<MenuEntry> {
+        let item = |title: SharedString| MenuEntry::Item {
+            title,
+            shortcut: None,
+        };
+        (self.rows.iter())
+            .map(|row| match row {
+                Row::Action(action) => item(self.title(*action)),
+                Row::Branch(_, branch) => item(self.branches[*branch].name.clone().into()),
+                _ => MenuEntry::Separator,
+            })
+            .collect()
+    }
+
     /// Shows the rows for the query, the first branch highlighted, else
     /// the first action, with no branch's actions open.
     fn requery(&mut self, cx: &mut Context<Self>) {
         self.rows = self.matching_rows();
+        self.list.set_entries(self.row_entries());
         self.submenu = None;
         let first_branch = (self.rows.iter()).position(|row| matches!(row, Row::Branch(..)));
-        self.highlighted = first_branch.or_else(|| self.rows.iter().position(Row::is_item));
+        let first = first_branch.or_else(|| self.rows.iter().position(Row::is_item));
+        self.list.set_highlighted(first);
         self.scroll_to_highlighted();
         cx.notify();
     }
 
     fn scroll_to_highlighted(&self) {
-        if let Some(ix) = self.highlighted {
+        if let Some(ix) = self.list.highlighted() {
             self.scroll.scroll_to_item(ix);
         }
     }
@@ -697,47 +719,60 @@ impl BranchMenu {
         self.input.update(cx, edit);
     }
 
-    /// The keys it takes: see the module docs. Others, and any with a
-    /// modifier but Shift, go on to the bindings.
+    /// The keys it takes: see the module docs; the open branch's actions'
+    /// menu, else the rows', take Up, Down, Enter and Escape. Others, and
+    /// any with a modifier but Shift, go on to the search field and the
+    /// bindings.
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(submenu) = &mut self.submenu {
+            if let Some(input) = submenu.menu.key(event) {
+                cx.stop_propagation();
+                return self.on_actions_input(input, window, cx);
+            }
+        } else if let Some(input) = self.list.key(event) {
+            cx.stop_propagation();
+            return self.on_rows_input(input, window, cx);
+        }
         let keystroke = &event.keystroke;
-        let modifiers = keystroke.modifiers;
-        if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+        if !MenuModifiers::Shift.allow(&keystroke.modifiers) {
             return;
         }
         match keystroke.key.as_str() {
-            "escape" if self.submenu.is_some() => self.close_submenu(cx),
-            "escape" => self.close(window, cx),
-            "up" | "down" => self.move_highlight(keystroke.key == "down", cx),
             "right" => self.open_highlighted_submenu(cx),
             "left" => self.close_submenu(cx),
-            "enter" => self.choose(window, cx),
             // The rest is the search field's.
             _ => return,
         }
         cx.stop_propagation();
     }
 
-    /// Moves the highlight to the next item, or with `down` false the one
-    /// before, wrapping, in the open branch's actions if they're open.
-    fn move_highlight(&mut self, down: bool, cx: &mut Context<Self>) {
-        if let Some(submenu) = &mut self.submenu {
-            let count = submenu.items.len();
-            submenu.highlighted = step_wrapping(count, submenu.highlighted, down, |_| true);
-            return cx.notify();
+    /// What the rows' keys and a press outside the menu ask.
+    fn on_rows_input(&mut self, input: MenuInput, window: &mut Window, cx: &mut Context<Self>) {
+        match input {
+            MenuInput::Handled => {
+                self.scroll_to_highlighted();
+                cx.notify();
+            }
+            MenuInput::Chosen(ix) => self.choose(ix, window, cx),
+            MenuInput::Escape => self.close(window, cx),
+            MenuInput::PressedOutside(at) => self.pressed_outside(at, window, cx),
         }
-        let is_item = |ix: usize| self.rows[ix].is_item();
-        let Some(next) = step_wrapping(self.rows.len(), self.highlighted, down, is_item) else {
-            return;
-        };
-        self.highlighted = Some(next);
-        self.scroll_to_highlighted();
-        cx.notify();
+    }
+
+    /// What the open branch's actions' keys and pointer ask. A press
+    /// outside them is the rows' to tell.
+    fn on_actions_input(&mut self, input: MenuInput, window: &mut Window, cx: &mut Context<Self>) {
+        match input {
+            MenuInput::Handled => cx.notify(),
+            MenuInput::Chosen(ix) => self.run_branch_action(ix, window, cx),
+            MenuInput::Escape => self.close_submenu(cx),
+            MenuInput::PressedOutside(_) => {}
+        }
     }
 
     /// Opens the actions of the highlighted branch, the first highlighted.
     fn open_highlighted_submenu(&mut self, cx: &mut Context<Self>) {
-        if let Some(row) = self.highlighted {
+        if let Some(row) = self.list.highlighted() {
             self.open_submenu(row, Some(0), cx);
         }
     }
@@ -755,12 +790,21 @@ impl BranchMenu {
         let Some(Row::Branch(_, branch)) = self.rows.get(row) else {
             return;
         };
-        let items = self.branch_actions(&self.branches[*branch]);
-        self.highlighted = Some(row);
+        let branch = &self.branches[*branch];
+        let items = self.branch_actions(branch);
+        let entries = (items.iter())
+            .map(|&action| MenuEntry::Item {
+                title: self.branch_action_title(action, branch),
+                shortcut: None,
+            })
+            .collect();
+        let mut menu = PopupMenu::new(entries).modifiers(MenuModifiers::Shift);
+        menu.set_highlighted(highlighted);
+        self.list.set_highlighted(Some(row));
         self.submenu = Some(Submenu {
             row,
             items,
-            highlighted,
+            menu,
             bounds: Rc::default(),
         });
         cx.notify();
@@ -807,16 +851,10 @@ impl BranchMenu {
         }
     }
 
-    /// Enter: runs the highlighted action, or opens the highlighted
-    /// branch's actions.
-    fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(submenu) = &self.submenu {
-            if let Some(ix) = submenu.highlighted {
-                self.run_branch_action(ix, window, cx);
-            }
-            return;
-        }
-        match self.highlighted.and_then(|ix| self.rows.get(ix)) {
+    /// Enter on row `ix`: runs its action, or opens its branch's actions,
+    /// the first highlighted.
+    fn choose(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match self.rows.get(ix) {
             Some(Row::Action(action)) => self.run_action(*action, window, cx),
             Some(Row::Branch(..)) => self.open_highlighted_submenu(cx),
             _ => {}
@@ -888,10 +926,9 @@ impl BranchMenu {
     /// The pointer over row `ix`: highlights it, closing another branch's
     /// actions.
     fn hover(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if self.highlighted == Some(ix) || !self.rows.get(ix).is_some_and(Row::is_item) {
+        if !self.list.hover(ix) {
             return;
         }
-        self.highlighted = Some(ix);
         if self
             .submenu
             .as_ref()
@@ -914,17 +951,12 @@ impl BranchMenu {
     /// A press outside the menu, which closes it, unless it's in the open
     /// branch's actions, drawn beside it, or on the branch widget, whose
     /// click closes it instead (`git.branches_menu` while it shows).
-    fn pressed_outside(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn pressed_outside(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let in_submenu = (self.submenu.as_ref())
             .and_then(|submenu| submenu.bounds.get())
-            .is_some_and(|bounds| bounds.contains(&event.position));
-        let on_widget = crate::title_bar::branch_anchor(window, cx)
-            .is_some_and(|widget| widget.contains(&event.position));
+            .is_some_and(|bounds| bounds.contains(&at));
+        let on_widget =
+            crate::title_bar::branch_anchor(window, cx).is_some_and(|widget| widget.contains(&at));
         if !in_submenu && !on_widget {
             self.close(window, cx);
         }
@@ -960,7 +992,7 @@ impl BranchMenu {
             .h(px(24.))
             .px_2()
             .rounded_sm()
-            .when(self.highlighted == Some(ix), |row| {
+            .when(self.list.highlighted() == Some(ix), |row| {
                 row.bg(colors.list.row_selected)
                     .text_color(colors.tab.active_text)
             })
@@ -1075,7 +1107,7 @@ impl BranchMenu {
                     .child(ago(self.now - branch.committed)),
             )
             .child(chevron)
-            .children(open.map(|submenu| self.render_submenu(submenu, branch, cx)));
+            .children(open.map(|submenu| self.render_submenu(submenu, cx)));
         let mut states = States {
             expanded: Some(open.is_some()),
             ..States::default()
@@ -1095,53 +1127,21 @@ impl BranchMenu {
     }
 
     /// The open branch's actions, beside its row.
-    fn render_submenu(
-        &self,
-        submenu: &Submenu,
-        branch: &Branch,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let entries = (submenu.items.iter())
-            .map(|&action| MenuEntry::Item {
-                title: self.branch_action_title(action, branch),
-                shortcut: None,
-            })
-            .collect();
-        let ui = fe_ui::ui_theme(cx);
-        let panel = MenuPanel::new(entries, &ui)
-            .highlighted(submenu.highlighted)
-            .on_click({
-                let menu = cx.weak_entity();
-                move |ix, window, cx| {
-                    (menu.update(cx, |menu, cx| menu.run_branch_action(ix, window, cx))).ok();
-                }
-            })
-            .on_hover({
-                let menu = cx.weak_entity();
-                move |ix, _, cx| {
-                    (menu.update(cx, |menu, cx| {
-                        if let Some(submenu) = &mut menu.submenu
-                            && submenu.highlighted != Some(ix)
-                        {
-                            submenu.highlighted = Some(ix);
-                            cx.notify();
-                        }
-                    }))
-                    .ok();
-                }
-            });
+    fn render_submenu(&self, submenu: &Submenu, cx: &mut Context<Self>) -> AnyElement {
+        let panel = submenu.menu.render(
+            "git-branches-actions",
+            cx,
+            |menu| Some(&mut menu.submenu.as_mut()?.menu),
+            Self::on_actions_input,
+        );
         let bounds = submenu.bounds.clone();
-        let panel = div()
-            .debug_selector(|| "git-branches-actions".into())
-            .relative()
-            .child(panel)
-            .child(
-                canvas(move |drawn, _, _| bounds.set(Some(drawn)), |_, _, _, _| {})
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full(),
-            );
+        let panel = panel.relative().child(
+            canvas(move |drawn, _, _| bounds.set(Some(drawn)), |_, _, _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        );
         // At the row's top right corner, over the menu.
         div()
             .absolute()
@@ -1183,9 +1183,6 @@ impl Render for BranchMenu {
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_input_command))
             .on_key_down(cx.listener(Self::on_key))
-            .on_mouse_down_out(
-                cx.listener(|menu, event, window, cx| menu.pressed_outside(event, window, cx)),
-            )
             .occlude()
             .w(WIDTH)
             .flex()
@@ -1208,6 +1205,7 @@ impl Render for BranchMenu {
                     .track_scroll(&self.scroll)
                     .children(rows),
             );
+        let panel = (self.list).wire(panel, cx, |menu| Some(&mut menu.list), Self::on_rows_input);
         let panel = fe_ui::node(
             panel,
             window,
@@ -1221,6 +1219,10 @@ impl Render for BranchMenu {
             .child(panel)
     }
 }
+
+#[cfg(test)]
+#[path = "git_branch_menu_shift_tests.rs"]
+mod shift_tests;
 
 #[cfg(test)]
 impl Workbench {
@@ -1285,7 +1287,7 @@ impl BranchMenu {
 
     /// The highlighted row, as [`Self::lines`] has it.
     pub(crate) fn highlighted_line(&self) -> Option<String> {
-        Some(self.line(self.highlighted?))
+        Some(self.line(self.list.highlighted()?))
     }
 
     /// The open branch's actions' titles, and the highlighted one's.
@@ -1298,7 +1300,7 @@ impl BranchMenu {
         let titles: Vec<String> = (submenu.items.iter())
             .map(|&action| self.branch_action_title(action, branch).to_string())
             .collect();
-        let highlighted = submenu.highlighted.map(|ix| titles[ix].clone());
+        let highlighted = submenu.menu.highlighted().map(|ix| titles[ix].clone());
         Some((titles, highlighted))
     }
 

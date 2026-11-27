@@ -40,11 +40,9 @@ use gpui::{
 };
 use kiln_l10n::tr;
 
-use crate::{
-    EditorView,
-    element::FrameLayout,
-    view::menu_focus::{self, FocusReturn, MenuFocus},
-};
+use fe_ui::{FocusReturn, MenuFocus};
+
+use crate::{EditorView, element::FrameLayout};
 
 /// The open menu's key context, with kiln's `HOLDS_KEYS`: no binding names it.
 const MENU_KEY_CONTEXT: &str = "breakpoint_menu";
@@ -587,7 +585,7 @@ impl EditorView {
             .id("breakpoint-menu")
             .debug_selector(|| "breakpoint-menu".into())
             .track_focus(menu.focus.handle())
-            .key_context(menu_focus::key_context(MENU_KEY_CONTEXT))
+            .key_context(fe_ui::menu_key_context(MENU_KEY_CONTEXT))
             .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
                 if view.breakpoint_menu_key(&event.keystroke, window, cx) {
                     cx.stop_propagation();

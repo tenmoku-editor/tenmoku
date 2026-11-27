@@ -2225,7 +2225,6 @@ pub(crate) mod ghost_text;
 mod host;
 mod ime;
 mod lens_targets;
-mod menu_focus;
 mod minimap;
 mod proposal;
 mod proposal_commands;

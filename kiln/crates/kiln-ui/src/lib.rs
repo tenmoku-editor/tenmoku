@@ -8,7 +8,9 @@
 //! own an app's state, such as a project tree or a tab pane, build their
 //! rows and tabs from these. A view that draws its own rows moves through
 //! them with [`nav_key`] (by [`NavKey`], [`page_rows`] to a screen) or, in a
-//! menu that wraps around, [`step_wrapping`].
+//! menu that wraps around, [`step_wrapping`]. A popup menu's highlight,
+//! keys, hover and dismissal are a [`PopupMenu`]'s, drawn as a
+//! [`MenuPanel`].
 //!
 //! Depends on GPUI and kiln-core (theme data, and [`TextField`]'s editing
 //! model). Written for kiln, except [`TextField`], which is based on GPUI's
@@ -33,6 +35,7 @@ mod list;
 mod menu_bar;
 mod nav;
 mod palette;
+mod popup_menu;
 mod prompt;
 mod roles;
 mod scroll_area;
@@ -76,6 +79,10 @@ pub use list::{List, ListDelegate, ListEvent, ListRow, RowState};
 pub use menu_bar::{MENU_BAR_HEIGHT, MenuEntry, MenuPanel, MenuStrip};
 pub use nav::{NavKey, nav_key, page_rows, step_wrapping};
 pub use palette::{PALETTE_WIDTH, PaletteFrame};
+pub use popup_menu::{
+    FocusReturn, MenuFocus, MenuInput, MenuModifiers, MenuOf, OnMenuInput, PopupMenu,
+    menu_key_context,
+};
 pub use prompt::{PROMPT_WIDTH, Prompt, prompt_renderer};
 pub use roles::{
     BOTTOM_PANEL_DEFAULT, CODE, CODE_SMALL, FOCUS_RING, FamilySlot, FocusRing, FontFamilies,

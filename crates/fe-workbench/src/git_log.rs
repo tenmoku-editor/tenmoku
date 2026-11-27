@@ -2170,16 +2170,10 @@ impl GitLogPanel {
         if self.filter_focused(window, cx) {
             return;
         }
-        let keystroke = &event.keystroke;
-        if !keystroke.modifiers.modified() && self.menu.is_some() {
-            match keystroke.key.as_str() {
-                "escape" => self.close_menu(cx),
-                "up" | "down" => self.move_menu_highlight(keystroke.key == "down", cx),
-                "enter" => self.choose_menu_highlight(window, cx),
-                _ => return,
-            }
-            return cx.stop_propagation();
+        if self.on_menu_key(event, window, cx) {
+            return;
         }
+        let keystroke = &event.keystroke;
         if keystroke.key == "/" && !keystroke.modifiers.modified() && fe_gpui::vim_enabled(cx) {
             cx.stop_propagation();
             return self.focus_filter(window, cx);
