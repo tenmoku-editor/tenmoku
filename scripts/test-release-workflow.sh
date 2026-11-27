@@ -33,7 +33,11 @@ has() { grep -q -E -- "$1" "$wf" || fail "release.yml lacks /$1/ ($2)"; }
 
 # C1: actionlint.
 command -v actionlint >/dev/null 2>&1 || fail "actionlint not installed (brew install actionlint)"
-actionlint "$wf" || fail "actionlint .github/workflows/release.yml"
+# concurrency's queue key (queue: max, GitHub's documented option to keep every pending run) is
+# newer than actionlint 1.7.12, the latest release, which reports it as an unknown key: that one
+# report only is ignored.
+actionlint -ignore 'unexpected key "queue" for "concurrency" section' "$wf" ||
+	fail "actionlint .github/workflows/release.yml"
 ok "actionlint"
 
 # C3: trigger, runner, build, bundle, sign, publish.
@@ -172,23 +176,25 @@ printf '%s\n' "$good" >"$notes"
 grep -q '::warning' "$t/dispatch.log" && fail "a manual run with good notes warned: $(cat "$t/dispatch.log")"
 ok "a manual run without notes warns and goes on"
 
-# contents: write once, in the publish job's own permissions (job keys sit at 4 spaces).
-[ "$(grep -c 'contents: write' "$wf")" -eq 1 ] || fail "contents: write appears other than once"
+# contents: write twice, in the publish and preview-feed jobs' own permissions (job keys sit at 4
+# spaces).
+[ "$(grep -c 'contents: write' "$wf")" -eq 2 ] || fail "contents: write appears other than twice"
 awk '
 	/^  [A-Za-z0-9_-]+:/ { job = $1 }
-	/^    permissions:/ { perms = (job == "publish:") ; next }
+	/^    permissions:/ { perms = (job == "publish:" || job == "preview-feed:") ; next }
 	/^    [A-Za-z_-]+:/ { perms = 0 }
 	/contents: write/ { found = 1; if (!perms || $0 !~ /^      contents: write$/) bad = 1 }
 	END { exit !(found && !bad) }
-' "$wf" || fail "contents: write is not under jobs.publish.permissions"
+' "$wf" || fail "contents: write is not under jobs.publish.permissions and jobs.preview-feed.permissions"
 grep -q -x 'permissions:' "$wf" && grep -A1 -x 'permissions:' "$wf" | grep -q -x '  contents: read' ||
 	fail "the workflow's default permissions are not contents: read"
-ok "contents: write only in the publish job's permissions; the rest read"
+ok "contents: write only in the publish and preview-feed jobs' permissions; the rest read"
 
-# The jobs: one per platform, then publish. job NAME prints that job's lines.
+# The jobs: one per platform, then publish, then preview-feed (scripts/test-publish-preview-feed.sh
+# checks that one). job NAME prints that job's lines.
 job() { awk -v j="  $1:" '/^jobs:$/ { in_jobs = 1 } in_jobs && $0 == j { on = 1; next } on && /^  [^ ]/ { exit } on' "$wf"; }
 jobs=$(awk '/^jobs:$/ { on = 1; next } on && /^  [A-Za-z0-9_-]+:$/' "$wf" | tr -d ' :' | tr '\n' ' ')
-[ "$jobs" = "version macos-arm64 windows linux-x86_64 publish " ] || fail "the jobs are: $jobs"
+[ "$jobs" = "version macos-arm64 windows linux-x86_64 publish preview-feed " ] || fail "the jobs are: $jobs"
 job_has() { job "$1" | grep -q -E -- "$2" || fail "job $1 lacks /$2/ ($3)"; }
 job_has macos-arm64 "^    runs-on: macos-latest$" "Apple Silicon runner"
 job_has windows "^    name: windows-\\\$\{\{ matrix.arch \}\}$" "a job per arch, named windows-<arch>"
@@ -448,7 +454,8 @@ step_body() {
 	awk -v name="- name: $1" '
 		index($0, name) { on = 1 }
 		on && /^        run: \|$/ { body = 1; next }
-		body && /^      - / { exit }
+		# The body ends at the first line indented less than it: the next step, job or comment.
+		body && /[^ ]/ && !/^          / { exit }
 		body { sub(/^          /, ""); print }
 	' "$wf"
 }
