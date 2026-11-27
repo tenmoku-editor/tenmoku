@@ -29,7 +29,7 @@ use gpui::{
     Pixels, RenderImage, SharedString, Styled as _, SvgSize, Window, img, size, svg,
 };
 
-use crate::{Assets, theme::active_color};
+use crate::{Assets, Spinner, theme::active_color};
 
 macro_rules! icons {
     ($($dir:literal { $($variant:ident => $name:literal,)* })*) => {
@@ -516,7 +516,8 @@ impl IconRef {
     }
 
     /// The icon, `size` square. A bundled or masked icon is `svg()` tinted
-    /// with `tint`, a tinted one with its token's colour. A coloured one is an image, `tint` ignored, its SVG
+    /// with `tint`, a tinted one with its token's colour; a bundled
+    /// [`Icon::LoaderCircle`] is a turning [`Spinner`]. A coloured one is an image, `tint` ignored, its SVG
     /// rasterised once per window scale at exactly `size` in device pixels,
     /// so it's as sharp at 2x as at 1x; it's read from the app's asset
     /// source, else from [`Assets`].
@@ -528,6 +529,9 @@ impl IconRef {
                     Some(coloured_image(&path, size, window, cx))
                 };
                 img(load).size(size).flex_none().into_any_element()
+            }
+            IconRef::Bundled(Icon::LoaderCircle) | IconRef::Tinted(Icon::LoaderCircle, _) => {
+                Spinner::new(size, self.tint(tint)).into_any_element()
             }
             IconRef::Bundled(_) | IconRef::Asset(_) | IconRef::Tinted(..) => svg()
                 .path(self.path())

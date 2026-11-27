@@ -46,7 +46,7 @@ use std::{
 };
 
 use fe_git::ChangeKind;
-use fe_ui::{ActiveTheme as _, FamilySlot, FontFamilies, Icon};
+use fe_ui::{ActiveTheme as _, FamilySlot, FontFamilies, Icon, Spinner};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
@@ -568,13 +568,15 @@ impl PreCommitChecks {
                 .items_center()
                 .gap_2()
                 .h(px(20.))
-                .child(
-                    svg()
+                .child(match check.status.icon() {
+                    Icon::LoaderCircle => Spinner::new(px(14.), colour).into_any_element(),
+                    icon => svg()
                         .flex_none()
                         .size(px(14.))
-                        .path(check.status.icon().path())
-                        .text_color(colour),
-                )
+                        .path(icon.path())
+                        .text_color(colour)
+                        .into_any_element(),
+                })
                 .child(
                     div()
                         .min_w_0()

@@ -10,19 +10,20 @@
 //! accessible name is the label and "N more".
 //!
 //! Nothing draws while the workbench is idle. While something runs, a timer
-//! repaints the item at most [`TICK`] apart, 10 times a second, turning the
-//! spinner a step each time and showing what the operations said since;
-//! an operation changing doesn't repaint it by itself.
+//! repaints the item at most [`TICK`] apart, 10 times a second, showing what
+//! the operations said since; an operation changing doesn't repaint it by
+//! itself. The spinner is kiln-ui's [`Spinner`], which turns on the
+//! display's frames (so the item draws with it); with reduced motion it
+//! stands still and only the timer repaints.
 
 use std::{cell::Cell, rc::Rc, time::Duration};
 
-use fe_ui::{ActiveTheme as _, Icon, Role, UI_SMALL, node};
+use fe_ui::{ActiveTheme as _, Role, Spinner, UI_SMALL, node};
 use gpui::{
     Anchor, Bounds, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Transformation,
-    WeakFocusHandle, Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder as _,
-    px, radians, svg,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakFocusHandle, Window,
+    anchored, canvas, deferred, div, point, prelude::FluentBuilder as _, px,
 };
 use kiln_l10n::{tr, verbatim};
 
@@ -33,9 +34,6 @@ use crate::{
 
 /// The most often the item repaints: 10 times a second.
 pub(crate) const TICK: Duration = Duration::from_millis(100);
-
-/// Ticks to a turn of the spinner: one a second.
-const TURN: u32 = 10;
 
 /// The spinner's side, in the item and the list.
 const SPINNER: f32 = 12.;
@@ -118,8 +116,6 @@ pub(crate) struct OperationsStatus {
     /// Where the item was drawn, so a click on it isn't a click outside the
     /// list.
     item_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// How many timer ticks have passed, which turn the spinner.
-    steps: u32,
     /// Whether the operations changed since the last paint.
     stale: bool,
     ticker: Option<Task<()>>,
@@ -132,6 +128,9 @@ pub(crate) struct OperationsStatus {
     pub(crate) renders: usize,
     #[cfg(test)]
     pub(crate) drawn: (SharedString, Option<SharedString>, Option<SharedString>),
+    /// What [`Self::angle`] last read.
+    #[cfg(test)]
+    drawn_angle: Cell<f32>,
     _observe: Subscription,
 }
 
@@ -150,7 +149,6 @@ impl OperationsStatus {
             focus: cx.focus_handle(),
             restore: None,
             item_bounds: Rc::default(),
-            steps: 0,
             stale: false,
             ticker: None,
             #[cfg(test)]
@@ -159,6 +157,8 @@ impl OperationsStatus {
             renders: 0,
             #[cfg(test)]
             drawn: Default::default(),
+            #[cfg(test)]
+            drawn_angle: Cell::new(0.),
             _observe: observe,
         };
         status.ensure_ticker(cx);
@@ -171,12 +171,14 @@ impl OperationsStatus {
         self.open
     }
 
-    /// The spinner's angle at the current step, in radians.
-    pub(crate) fn angle(&self, cx: &gpui::App) -> f32 {
-        if cx.reduce_motion() {
-            return 0.;
+    /// The angle this thread's last painted spinner was drawn at, in
+    /// radians.
+    #[cfg(test)]
+    pub(crate) fn angle(&self, _: &gpui::App) -> f32 {
+        if let Some(spinner) = fe_ui::take_drawn_spinners().last() {
+            self.drawn_angle.set(spinner.angle);
         }
-        (self.steps % TURN) as f32 / TURN as f32 * std::f32::consts::TAU
+        self.drawn_angle.get()
     }
 
     /// The operations changed: the next tick shows it. When none are left
@@ -206,7 +208,6 @@ impl OperationsStatus {
                         status.ticker = None;
                         return false;
                     }
-                    status.steps = status.steps.wrapping_add(1);
                     #[cfg(test)]
                     {
                         status.repaints += 1;
@@ -268,16 +269,6 @@ impl OperationsStatus {
         }
     }
 
-    /// A spinner turned to `angle`, or still when motion is reduced.
-    fn spinner(&self, angle: f32, colour: gpui::Hsla) -> gpui::Svg {
-        svg()
-            .path(Icon::LoaderCircle.path())
-            .size(px(SPINNER))
-            .flex_none()
-            .text_color(colour)
-            .with_transformation(Transformation::rotate(radians(angle)))
-    }
-
     /// The bar, `fraction` filled.
     fn bar(&self, fraction: f32, cx: &gpui::App) -> impl IntoElement {
         let colors = cx.theme().colors;
@@ -298,7 +289,7 @@ impl OperationsStatus {
             )
     }
 
-    fn list(&self, angle: f32, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn list(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
         let look = card_look(&colors);
         let rows = self
@@ -310,7 +301,7 @@ impl OperationsStatus {
             .map(|(at, operation)| {
                 let lead = match operation.fraction {
                     Some(fraction) => self.bar(fraction, cx).into_any_element(),
-                    None => self.spinner(angle, colors.text.muted).into_any_element(),
+                    None => Spinner::new(px(SPINNER), colors.text.muted).into_any_element(),
                 };
                 div()
                     .debug_selector(move || format!("{}{at}", verbatim!("status-operations-row:")))
@@ -372,7 +363,6 @@ impl Render for OperationsStatus {
         };
         let others = self.operations.read(cx).others();
         let colors = cx.theme().colors;
-        let angle = self.angle(cx);
         let name = item_name(&primary.label, others);
         let count = count_text(&primary);
         #[cfg(test)]
@@ -399,7 +389,7 @@ impl Render for OperationsStatus {
             .hover(|style| style.bg(colors.list.row_hover))
             .on_click(cx.listener(|status, _, window, cx| status.toggle(window, cx)))
             .child(
-                self.spinner(angle, colors.text.muted)
+                Spinner::new(px(SPINNER), colors.text.muted)
                     .debug_selector(|| verbatim!("status-operation-spinner").to_owned()),
             )
             .child(
@@ -440,7 +430,7 @@ impl Render for OperationsStatus {
                         .anchor(Anchor::BottomLeft)
                         .offset(point(px(0.), px(-4.)))
                         .snap_to_window()
-                        .child(self.list(angle, window, cx)),
+                        .child(self.list(window, cx)),
                 )
                 .with_priority(1),
             )

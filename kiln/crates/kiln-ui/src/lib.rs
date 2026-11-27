@@ -34,6 +34,7 @@ mod prompt;
 mod roles;
 mod scroll_area;
 mod segmented;
+mod spinner;
 mod split_pane;
 mod status_bar;
 mod tab_bar;
@@ -78,6 +79,9 @@ pub use roles::{
 };
 pub use scroll_area::{SCROLLBAR_WIDTH, ScrollArea};
 pub use segmented::SegmentedControl;
+#[cfg(any(test, feature = "test-support"))]
+pub use spinner::{DrawnSpinner, take_drawn_spinners};
+pub use spinner::{SPINNER_TURN, Spinner, spin_angle};
 pub use split_pane::{SplitPane, SplitPaneEvent};
 pub use status_bar::{
     StatusBarFrame, StatusEntry, StatusEntryColors, StatusFill, StatusTone, status_entry_colors,

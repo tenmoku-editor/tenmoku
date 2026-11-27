@@ -269,6 +269,28 @@ fn repaint_is_capped_at_10_per_second(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_operations_spinner_turns_with_time_not_ticks(cx: &mut TestAppContext) {
+    let (workbench, cx) = opened(cx);
+    begin(&workbench, "Indexing", cx);
+    draw(cx);
+    let angle =
+        |cx: &mut VisualTestContext| item(&workbench, cx).read_with(cx, |item, cx| item.angle(cx));
+    let first = angle(cx);
+    let before = renders(&workbench, cx);
+
+    // 50 ms on, short of the timer's 100 ms: the frame it asked for draws
+    // the spinner turned on.
+    std::thread::sleep(Duration::from_millis(50));
+    cx.executor().advance_clock(Duration::from_millis(50));
+    cx.update(|window, cx| {
+        window.simulate_next_frame(cx);
+    });
+    draw(cx);
+    assert_ne!(angle(cx), first);
+    assert!(renders(&workbench, cx) > before);
+}
+
+#[gpui::test]
 fn the_accessible_name_reads_label_and_n_more(cx: &mut TestAppContext) {
     let (workbench, cx) = opened(cx);
     let name = |cx: &mut VisualTestContext| {

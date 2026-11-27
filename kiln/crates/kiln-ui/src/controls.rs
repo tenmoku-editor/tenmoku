@@ -25,8 +25,8 @@ use kiln_l10n::Text;
 use kiln_platform::action_dispatch::dispatch_action;
 
 use crate::{
-    ActiveTheme as _, FOCUS_RING, Icon, States, Tokens, Tooltip, height, node_with, radius,
-    ui_theme,
+    ActiveTheme as _, FOCUS_RING, Icon, Spinner, States, Tokens, Tooltip, height, node_with,
+    radius, ui_theme,
 };
 
 type ChangeHandler<T> = Rc<dyn Fn(&T, &mut Window, &mut App)>;
@@ -352,7 +352,8 @@ pub struct ButtonLook {
     pub opacity: f32,
 }
 
-/// A button with a label, an icon, or both.
+/// A button with a label, an icon, or both. An [`Icon::LoaderCircle`] is a
+/// turning [`Spinner`].
 ///
 /// Its label is its accessible name. A button with only an icon must be
 /// given one with [`Button::name`]: drawing one without is a debug
@@ -641,12 +642,19 @@ impl Button {
         .when_some(tooltip, |base, tooltip| base.tooltip(tooltip))
         .children(self.icon.map(|icon| {
             let part_id = part_id.clone();
-            svg()
-                .path(icon.path())
-                .size(px(14.))
-                .flex_none()
-                .text_color(look.text)
-                .debug_selector(move || part_selector(&part_id, "chevron"))
+            let selector = move || part_selector(&part_id, "chevron");
+            match icon {
+                Icon::LoaderCircle => Spinner::new(px(14.), look.text)
+                    .debug_selector(selector)
+                    .into_any_element(),
+                _ => svg()
+                    .path(icon.path())
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(look.text)
+                    .debug_selector(selector)
+                    .into_any_element(),
+            }
         }))
         .children(
             self.after_icon

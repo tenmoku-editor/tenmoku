@@ -11,10 +11,9 @@
 //!
 //! The ages are redrawn once a second while the panel draws and a row is
 //! under a minute old; the panel draws only while the bottom panel shows it.
-//! A running row's spinner turns once a second, however old the row: it
-//! asks for the next frame each time it draws, so it turns while it's drawn
-//! and stops once the run ends or the panel hides. With reduced motion
-//! (`App::reduce_motion`) it stands still.
+//! A running row's spinner is kiln-ui's [`Spinner`]: it turns, however old
+//! the row, while it's drawn, stops once the run ends or the panel hides,
+//! and stands still with reduced motion.
 //!
 //! With vim on, the dock keys leave it as they leave Problems (`escape`,
 //! `<C-w>h`/`j`/`k`/`l`/`p`/`w` and `<C-h>`/`<C-j>`/`<C-k>`/`<C-l>`): its key
@@ -55,13 +54,13 @@ use std::{
 
 use fe_ui::{
     ActiveTheme as _, CODE_SMALL, FamilySlot, FontFamilies, Icon, IconButton, List, ListDelegate,
-    ListEvent, ListRow, RowState, Tokens, UI_HEADING, UI_SMALL,
+    ListEvent, ListRow, RowState, Spinner, Tokens, UI_HEADING, UI_SMALL,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Hsla,
     InteractiveElement as _, IntoElement, KeyContext, ParentElement as _, Pixels, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Transformation,
-    WeakEntity, Window, canvas, div, prelude::FluentBuilder as _, px, radians, relative, svg,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity,
+    Window, canvas, div, prelude::FluentBuilder as _, px, relative, svg,
 };
 use kiln_l10n::tr;
 
@@ -107,15 +106,6 @@ pub(crate) const PROGRESS_HEIGHT: Pixels = px(2.);
 /// The alpha of a running row's line while how far along it is isn't
 /// known, drawn the whole width.
 pub(crate) const UNKNOWN_PROGRESS_ALPHA: f32 = 0.4;
-
-/// How long the spinner takes to turn once.
-const SPIN: Duration = Duration::from_millis(1000);
-
-/// The spinner's angle `since` its epoch, in radians: one turn a [`SPIN`].
-pub(crate) fn spin_angle(since: Duration) -> f32 {
-    let turn = (since.as_secs_f32() % SPIN.as_secs_f32()) / SPIN.as_secs_f32();
-    turn * std::f32::consts::TAU
-}
 
 /// How often the ages are redrawn while one is under a minute.
 const TICK: Duration = Duration::from_secs(1);
@@ -417,8 +407,6 @@ pub(crate) struct RunRows {
     rows: Vec<Row>,
     open: Opener,
     cancel: Canceller,
-    /// What the spinners' angle counts from, so all turn together.
-    epoch: Instant,
     /// Each drawn row's progress line, by row: the fraction it fills and
     /// its colour, for tests.
     #[cfg(test)]
@@ -426,12 +414,6 @@ pub(crate) struct RunRows {
     /// Each drawn row's status icon and its tint, by row, for tests.
     #[cfg(test)]
     pub(crate) drawn_icons: std::collections::BTreeMap<usize, (Icon, Hsla)>,
-    /// Each drawn spinner's angle, by row, for tests.
-    #[cfg(test)]
-    pub(crate) drawn_spins: std::collections::BTreeMap<usize, f32>,
-    /// How many frames the spinners have asked for, for tests.
-    #[cfg(test)]
-    pub(crate) frames_asked: std::cell::Cell<usize>,
 }
 
 impl RunRows {
@@ -446,19 +428,6 @@ impl RunRows {
             row.since -= by;
         }
     }
-
-    /// The spinner of a running row: its icon turning a [`SPIN`] at a time
-    /// while it's drawn, a frame asked for each time it draws, unless the
-    /// system asks for reduced motion, when it stands still.
-    fn spinner(&self, window: &Window, cx: &App) -> Option<f32> {
-        if cx.reduce_motion() {
-            return None;
-        }
-        window.request_animation_frame();
-        #[cfg(test)]
-        self.frames_asked.set(self.frames_asked.get() + 1);
-        Some(spin_angle(self.epoch.elapsed()))
-    }
 }
 
 impl ListDelegate for RunRows {
@@ -470,7 +439,7 @@ impl ListDelegate for RunRows {
         &mut self,
         ix: usize,
         state: RowState,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<List<Self>>,
     ) -> AnyElement {
         let row = &self.rows[ix];
@@ -479,16 +448,6 @@ impl ListDelegate for RunRows {
             .family(FamilySlot::Code, cx);
         let icon = row.icon;
         let line = progress_line(row.status, c.accent.base);
-        let spin = match icon {
-            StatusIcon::Spinner => self.spinner(window, cx),
-            _ => None,
-        };
-        #[cfg(test)]
-        match spin {
-            Some(angle) => self.drawn_spins.insert(ix, angle),
-            None => self.drawn_spins.remove(&ix),
-        };
-        let row = &self.rows[ix];
         #[cfg(test)]
         match line {
             Some(line) => self.drawn_lines.insert(ix, line),
@@ -515,16 +474,15 @@ impl ListDelegate for RunRows {
             .relative()
             .gap_2()
             .px_3()
-            .child(
-                svg()
+            .child(match icon {
+                StatusIcon::Spinner => Spinner::new(px(14.), icon.colour(&c)).into_any_element(),
+                _ => svg()
                     .path(icon.icon().path())
                     .size(px(14.))
                     .flex_none()
-                    .when_some(spin, |icon, angle| {
-                        icon.with_transformation(Transformation::rotate(radians(angle)))
-                    })
-                    .text_color(icon.colour(&c)),
-            )
+                    .text_color(icon.colour(&c))
+                    .into_any_element(),
+            })
             .child(
                 div()
                     .flex_shrink(1.)
@@ -639,15 +597,10 @@ impl RunsPanel {
             rows: Vec::new(),
             open,
             cancel,
-            epoch: Instant::now(),
             #[cfg(test)]
             drawn_lines: Default::default(),
             #[cfg(test)]
             drawn_icons: Default::default(),
-            #[cfg(test)]
-            drawn_spins: Default::default(),
-            #[cfg(test)]
-            frames_asked: Default::default(),
         };
         let list = cx.new(|cx| List::new(rows, cx));
         let detail = cx.new(|cx| TestRunView::new(for_detail, window, cx));

@@ -30,7 +30,7 @@ use gpui::{
     svg,
 };
 use kiln_l10n::{Text, text, tr};
-use kiln_ui::{Button, Icon, UiTheme, h_flex, v_flex};
+use kiln_ui::{Button, Icon, Spinner, UiTheme, h_flex, v_flex};
 
 use gpui::EventEmitter;
 
@@ -817,12 +817,17 @@ impl ChatView {
     }
 }
 
-fn icon(icon: Icon, color: gpui::Hsla) -> impl IntoElement {
-    svg()
-        .path(icon.path())
-        .flex_none()
-        .size(px(14.))
-        .text_color(color)
+/// A row's 14 px icon: a running call's or step's [`Spinner`] turns.
+fn icon(icon: Icon, color: gpui::Hsla) -> AnyElement {
+    match icon {
+        Icon::LoaderCircle => Spinner::new(px(14.), color).into_any_element(),
+        _ => svg()
+            .path(icon.path())
+            .flex_none()
+            .size(px(14.))
+            .text_color(color)
+            .into_any_element(),
+    }
 }
 
 /// Turn `turn`'s plan as a checklist: `chat-plan-<turn>`, its steps

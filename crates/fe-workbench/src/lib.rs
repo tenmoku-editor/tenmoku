@@ -537,6 +537,8 @@ mod spell_squiggles_tests;
 #[cfg(test)]
 mod spell_tests;
 #[cfg(test)]
+mod spinner_tests;
+#[cfg(test)]
 mod start_page_tests;
 #[cfg(test)]
 mod tab_index_commands_tests;
