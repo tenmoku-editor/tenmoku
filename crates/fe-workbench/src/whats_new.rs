@@ -2,9 +2,10 @@
 //! read-only with fe-markdown-view, newest first.
 //!
 //! The notes are one file per release at the repository root,
-//! `release-notes/<X.Y.Z>.md`, the version exactly as
-//! `[workspace.package] version` writes it; `build.rs` embeds them all
-//! (`RELEASE_NOTES`) and fails the build on any other name. The same file
+//! `release-notes/<version>.md`, the version, `X.Y.Z` or
+//! `X.Y.Z-preview.N`, exactly as `[workspace.package] version` writes it;
+//! `build.rs` embeds them all (`RELEASE_NOTES`) and fails the build on any
+//! other name. The same file
 //! feeds the GitHub release's body and the Sparkle appcast, so it keeps to
 //! these rules (`tests::whats_new` checks them):
 //!
@@ -27,7 +28,7 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use fe_config::whats_new::parse_version;
+use fe_config::whats_new::parse_release_version;
 use fe_gpui::{ActivePalette, EditorTheme};
 use fe_markdown::LinkTarget;
 use fe_markdown_view::{MarkdownStyle, MarkdownView, MarkdownViewEvent};
@@ -81,10 +82,10 @@ fn release_notes(cx: &App) -> Vec<(String, String)> {
 /// `<app> <version>` heading; `running` with no notes gets its heading and
 /// the no-notes line first.
 pub(crate) fn notes_markdown(notes: &[(String, String)], running: &str) -> String {
-    let limit = parse_version(running);
+    let limit = parse_release_version(running);
     let mut shown: Vec<_> = (notes.iter())
-        .filter_map(|(version, text)| Some((parse_version(version)?, version, text)))
-        .filter(|(numbers, _, _)| limit.is_none_or(|limit| *numbers <= limit))
+        .filter_map(|(version, text)| Some((parse_release_version(version)?, version, text)))
+        .filter(|(release, _, _)| limit.is_none_or(|limit| *release <= limit))
         .collect();
     shown.sort_by_key(|shown| std::cmp::Reverse(shown.0));
     let heading = |version: &str| {

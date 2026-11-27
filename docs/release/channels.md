@@ -30,11 +30,6 @@ preview is of a later version, such as `0.3.1-preview.1` or `0.4.0-preview.1`.
 
 ## Cutting a preview
 
-> **A preview release does not build yet.** `crates/fe-workbench/build.rs` embeds every file in
-> `release-notes/` and panics on a name that isn't `X.Y.Z.md`, so committing
-> `release-notes/0.3.1-preview.1.md` (which the tag check requires) fails every build. It has
-> to accept `X.Y.Z-preview.N.md` before the steps below work; see [Known gaps](#known-gaps).
-
 These steps cut `0.3.1-preview.1`; use the version you are cutting.
 
 1. Draft the notes. The draft starts at the nearest `v*` tag behind `HEAD`, preview or stable:
@@ -167,9 +162,6 @@ Your settings stay.
 
 ## Known gaps
 
-- **Preview releases don't build.** `crates/fe-workbench/build.rs` accepts only `X.Y.Z.md` in
-  `release-notes/`, as does the test `the_shipped_notes_are_well_formed`, while the release
-  scripts require `X.Y.Z-preview.N.md` for a preview tag.
 - **The GitHub fallback ignores the channel.** Without a self-updater, Check for Updates… looks at
   stable releases only, and on a preview build it reports that the running version can't be
   compared.

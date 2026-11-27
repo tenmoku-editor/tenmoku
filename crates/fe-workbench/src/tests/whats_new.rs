@@ -11,7 +11,7 @@ use std::{
 use fe_command::Invocation;
 use fe_config::{
     first_run::{self, Outcome},
-    whats_new::{self, MARKER_FILE, parse_version},
+    whats_new::{self, MARKER_FILE, parse_release_version},
 };
 use fe_gpui::{EditorSettings, EditorTheme, EditorView, commands::RunCommand};
 use fe_markdown::{Block, BlockKind, Document, Inline};
@@ -701,12 +701,17 @@ fn the_shipped_notes_are_well_formed() {
     embedded.sort();
     assert_eq!(embedded, files);
     let versions: Vec<_> = (RELEASE_NOTES.iter())
-        .map(|(version, _)| parse_version(version).unwrap_or_else(|| panic!("{version}")))
+        .map(|(version, _)| parse_release_version(version).unwrap_or_else(|| panic!("{version}")))
         .collect();
     assert!(versions.is_sorted_by(|a, b| a > b), "{versions:?}");
     for (version, text) in RELEASE_NOTES {
-        let (major, minor, patch) = parse_version(version).unwrap();
-        assert_eq!(*version, format!("{major}.{minor}.{patch}"));
+        let release = parse_release_version(version).unwrap();
+        let core = format!("{}.{}.{}", release.major, release.minor, release.patch);
+        let name = match release.pre {
+            Some(n) => format!("{core}-preview.{n}"),
+            None => core,
+        };
+        assert_eq!(*version, name);
         assert_eq!(
             *text,
             fs::read_to_string(dir.join(format!("{version}.md"))).unwrap()

@@ -1,11 +1,11 @@
 //! Which version's What's New this machine has seen, for the What's New tab
 //! that opens once on the first launch of a new version.
 //!
-//! The marker is `<state_dir>/whats_new.toml`, `seen = "X.Y.Z"`: state, not
-//! settings, as the setup wizard's `setup.toml` is ([`crate::first_run`]).
-//! [`decide`] reads only; [`record`] writes the marker atomically. Whether
-//! the machine is new, which a missing marker alone doesn't say, is the
-//! caller's to know.
+//! The marker is `<state_dir>/whats_new.toml`, `seen = "<version>"`, an
+//! `X.Y.Z` or `X.Y.Z-preview.N`: state, not settings, as the setup wizard's
+//! `setup.toml` is ([`crate::first_run`]). [`decide`] reads only; [`record`]
+//! writes the marker atomically. Whether the machine is new, which a missing
+//! marker alone doesn't say, is the caller's to know.
 
 use std::{
     fs::{self, OpenOptions},
@@ -48,13 +48,17 @@ pub fn decide(state_dir: &Path, running: &str) -> WhatsNew {
             return WhatsNew::Show;
         }
     };
-    let seen = (text.parse::<toml::Table>().ok())
-        .and_then(|table| table.get(SEEN_KEY)?.as_str().and_then(parse_version));
+    let seen = (text.parse::<toml::Table>().ok()).and_then(|table| {
+        table
+            .get(SEEN_KEY)?
+            .as_str()
+            .and_then(parse_release_version)
+    });
     let Some(seen) = seen else {
         log::warn!("{} holds no version", marker.display());
         return WhatsNew::Show;
     };
-    match parse_version(running) {
+    match parse_release_version(running) {
         Some(running) if seen < running => WhatsNew::Show,
         Some(_) => WhatsNew::Seen,
         // Not a release's version: nothing to compare it with.

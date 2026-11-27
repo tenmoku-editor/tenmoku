@@ -232,6 +232,7 @@ mod vim_ls_layout;
 mod vim_pick_layout;
 mod vim_recording;
 mod whats_new;
+mod whats_new_preview;
 mod window_frame;
 mod window_restore;
 mod workspace_focus_split;
