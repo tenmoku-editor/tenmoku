@@ -1,0 +1,8 @@
+git = "https://github.com/b0o/tree-sitter-cython"
+# The full 40-hex commit: master on 2026-05-07, package version 1.2.0.
+rev = "756a20c4d601b715f7b321eaad144f4cb14031bf"
+# The directory holding parser.c and scanner.c.
+src = "src"
+# The export tree_sitter_<grammar>, which fixes the file name
+# tree-sitter-<grammar>.wasm.
+grammar = "cython"
