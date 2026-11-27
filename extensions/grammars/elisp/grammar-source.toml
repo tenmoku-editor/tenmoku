@@ -1,0 +1,7 @@
+git = "https://github.com/Wilfred/tree-sitter-elisp"
+# The full 40-hex commit.
+rev = "0cbf0906d9ee707c8c109422fba9cdd17ae13dcf"
+# The directory holding parser.c, relative to the repository.
+src = "src"
+# The export tree_sitter_elisp.
+grammar = "elisp"

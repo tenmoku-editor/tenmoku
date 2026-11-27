@@ -1,0 +1,22 @@
+id = "tenmoku.grammar_elisp"
+name = "Emacs Lisp syntax"
+# MAJOR.MINOR.PATCH: the grammar's version, where it has one.
+version = "0.1.0"
+# The grammar's SPDX licence.
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "elisp"
+wasm = "tree-sitter-elisp.wasm"
+extensions = ["el"]
+line_comment = ";"
+highlights = "highlights.scm"
+injections = "injections.scm"
+# Upstream's query refines by appending: its own header says "when several
+# patterns capture the same node, the last one wins", and (string) @string
+# precedes docstring: (string) @string.documentation.
+earlier_patterns_win = false
+license = "MIT"
