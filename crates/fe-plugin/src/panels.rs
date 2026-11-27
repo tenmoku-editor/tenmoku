@@ -8,6 +8,14 @@
 //! replacing an earlier held one, until [`PanelViews::flush`] finds it due. Unloading a plugin
 //! clears its views.
 //!
+//! `reveal` asks the host to show and focus one of the plugin's own panels, and only a command
+//! the user ran may ask: the host takes a [`UserRun`] ticket ([`PanelViews::user_run`]) before
+//! it hands the plugin that run, hands its [`RunTicket`] to the plugin's thread with that very
+//! `run-command` call, whose store opens it ([`State::begin_command`]), and shows the panel asked
+//! for once the run is over ([`PanelViews::end_user_run`]). A ticket belongs to one load of the
+//! plugin: unloading or reloading it forgets the load's runs, and what they asked. An event, a
+//! tick, a job or a command the host ran on its own (a formatter's) has no ticket and is denied.
+//!
 //! [`PanelRuntime`] is the other direction: the ticks and keys the host delivers to a panel that
 //! asked for them ([`PanelDecl`]'s `tick_ms` and `keys`, which need the `panels.realtime`
 //! capability). The host owns focus, so nothing is delivered to a panel that is not shown and
@@ -78,7 +86,41 @@ pub struct PanelViews {
 struct Shared {
     loads: u64,
     plugins: BTreeMap<String, Plugin>,
+    /// The last [`UserRun`] ticket's number.
+    tickets: u64,
+    /// The user's runs of plugin commands not over yet, by ticket.
+    user_runs: BTreeMap<u64, Run>,
 }
+
+/// A run of a plugin's command the user started, which may reveal one of its panels.
+struct Run {
+    plugin: String,
+    command: String,
+    /// The arguments as the plugin is handed them, JSON.
+    args: String,
+    /// The load whose `run-command` call began it, once one has: a ticket opens one call only.
+    load: Option<u64>,
+    /// The panel the call asked to reveal: the last, if it asked more than once.
+    reveal: Option<String>,
+}
+
+/// The host's ticket for a run of a plugin's command the user started
+/// ([`PanelViews::user_run`]); [`PanelViews::end_user_run`] takes it back.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use]
+pub struct UserRun(u64);
+
+impl UserRun {
+    /// The ticket the host hands the plugin's thread with the `run-command` call of this run, and
+    /// only with it ([`State::begin_command`]).
+    pub fn ticket(&self) -> RunTicket {
+        RunTicket(self.0)
+    }
+}
+
+/// A [`UserRun`]'s number, which travels with the one call it opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunTicket(u64);
 
 struct Plugin {
     /// The number of the plugin's load.
@@ -164,9 +206,88 @@ impl PanelViews {
         true
     }
 
-    /// Forgets plugin `plugin`: its views go, and its slice sets nothing more.
+    /// Forgets plugin `plugin`: its views go, its slice sets nothing more, and its runs not over
+    /// yet reveal nothing.
     pub fn unload(&self, plugin: &str) {
-        self.lock().plugins.remove(plugin);
+        let mut shared = self.lock();
+        shared.plugins.remove(plugin);
+        forget_runs(&mut shared, plugin);
+    }
+
+    /// The user ran plugin `plugin`'s command `command` with `args`, the JSON it is handed
+    /// (`{}` for none): that run's `run-command` call may reveal one of the plugin's panels. The
+    /// host takes the ticket before it hands the plugin the call, and gives it back with
+    /// [`PanelViews::end_user_run`] once the call is over, whatever came of it.
+    pub fn user_run(&self, plugin: &str, command: &str, args: &str) -> UserRun {
+        let mut shared = self.lock();
+        shared.tickets += 1;
+        let ticket = shared.tickets;
+        let run = Run {
+            plugin: plugin.to_owned(),
+            command: command.to_owned(),
+            args: args.to_owned(),
+            load: None,
+            reveal: None,
+        };
+        shared.user_runs.insert(ticket, run);
+        UserRun(ticket)
+    }
+
+    /// The run of `ticket` is over: the panel it asked to reveal, if it asked, for the host to
+    /// show and focus. A run whose call never began, which asked nothing, or whose load is no
+    /// longer the plugin's, reveals nothing.
+    pub fn end_user_run(&self, ticket: UserRun) -> Option<String> {
+        let mut shared = self.lock();
+        let run = shared.user_runs.remove(&ticket.0)?;
+        let load = run.load?;
+        let current = (shared.plugins.get(&run.plugin)).is_some_and(|entry| entry.load == load);
+        run.reveal.filter(|_| current)
+    }
+
+    /// Begins the run of `ticket` for load `load` of `plugin`, if that is the plugin's load and
+    /// the run, not begun yet, is of its `command` with `args`.
+    fn begin_user_run(
+        &self,
+        ticket: RunTicket,
+        plugin: &str,
+        load: u64,
+        command: &str,
+        args: &str,
+    ) -> bool {
+        let mut shared = self.lock();
+        let current = (shared.plugins.get(plugin)).is_some_and(|entry| entry.load == load);
+        let Some(run) = shared.user_runs.get_mut(&ticket.0) else {
+            return false;
+        };
+        let fits = current
+            && run.load.is_none()
+            && run.plugin == plugin
+            && run.command == command
+            && run.args == args;
+        if fits {
+            run.load = Some(load);
+        }
+        fits
+    }
+
+    /// Notes that the run of `ticket` asks to reveal plugin `plugin`'s panel `panel`, which its
+    /// load `load` declares and whose call began the run.
+    fn ask_reveal(
+        &self,
+        ticket: RunTicket,
+        plugin: &str,
+        load: u64,
+        panel: &str,
+    ) -> Result<(), Error> {
+        let mut shared = self.lock();
+        panel_of(&mut shared, plugin, load, panel)?;
+        let Some(run) = (shared.user_runs.get_mut(&ticket.0))
+            .filter(|run| run.plugin == plugin && run.load == Some(load))
+        else {
+            return Err(not_user_run());
+        };
+        run.reveal = Some(panel.to_owned());
+        Ok(())
     }
 
     /// Attaches a new load of `plugin` with `declared` panels, none showing a view.
@@ -182,6 +303,8 @@ impl PanelViews {
         shared
             .plugins
             .insert(plugin.to_owned(), Plugin { load, panels });
+        // An earlier load's runs are no run of this one.
+        forget_runs(&mut shared, plugin);
         load
     }
 
@@ -316,6 +439,18 @@ fn panel_of<'a>(
             "plugin {plugin} declares no panel {panel:?} in [[contributes.plugin.panels]]"
         ))
     })
+}
+
+/// Plugin `plugin`'s runs not over yet: gone, so they open no call and reveal nothing.
+fn forget_runs(shared: &mut Shared, plugin: &str) {
+    shared.user_runs.retain(|_, run| run.plugin != plugin);
+}
+
+fn not_user_run() -> Error {
+    Error::Denied(
+        "fastedit:editor/panels.reveal: only while a command the user ran is being handled"
+            .to_owned(),
+    )
 }
 
 fn invalid(what: impl std::fmt::Display) -> Error {
@@ -580,6 +715,9 @@ fn splice(base: &View, id: &str, patch: &View) -> Result<View, Error> {
 #[derive(Default)]
 pub struct State {
     attached: Option<Attached>,
+    /// The ticket of the user's run whose `run-command` call is under way, if one is: the one
+    /// time `reveal` is allowed.
+    revealing: Option<RunTicket>,
 }
 
 /// One load of a plugin's panels slice, which its interactive store and its worker stores share
@@ -607,6 +745,7 @@ impl State {
                 load: views.attach(plugin, declared),
                 views: views.clone(),
             }),
+            revealing: None,
         }
     }
 
@@ -621,7 +760,48 @@ impl State {
     pub fn worker(shared: &SharedLoad) -> Self {
         Self {
             attached: Some(shared.0.clone()),
+            revealing: None,
         }
+    }
+
+    /// The plugin's `run-command` call of `command` with `args` begins, handed `ticket` if it
+    /// is a run the user started: if it is the ticket of this plugin's run of that command with
+    /// those arguments ([`PanelViews::user_run`]), not begun yet, and this load is the plugin's,
+    /// `reveal` is allowed until [`State::end_command`]. Any other call may not reveal.
+    pub fn begin_command(&mut self, ticket: Option<RunTicket>, command: &str, args: &str) {
+        self.revealing = ticket.filter(|&ticket| {
+            (self.attached.as_ref()).is_some_and(|attached| {
+                (attached.views).begin_user_run(
+                    ticket,
+                    &attached.plugin,
+                    attached.load,
+                    command,
+                    args,
+                )
+            })
+        });
+    }
+
+    /// The `run-command` call [`State::begin_command`] began is over.
+    pub fn end_command(&mut self) {
+        self.revealing = None;
+    }
+
+    /// [`Host::reveal`]: asks the host to show and focus `panel`, one the plugin's manifest
+    /// declares, once the user's run of the command being handled is over. `not-found` for a
+    /// panel it doesn't declare (another plugin's included); `denied` outside a command the user
+    /// ran, or without the `panels` capability.
+    pub fn reveal(&self, panel: &str) -> Result<(), Error> {
+        let attached = self.granted("fastedit:editor/panels.reveal")?;
+        let Some(ticket) = self.revealing else {
+            // Named first, so an undeclared panel is not-found here too.
+            let mut shared = attached.views.lock();
+            panel_of(&mut shared, &attached.plugin, attached.load, panel)?;
+            return Err(not_user_run());
+        };
+        attached
+            .views
+            .ask_reveal(ticket, &attached.plugin, attached.load, panel)
     }
 
     /// [`Host::set_view`] with the time of the update given: a headless host's clock.
@@ -705,10 +885,8 @@ impl Host for HostState {
             .map(drop)
     }
 
-    fn reveal(&mut self, _panel: String) -> Result<(), Error> {
-        // Showing a dock is the app's: A4 lands it.
-        self.panels.granted("fastedit:editor/panels.reveal")?;
-        unimplemented("fastedit:editor/panels.reveal")
+    fn reveal(&mut self, panel: String) -> Result<(), Error> {
+        self.panels.reveal(&panel)
     }
 }
 

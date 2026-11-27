@@ -130,6 +130,9 @@ kiln-platform = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 # The bundled fonts' glyph advances, to tell a bundled face from a fallback.
 ttf-parser = "0.25"
+# The first-party plugins' tests install from a signed index fixture
+# (tests/first_party_blocks.rs).
+fe-registry.workspace = true
 # The plugin host's tests build kiln-plugin's WAT fixtures.
 wasmtime = { workspace = true, features = ["wat"] }
 # A plugin that runs jobs must be a binary component: the jobs tests' fixture

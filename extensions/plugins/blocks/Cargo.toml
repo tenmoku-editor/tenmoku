@@ -1,0 +1,27 @@
+# Blocks, a falling-blocks game in a panel: an optional first-party plugin, listed in the signed
+# index (registry.toml) and never installed by default. Built by `build.zsh` into the checked-in
+# `blocks.wasm` that extension.toml names; not a member of the workspace, like the plugin
+# template. The game's rules (src/blocks_core.rs) have no host and are tested natively:
+# `cargo test --manifest-path extensions/plugins/blocks/Cargo.toml`.
+[package]
+name = "blocks"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Written here, as the guest crates write it: the root manifest has no entry for the guest side.
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[workspace]

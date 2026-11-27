@@ -314,6 +314,46 @@ pub fn init(cx: &mut App) {
     });
 }
 
+/// What a verified signed index lists of a plugin's archive: its entry
+/// (`fe_registry::plugins::PluginEntry`) once the index's signature has been
+/// checked (`fe_registry::plugins::verified_entry`), for
+/// [`install_listed_archive`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedArchive {
+    pub id: String,
+    pub version: (u32, u32, u32),
+    /// The archive's SHA-256, in lowercase hex.
+    pub sha256: String,
+    pub size: u64,
+    pub entries: usize,
+    /// The capabilities the entry summarises: the manifest may ask for
+    /// these and no others.
+    pub capabilities: Vec<String>,
+}
+
+/// Installs the archive `source`, which the signed index lists as `listed`,
+/// into `extensions_dir`: the registry's verified install (T1709). The
+/// listed size caps are checked first, then the archive's size and SHA-256,
+/// before a byte is unpacked; then its manifest must be the listed id and
+/// version and ask for no capability the listing lacks. The extension is
+/// marked as installed from the registry. Reads and writes files: for a
+/// background thread.
+pub fn install_listed_archive(
+    source: &std::path::Path,
+    listed: &ListedArchive,
+    extensions_dir: &std::path::Path,
+) -> Result<Installed, InstallError> {
+    let listed = extension_install::Listed {
+        id: listed.id.clone(),
+        version: listed.version,
+        sha256: listed.sha256.clone(),
+        size: listed.size,
+        entries: listed.entries,
+        capabilities: listed.capabilities.clone(),
+    };
+    extension_install::install_listed(source, &listed, extensions_dir)
+}
+
 /// The crates whose `#[kiln::command]`s [`command_catalog`] knows, as kiln
 /// recorded them ([`kiln::recorded_catalog`]): the workbench's, and the
 /// chat view's, which the default keymap binds (`chat.send`).

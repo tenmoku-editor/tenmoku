@@ -1,0 +1,3 @@
+# Lists this plugin in the signed index as an optional install (scripts/build-plugin-registry.sh,
+# docs/release/plugin-registry.md): never bundled, installed or turned on by default.
+# The module is target/wasm32-wasip2/release/blocks.wasm, the manifest's `wasm` name.

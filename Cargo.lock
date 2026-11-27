@@ -2827,6 +2827,7 @@ dependencies = [
  "fe-net",
  "fe-plugin",
  "fe-project",
+ "fe-registry",
  "fe-runlog",
  "fe-syntax",
  "fe-terminal-view",

@@ -1,0 +1,21 @@
+id = "tenmoku.blocks"
+name = "Blocks"
+version = "0.1.0"
+license = "Apache-2.0"
+description = "A falling-blocks game in a panel. Start it with Blocks: Play."
+
+[engine]
+tenmoku = "1.1"
+
+[contributes.plugin]
+wasm = "blocks.wasm"
+capabilities = ["panels", "panels.realtime", "commands"]
+
+[[contributes.plugin.panels]]
+id = "board"
+title = "Blocks"
+icon = "blocks"
+dock = "left"
+# The fastest a panel may tick; the game's gravity (500 ms down to 80 ms) adds these up.
+tick_ms = 50
+keys = true

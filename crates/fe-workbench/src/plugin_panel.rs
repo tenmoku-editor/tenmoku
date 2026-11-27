@@ -98,7 +98,7 @@ use gpui::{
 use kiln_l10n::{Text, tr, verbatim};
 use kiln_platform::keys::{self, HOLDS_PLAIN_KEYS};
 use kiln_plugin::manifest::{PanelDecl, PanelLocation};
-use kiln_shell::{DockItem, PanelId};
+use kiln_shell::{DockItem, DockView as _, PanelId};
 
 use crate::{Workbench, plugin_host};
 
@@ -2392,6 +2392,45 @@ pub(crate) fn unload(plugin: &str, cx: &mut App) {
             workbench.remove_plugin_panels(plugin, cx)
         });
     }
+}
+
+/// Shows plugin `plugin`'s panel `panel` and focuses it, as its rail or
+/// foot button would, for the plugin's `panels.reveal`: in `window`'s
+/// workbench, else the first window's. The sidebar or the bottom panel,
+/// whichever holds it, shows with it. False if no workbench has it.
+pub(crate) fn reveal(
+    plugin: &str,
+    panel: &str,
+    window: Option<gpui::AnyWindowHandle>,
+    cx: &mut App,
+) -> bool {
+    let id = panel_id(plugin, panel);
+    let all = workbenches(cx);
+    let target = (window.and_then(|window| window.downcast::<Workbench>()))
+        .filter(|window| all.contains(window))
+        .or_else(|| all.first().copied());
+    let Some(target) = target else {
+        return false;
+    };
+    let shown = target.update(cx, |workbench, window, cx| {
+        let dock = workbench.dock().clone();
+        match dock.read(cx).plugin_place(id) {
+            Some(crate::dock::Place::Sidebar) => dock.update(cx, |dock, cx| {
+                let shown = dock.dock_mut().show(id, window, cx);
+                cx.notify();
+                shown
+            }),
+            Some(crate::dock::Place::Bottom) => {
+                (workbench.terminal_dock().clone()).update(cx, |dock, cx| dock.show(id, window, cx))
+            }
+            None => false,
+        }
+    });
+    let shown = shown.unwrap_or(false);
+    if !shown {
+        log::warn!("plugin {plugin}: no panel {panel:?} to reveal");
+    }
+    shown
 }
 
 fn workbenches(cx: &App) -> Vec<gpui::WindowHandle<Workbench>> {

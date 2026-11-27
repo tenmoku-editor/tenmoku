@@ -57,6 +57,7 @@
 //! runs or is being recorded, and [`release_plugin`] lets it go.
 
 use std::{
+    cell::Cell,
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     fmt, fs,
@@ -80,6 +81,7 @@ use fe_command::{
     capability::Capability,
 };
 use fe_plugin::net::FeNet;
+use fe_plugin::panels::RunTicket;
 use futures::{
     channel::oneshot,
     future::{self, Either},
@@ -491,8 +493,18 @@ pub(crate) fn dispatch(run: &fe_gpui::commands::RunCommand, cx: &mut App) -> boo
         return true;
     }
     let args = run.0.args.clone();
+    // The user ran it: its call may reveal one of the plugin's panels, in
+    // the window it was run in, once it's over. The arguments as the
+    // plugin is handed them (`PluginCommand::run`).
+    let handed = match args.is_null() {
+        true => "{}".to_owned(),
+        false => args.to_string(),
+    };
+    let ticket = plugin_panel::views().user_run(&id, command.id().as_str(), &handed);
+    let window = kiln::platform::command_actions::dispatch_window(cx).or(cx.active_window());
+    let run_ticket = ticket.ticket();
     let ran = cx.background_spawn(async move {
-        let ran = command.run(&args);
+        let ran = UserRunTicket::during(run_ticket, || command.run(&args));
         let stopped = match lock(&plugin).state() {
             kiln_plugin::runner::PluginState::Unloaded(diagnostic) => Some(diagnostic.clone()),
             kiln_plugin::runner::PluginState::Running => None,
@@ -501,15 +513,56 @@ pub(crate) fn dispatch(run: &fe_gpui::commands::RunCommand, cx: &mut App) -> boo
     });
     cx.spawn(async move |cx| {
         let (ran, stopped) = ran.await;
+        let reveal = plugin_panel::views().end_user_run(ticket);
         if let Err(error) = ran {
             log::warn!("{error}");
         }
         if let Some(diagnostic) = stopped {
             cx.update(|cx| stopped_running(&id, load, diagnostic, cx));
+        } else if let Some(panel) = reveal {
+            // Not a later load's panel, if the plugin was reloaded meanwhile.
+            cx.update(|cx| {
+                if is_current_load(&id, load, cx) {
+                    _ = plugin_panel::reveal(&id, &panel, window, cx);
+                }
+            });
         }
     })
     .detach();
     true
+}
+
+// The ticket of the user's run of a plugin command this thread is running
+// (`dispatch`), for `HostedPlugin::call` to hand the plugin's thread with
+// that run's `run-command` call: kiln's `PluginCommand::run` makes the
+// call, and has no room for it.
+thread_local! {
+    static USER_RUN: Cell<Option<RunTicket>> = const { Cell::new(None) };
+}
+
+/// [`USER_RUN`] while a user's run is being made.
+struct UserRunTicket;
+
+impl UserRunTicket {
+    /// Runs `run` with `ticket` as this thread's user run: the first
+    /// `run-command` call it makes takes it, and nothing after it.
+    fn during<R>(ticket: RunTicket, run: impl FnOnce() -> R) -> R {
+        USER_RUN.set(Some(ticket));
+        let _cleared = UserRunTicket;
+        run()
+    }
+
+    /// The ticket of the user's run this thread is making, if it is
+    /// making one and no call took it yet.
+    fn take() -> Option<RunTicket> {
+        USER_RUN.take()
+    }
+}
+
+impl Drop for UserRunTicket {
+    fn drop(&mut self) {
+        USER_RUN.set(None);
+    }
 }
 
 /// The host plugins' commands are registered on and authorized against,
@@ -2084,18 +2137,17 @@ pub(crate) fn plugin_inbox(id: &str, cx: &App) -> Option<Inbox> {
     Some(host.slots.get(id)?.loaded.as_ref()?.inbox.clone())
 }
 
+/// Whether load `load` of plugin `id` is the one running.
+fn is_current_load(id: &str, load: u64, cx: &App) -> bool {
+    (cx.try_global::<PluginHost>())
+        .and_then(|host| host.slots.get(id)?.loaded.as_ref())
+        .is_some_and(|loaded| loaded.load == load)
+}
+
 /// Load `load` of plugin `id` was unloaded by a call into it, as
 /// `diagnostic` says: it stops, its commands withdrawn.
 fn stopped_running(id: &str, load: u64, diagnostic: Diagnostic, cx: &mut App) {
-    let Some(host) = cx.try_global::<PluginHost>() else {
-        return;
-    };
-    let current = host
-        .slots
-        .get(id)
-        .and_then(|slot| slot.loaded.as_ref())
-        .is_some_and(|loaded| loaded.load == load);
-    if !current {
+    if !is_current_load(id, load, cx) {
         return;
     }
     let host = cx.global_mut::<PluginHost>();
@@ -2362,6 +2414,12 @@ impl LoadContext {
         });
         let unloader = host.lsp.unloader();
         let inbox = Inbox::new(&limits);
+        // A load's panels queue their events, and tick, afresh: the queue is
+        // the process's, by id, and one an earlier host left (as a test's
+        // app does, never unloading) holds that host's clock in its runtime,
+        // which would take this load's ticks for too soon. A reload has
+        // unloaded it already; its panels come once this load runs.
+        plugin_panel::events().unload(id);
         let plugin = HostedPlugin::load(
             engine,
             self.cache.as_deref(),
@@ -2976,8 +3034,9 @@ struct Channel {
 
 /// What a plugin's thread is handed.
 pub(crate) enum Work {
-    /// A call, whose reply it sends back.
-    Call(Call),
+    /// A call, whose reply it sends back, with the ticket of the user's
+    /// run it makes, if it is one ([`dispatch`]).
+    Call(Call, Option<RunTicket>),
     /// Events wait in its inbox.
     Events,
     /// Its jobs' ends wait for delivery to `job-finished`.
@@ -3174,10 +3233,15 @@ impl HostedPlugin {
     /// Runs `call` on the plugin's thread. One that fails unloads it first,
     /// and tells the host it stopped ([`Inbox::stop`]).
     fn call(&mut self, call: Call) -> Result<Reply, CallError> {
+        // The user's run this thread makes, if this is its call.
+        let ticket = match &call {
+            Call::RunCommand { .. } => UserRunTicket::take(),
+            Call::HandleEvents(_) => None,
+        };
         let Some(channel) = &self.channel else {
             return Err(CallError::Unloaded);
         };
-        let replied = match channel.calls.send(Work::Call(call)) {
+        let replied = match channel.calls.send(Work::Call(call, ticket)) {
             Ok(()) => channel.replies.recv().ok(),
             Err(_) => None,
         };
@@ -3605,8 +3669,8 @@ impl Guest {
                     Err(_) => break,
                 },
             };
-            if let Work::Call(call) = work {
-                let reply = self.call(&exports, call);
+            if let Work::Call(call, ticket) = work {
+                let reply = self.call(&exports, call, ticket);
                 let failed = reply.is_err();
                 if replies.send(reply).is_err() || failed {
                     return;
@@ -3646,8 +3710,22 @@ impl Guest {
         self.record.push(format!("shutdown {}", self.id));
     }
 
-    fn call(&mut self, exports: &Exports, call: Call) -> Result<Reply, Diagnostic> {
-        self.guarded(async |store| match call {
+    fn call(
+        &mut self,
+        exports: &Exports,
+        call: Call,
+        ticket: Option<RunTicket>,
+    ) -> Result<Reply, Diagnostic> {
+        // The one call that may reveal a panel: the user's run of this
+        // command, handed the ticket the host took for it ([`dispatch`]).
+        let command = match &call {
+            Call::RunCommand { id, args } => Some((id.clone(), args.clone())),
+            Call::HandleEvents(_) => None,
+        };
+        if let Some((id, args)) = &command {
+            (self.store.data_mut().host.panels).begin_command(ticket, id, args);
+        }
+        let replied = self.guarded(async |store| match call {
             Call::RunCommand { id, args } => exports
                 .run_command
                 .call_async(store, (id, args))
@@ -3658,7 +3736,11 @@ impl Guest {
                 .call_async(store, (events,))
                 .await
                 .map(|()| Reply::HandleEvents),
-        })
+        });
+        if command.is_some() {
+            self.store.data_mut().host.panels.end_command();
+        }
+        replied
     }
 
     /// Delivers the events waiting in the inbox, one per call, until none
@@ -3668,7 +3750,7 @@ impl Guest {
         let inbox = self.store.data().inbox.clone();
         while let Some(event) = inbox.pop() {
             let call = Call::HandleEvents(vec![event.clone()]);
-            if let Err(diagnostic) = self.call(exports, call) {
+            if let Err(diagnostic) = self.call(exports, call, None) {
                 log::warn!("{diagnostic}");
                 inbox.stop(diagnostic);
                 return Delivered::Failed;
@@ -3676,7 +3758,9 @@ impl Guest {
             #[cfg(test)]
             inbox.delivered(event);
             match calls.try_recv() {
-                Ok(Work::Call(call)) => return Delivered::Until(Work::Call(call)),
+                Ok(Work::Call(call, ticket)) => {
+                    return Delivered::Until(Work::Call(call, ticket));
+                }
                 Ok(Work::Events | Work::Jobs | Work::Panels) | Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => return Delivered::Closed,
             }
