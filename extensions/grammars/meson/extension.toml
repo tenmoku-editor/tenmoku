@@ -1,0 +1,17 @@
+id = "tenmoku.grammar_meson"
+name = "Meson syntax"
+version = "1.3.0"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "meson"
+wasm = "tree-sitter-meson.wasm"
+extensions = []
+file_names = ["meson.build", "meson.options", "meson_options.txt"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false
+line_comment = "#"

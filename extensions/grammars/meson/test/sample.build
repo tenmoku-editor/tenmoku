@@ -1,0 +1,84 @@
+# A small C project: a library, a program and its tests.
+project('gadget', 'c',
+  version: '1.4.0',
+  license: 'MIT',
+  meson_version: '>=0.60',
+  default_options: ['warning_level=3', 'c_std=c11'])
+
+cc = meson.get_compiler('c')
+buildtype = get_option('buildtype')
+verbose = get_option('verbose')
+
+glib = dependency('glib-2.0', version: '>=2.60', required: false)
+threads = dependency('threads')
+deps = [threads]
+
+if glib.found()
+  deps += [glib]
+elif cc.has_header('stdlib.h') and not verbose
+  message('building without glib')
+else
+  warning('no usable headers')
+endif
+
+# Settings written into config.h.
+conf = {
+  'HAVE_STDLIB_H': cc.has_header('stdlib.h'),
+  'PACKAGE_NAME': meson.project_name(),
+  'MAX_ITEMS': 64,
+  'MASK': 0xff,
+  'ENABLE_LOG': true,
+  'ENABLE_TRACE': false,
+}
+
+data = configuration_data()
+foreach name, value : conf
+  data.set(name, value)
+endforeach
+configure_file(output: 'config.h', configuration: data)
+
+banner = '''
+gadget: a demonstration
+built with "meson"\n
+'''
+prefix = get_option('prefix')
+summary = f'installing into @prefix@'
+message(banner, summary)
+
+sources = files('src/main.c', 'src/gadget.c')
+sources += files('src/util.c')
+
+linker = verbose ? 'bfd' : 'gold'
+foreach wanted : ['m', 'dl']
+  if wanted in ['m'] or verbose
+    deps += [cc.find_library(wanted)]
+    break
+  endif
+endforeach
+
+foreach flag : ['-Wshadow', '-Wundef']
+  if not cc.has_argument(flag)
+    continue
+  endif
+  add_project_arguments(flag, language: 'c')
+endforeach
+
+inc = include_directories('include')
+
+lib = static_library('gadget', sources,
+  include_directories: inc,
+  dependencies: deps)
+
+exe = executable('gadget-cli', 'src/cli.c',
+  link_with: lib,
+  dependencies: deps,
+  install: true)
+
+version_parts = meson.project_version().split('.')
+major = version_parts[0].to_int()
+
+if major >= 1 and buildtype != 'plain' or major == 0
+  test('smoke', exe, args: ['--selftest'], timeout: 30)
+endif
+
+subdir('docs')
