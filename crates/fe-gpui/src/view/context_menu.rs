@@ -35,7 +35,7 @@ use std::{path::PathBuf, rc::Rc};
 
 use fe_buffer::Version;
 use fe_command::{ContextFrame, ContextStack, Invocation, Source};
-use fe_ui::{MenuEntry, MenuPanel, Role};
+use fe_ui::{MenuEntry, MenuPanel, Role, step_wrapping};
 use gpui::{
     AnyElement, App, Context, Global, InteractiveElement as _, IntoElement, Keystroke,
     MouseDownEvent, ParentElement as _, Pixels, Point, SharedString, WeakEntity, Window, anchored,
@@ -443,8 +443,11 @@ impl EditorView {
         let last = enabled.iter().rposition(|&on| on);
         match keystroke.key.as_str() {
             "escape" => return self.close_editor_menu_in(window, cx),
-            "down" => menu.highlighted = next_highlight(&enabled, menu.highlighted, true),
-            "up" => menu.highlighted = next_highlight(&enabled, menu.highlighted, false),
+            "up" | "down" => {
+                let down = keystroke.key == "down";
+                menu.highlighted =
+                    step_wrapping(enabled.len(), menu.highlighted, down, |ix| enabled[ix]);
+            }
             "home" => menu.highlighted = first,
             "end" => menu.highlighted = last,
             "enter" => {
@@ -601,30 +604,6 @@ fn tidy(entries: Vec<Option<EditorMenuItem>>) -> Vec<Option<EditorMenuItem>> {
         tidied.pop();
     }
     tidied
-}
-
-/// Where Down (or with `down` false, Up) moves the highlight from
-/// `highlighted`, among entries `enabled` says can be chosen: wrapping,
-/// passing separators and disabled items; from none, the first or the
-/// last. None if nothing can be chosen.
-fn next_highlight(enabled: &[bool], highlighted: Option<usize>, down: bool) -> Option<usize> {
-    let items: Vec<usize> = (enabled.iter().enumerate())
-        .filter(|(_, on)| **on)
-        .map(|(ix, _)| ix)
-        .collect();
-    let (first, last) = (*items.first()?, *items.last()?);
-    let Some(from) = highlighted else {
-        return Some(if down { first } else { last });
-    };
-    Some(match down {
-        true => items.iter().copied().find(|&ix| ix > from).unwrap_or(first),
-        false => items
-            .iter()
-            .rev()
-            .copied()
-            .find(|&ix| ix < from)
-            .unwrap_or(last),
-    })
 }
 
 #[cfg(test)]

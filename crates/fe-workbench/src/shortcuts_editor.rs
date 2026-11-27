@@ -59,7 +59,7 @@ use fe_keymap::{
     KEYMAP_HEADER, Keymap, KeymapEdit, KeymapIssue, KeymapLayer, ShortcutBinding, ShortcutIssue,
     ShortcutRow, ShortcutSource, ShortcutsModel,
 };
-use fe_ui::{ActiveTheme as _, Icon, TextInput, TextInputEvent, Tooltip};
+use fe_ui::{ActiveTheme as _, Icon, TextInput, TextInputEvent, Tooltip, step_wrapping};
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -577,22 +577,12 @@ impl ShortcutsEditor {
         let Some(menu) = &mut self.menu else {
             return;
         };
-        let enabled: Vec<MenuItem> = (menu.items.iter())
-            .filter(|item| !menu.disabled.contains(item))
-            .copied()
-            .collect();
-        let Some(last) = enabled.len().checked_sub(1) else {
+        let at = (menu.highlighted).and_then(|item| menu.items.iter().position(|it| *it == item));
+        let enabled = |ix: usize| !menu.disabled.contains(&menu.items[ix]);
+        let Some(next) = step_wrapping(menu.items.len(), at, down, enabled) else {
             return;
         };
-        let at = (menu.highlighted).and_then(|item| enabled.iter().position(|it| *it == item));
-        let next = match (at, down) {
-            (None, true) => 0,
-            (None, false) => last,
-            (Some(at), true) if at == last => 0,
-            (Some(at), true) => at + 1,
-            (Some(at), false) => at.checked_sub(1).unwrap_or(last),
-        };
-        menu.highlighted = Some(enabled[next]);
+        menu.highlighted = Some(menu.items[next]);
         cx.notify();
     }
 

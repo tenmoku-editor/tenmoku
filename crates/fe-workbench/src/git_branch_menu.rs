@@ -39,6 +39,7 @@ use std::{cell::Cell, path::Path, rc::Rc};
 use fe_git::{Branch, BranchError, BranchRef, MergeError, Repo, Upstream};
 use fe_ui::{
     ActiveTheme as _, Icon, MenuEntry, MenuPanel, Role, States, TextInput, TextInputEvent,
+    step_wrapping,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, DismissEvent, Entity, EventEmitter,
@@ -722,18 +723,14 @@ impl BranchMenu {
     fn move_highlight(&mut self, down: bool, cx: &mut Context<Self>) {
         if let Some(submenu) = &mut self.submenu {
             let count = submenu.items.len();
-            submenu.highlighted = Some(step(submenu.highlighted, down, count));
+            submenu.highlighted = step_wrapping(count, submenu.highlighted, down, |_| true);
             return cx.notify();
         }
-        let items: Vec<usize> = (self.rows.iter().enumerate())
-            .filter(|(_, row)| row.is_item())
-            .map(|(ix, _)| ix)
-            .collect();
-        if items.is_empty() {
+        let is_item = |ix: usize| self.rows[ix].is_item();
+        let Some(next) = step_wrapping(self.rows.len(), self.highlighted, down, is_item) else {
             return;
-        }
-        let at = (self.highlighted).and_then(|ix| items.iter().position(|&item| item == ix));
-        self.highlighted = Some(items[step(at, down, items.len())]);
+        };
+        self.highlighted = Some(next);
         self.scroll_to_highlighted();
         cx.notify();
     }
@@ -1172,19 +1169,6 @@ fn branch_counts(branch: &Branch) -> Option<String> {
         behind: branch.behind?,
     };
     crate::git::sync_counts(Some(&upstream))
-}
-
-/// From item `at` of `count`, the next with `down`, else the one before,
-/// wrapping; from none, the first or the last.
-fn step(at: Option<usize>, down: bool, count: usize) -> usize {
-    let last = count.saturating_sub(1);
-    match (at, down) {
-        (None, true) => 0,
-        (None, false) => last,
-        (Some(at), true) if at >= last => 0,
-        (Some(at), true) => at + 1,
-        (Some(at), false) => at.checked_sub(1).unwrap_or(last),
-    }
 }
 
 impl Render for BranchMenu {

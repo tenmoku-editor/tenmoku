@@ -30,7 +30,7 @@ use fe_buffer::Buffer;
 use fe_editor::EditorModel;
 use fe_git::{CommitInfo, Repo};
 use fe_gpui::EditorView;
-use fe_ui::{MenuEntry, MenuPanel};
+use fe_ui::{MenuEntry, MenuPanel, step_wrapping};
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EntityId, Focusable as _,
     Global, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, SharedString,
@@ -209,16 +209,11 @@ impl GitLogPanel {
         let Some(menu) = &mut self.menu else {
             return;
         };
-        let Some(last) = menu.items.len().checked_sub(1) else {
+        let count = menu.items.len();
+        let Some(next) = step_wrapping(count, menu.highlighted, down, |_| true) else {
             return;
         };
-        menu.highlighted = Some(match (menu.highlighted, down) {
-            (None, true) => 0,
-            (None, false) => last,
-            (Some(at), true) if at >= last => 0,
-            (Some(at), true) => at + 1,
-            (Some(at), false) => at.checked_sub(1).unwrap_or(last),
-        });
+        menu.highlighted = Some(next);
         cx.notify();
     }
 

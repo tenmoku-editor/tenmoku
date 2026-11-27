@@ -26,7 +26,7 @@
 
 use fe_command::{ContextFrame, ContextStack};
 use fe_project::{EntryKind, NodeId};
-use fe_ui::{MenuEntry, MenuPanel, Role};
+use fe_ui::{MenuEntry, MenuPanel, Role, step_wrapping};
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement, KeyDownEvent,
     ParentElement as _, Pixels, Point, SharedString, Subscription, Window, anchored, deferred, div,
@@ -199,30 +199,6 @@ pub(super) fn tree_context(cx: &App) -> ContextStack {
         .collect()
 }
 
-/// Where Down (or with `down` false, Up) moves a menu's highlight from
-/// `highlighted`, among entries `is_item` says are items rather than
-/// separators: wrapping and passing separators over; from none, the first
-/// or the last. None with no items.
-pub(super) fn next_highlight(
-    is_item: &[bool],
-    highlighted: Option<usize>,
-    down: bool,
-) -> Option<usize> {
-    let items: Vec<usize> = (is_item.iter().enumerate())
-        .filter_map(|(ix, &item)| item.then_some(ix))
-        .collect();
-    let last = items.len().checked_sub(1)?;
-    let at = highlighted.and_then(|ix| items.iter().position(|&item| item == ix));
-    let next = match (at, down) {
-        (None, true) => 0,
-        (None, false) => last,
-        (Some(at), true) if at >= last => 0,
-        (Some(at), true) => at + 1,
-        (Some(at), false) => at.checked_sub(1).unwrap_or(last),
-    };
-    Some(items[next])
-}
-
 /// `items` without those `keep` leaves out, and without a separator
 /// that would start or end the menu or follow another.
 fn kept(items: &[Option<MenuItem>], keep: impl Fn(MenuItem) -> bool) -> Vec<Option<MenuItem>> {
@@ -337,8 +313,9 @@ impl ProjectPanel {
         let Some(menu) = &mut self.menu else {
             return;
         };
-        let items: Vec<bool> = menu.entries.iter().map(Option::is_some).collect();
-        if let Some(next) = next_highlight(&items, menu.highlighted, down) {
+        let count = menu.entries.len();
+        let is_item = |ix: usize| menu.entries[ix].is_some();
+        if let Some(next) = step_wrapping(count, menu.highlighted, down, is_item) {
             menu.highlighted = Some(next);
             cx.notify();
         }

@@ -20,6 +20,7 @@ mod layout;
 mod list;
 mod menu_panel;
 mod module_folder_icons;
+mod nav_step;
 mod prompt;
 mod roles;
 mod tabs;

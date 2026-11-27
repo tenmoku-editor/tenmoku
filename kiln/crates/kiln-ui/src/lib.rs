@@ -6,7 +6,9 @@
 //! flat [`UiTheme`] ignore it; it remains for apps that set their chrome's
 //! colours with [`set_ui_theme`], which sets the theme too. Views that
 //! own an app's state, such as a project tree or a tab pane, build their
-//! rows and tabs from these.
+//! rows and tabs from these. A view that draws its own rows moves through
+//! them with [`nav_key`] (by [`NavKey`], [`page_rows`] to a screen) or, in a
+//! menu that wraps around, [`step_wrapping`].
 //!
 //! Depends on GPUI and kiln-core (theme data, and [`TextField`]'s editing
 //! model). Written for kiln, except [`TextField`], which is based on GPUI's
@@ -72,6 +74,7 @@ pub use icon_button::IconButton;
 pub use layout::{h_flex, v_flex};
 pub use list::{List, ListDelegate, ListEvent, ListRow, RowState};
 pub use menu_bar::{MENU_BAR_HEIGHT, MenuEntry, MenuPanel, MenuStrip};
+pub use nav::{NavKey, nav_key, page_rows, step_wrapping};
 pub use palette::{PALETTE_WIDTH, PaletteFrame};
 pub use prompt::{PROMPT_WIDTH, Prompt, prompt_renderer};
 pub use roles::{

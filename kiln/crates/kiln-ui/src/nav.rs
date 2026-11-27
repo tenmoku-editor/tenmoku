@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The keys [`crate::List`] and [`crate::Tree`] share: moving a selection
-//! through rows, a page at a time, and confirming it.
+//! Moving through rows by key: the keys [`crate::List`] and [`crate::Tree`]
+//! share (moving a selection, a page at a time, and confirming it), and
+//! [`step_wrapping`] for a menu's highlight, which wraps around.
 
 use gpui::{KeyDownEvent, UniformListScrollHandle};
 
 /// What a key asks a list of rows for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NavKey {
+pub enum NavKey {
     /// Select this row.
     To(usize),
     /// Confirm the selected row.
@@ -21,7 +22,7 @@ pub(crate) enum NavKey {
 /// What `event` asks of `count` rows with `selected` selected, `page`
 /// rows to a screen; `None` for a key the rows don't take, or a key with
 /// modifiers, which go on to the app's bindings.
-pub(crate) fn nav_key(
+pub fn nav_key(
     event: &KeyDownEvent,
     selected: Option<usize>,
     count: usize,
@@ -55,7 +56,7 @@ pub(crate) fn nav_key(
 
 /// How many rows of `count` the list behind `scroll` showed in its last
 /// frame, or 10 before it's been drawn.
-pub(crate) fn page_rows(scroll: &UniformListScrollHandle, count: usize) -> usize {
+pub fn page_rows(scroll: &UniformListScrollHandle, count: usize) -> usize {
     let state = scroll.0.borrow();
     // `item` is the list's own size, `contents` all its rows'.
     match state.last_item_size {
@@ -64,5 +65,24 @@ pub(crate) fn page_rows(scroll: &UniformListScrollHandle, count: usize) -> usize
             ((size.item.height / row).floor() as usize).max(1)
         }
         _ => 10,
+    }
+}
+
+/// Where Down (or with `down` false, Up) moves a highlight from `from`
+/// among `count` entries: the next one `enabled` takes, wrapping around;
+/// from none, the first or the last it takes. `None` if it takes none.
+pub fn step_wrapping(
+    count: usize,
+    from: Option<usize>,
+    down: bool,
+    enabled: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let enabled = |ix: &usize| enabled(*ix);
+    if down {
+        let after = from.map_or(0, |from| from.saturating_add(1));
+        (after..count).chain(0..count).find(enabled)
+    } else {
+        let before = from.map_or(count, |from| from.min(count));
+        (0..before).rev().chain((0..count).rev()).find(enabled)
     }
 }

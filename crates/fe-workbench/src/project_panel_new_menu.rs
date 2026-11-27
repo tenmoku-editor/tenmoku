@@ -17,7 +17,7 @@
 //! (but on the `+`, which closes it), focus leaving the panel or the tree
 //! being opened again close it too.
 
-use fe_ui::{MenuEntry, MenuPanel, Role};
+use fe_ui::{MenuEntry, MenuPanel, Role, step_wrapping};
 use gpui::{
     Anchor, AnyElement, Bounds, Context, FocusHandle, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, SharedString, Subscription, Window,
@@ -253,9 +253,10 @@ impl ProjectPanel {
         match keystroke.key.as_str() {
             "escape" => self.dismiss_new_menu(window, cx),
             "up" | "down" => {
-                let items: Vec<bool> = open.entries.iter().map(Option::is_some).collect();
+                let count = open.entries.len();
                 let down = keystroke.key == "down";
-                open.highlighted = menu::next_highlight(&items, open.highlighted, down);
+                let is_item = |ix: usize| open.entries[ix].is_some();
+                open.highlighted = step_wrapping(count, open.highlighted, down, is_item);
                 cx.notify();
             }
             "enter" => {
