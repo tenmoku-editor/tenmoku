@@ -1,0 +1,17 @@
+id = "tenmoku.grammar_lean"
+name = "Lean 4 syntax"
+version = "0.2.0"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "lean"
+wasm = "tree-sitter-lean.wasm"
+extensions = ["lean"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false
+line_comment = "--"
+block_comment = ["/-", "-/"]

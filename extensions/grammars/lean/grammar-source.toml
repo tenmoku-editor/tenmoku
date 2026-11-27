@@ -1,0 +1,4 @@
+git = "https://github.com/Julian/tree-sitter-lean"
+rev = "f35fa9b1ad3edd22c2b07b61f569a6d9c8e07d6e"
+src = "src"
+grammar = "lean"
