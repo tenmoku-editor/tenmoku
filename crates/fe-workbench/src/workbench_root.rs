@@ -1,15 +1,19 @@
 //! The window's root folder and what follows it: re-rooting
 //! ([`Workbench::set_root`]), the project panel's and the Changes panel's
-//! events, the git state, and settings reloads.
+//! events, the git state, and settings reloads, `files.associations` among
+//! them ([`RootAssociations`]).
 
 use std::{
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
-use fe_config::settings::IconTheme;
-use fe_gpui::SettingsEvent;
-use gpui::{App, AppContext as _, Context, Entity, Focusable, Subscription, Window};
+use fe_config::{FilesSettings, settings::IconTheme};
+use fe_gpui::{DiffView, EditorView, SettingsEvent};
+use fe_syntax::FileAssociations;
+use gpui::{App, AppContext as _, Context, Entity, EntityId, Focusable, Subscription, Window};
 
 use super::workbench_chrome::terminal_dir;
 use super::{Launch, Palette, RootChanged, RootClosed, Workbench, git_blame, recent_picker};
@@ -239,6 +243,9 @@ impl Workbench {
         }
         self.resolve_trust(root.clone(), true, window, cx);
         self.track_editors(cx);
+        // Patterns with a `/` match from the new root, with the settings
+        // it has until its own load (if they're the same, no load says so).
+        self.publish_associations(None, cx);
         let name = title_bar::name(root.as_deref());
         self.shell.update(cx, |shell, cx| shell.set_title(name, cx));
     }
@@ -302,6 +309,115 @@ impl Workbench {
         }
     }
 
+    /// Has editors detect by this workbench's `files.associations`
+    /// ([`RootAssociations`]), the app's settings' until its own arrive,
+    /// until it's released: call once, from `new`. Its editors opened
+    /// already are detected again.
+    pub(crate) fn follow_file_associations(&mut self, cx: &mut Context<Self>) {
+        if !cx.has_global::<RootAssociations>() {
+            EditorView::set_language_associations(cx, associated_language);
+        }
+        let id = cx.entity_id();
+        cx.on_release(move |_, cx| {
+            if cx.has_global::<RootAssociations>() {
+                (cx.global_mut::<RootAssociations>().workbenches).remove(&id);
+            }
+        })
+        .detach();
+        let files = kiln::platform::config::settings::<fe_config::Settings>(cx)
+            .files
+            .clone();
+        self.publish_associations(Some(&files), cx);
+    }
+
+    /// Records the root, and `files` if given, as this workbench's
+    /// associations. If that changes them, detects again every window's
+    /// editors (any may have a file under this root), lists this window's
+    /// config problems again, and waits for languages on their way
+    /// ([`watch_pending_languages`]).
+    fn publish_associations(&mut self, files: Option<&FilesSettings>, cx: &mut Context<Self>) {
+        let id = cx.entity_id();
+        let associations = cx.default_global::<RootAssociations>();
+        let kept = associations.workbenches.get(&id);
+        let files = match (files, kept) {
+            (Some(files), _) => files.clone(),
+            (None, Some(kept)) => kept.files.clone(),
+            (None, None) => return,
+        };
+        if kept.is_some_and(|kept| kept.root == self.root && kept.files == files) {
+            return;
+        }
+        associations.serial += 1;
+        let entry = WindowAssociations {
+            root: self.root.clone(),
+            compiled: Arc::new(FileAssociations::new(
+                files.project_associations(),
+                files.user_associations(),
+            )),
+            user: Arc::new(FileAssociations::new([], files.user_associations())),
+            files,
+            serial: associations.serial,
+        };
+        associations.workbenches.insert(id, entry);
+        self.detect_languages_again(cx);
+        for other in Self::other_workbenches(cx) {
+            other.update(cx, |other, cx| other.detect_languages_again(cx));
+        }
+        self.sync_config_problems_soon(cx);
+        watch_pending_languages(cx);
+    }
+
+    /// Lists this window's config problems again once this update is
+    /// over: [`Workbench::sync_config_problems`] wants its window.
+    fn sync_config_problems_soon(&self, cx: &mut Context<Self>) {
+        let id = cx.entity_id();
+        cx.defer(move |cx| {
+            each_workbench(cx, |workbench, window, cx| {
+                if cx.entity_id() == id {
+                    workbench.sync_config_problems(window, cx);
+                }
+            });
+        });
+    }
+
+    /// The `files.associations` in effect for this workbench, as
+    /// [`RootAssociations`] keeps them.
+    pub(crate) fn root_files(&self, cx: &Context<Self>) -> Option<FilesSettings> {
+        let associations = cx.try_global::<RootAssociations>()?;
+        let entry = associations.workbenches.get(&cx.entity_id())?;
+        Some(entry.files.clone())
+    }
+
+    /// Detects again the language of each open editor, and each side of
+    /// a diff, whose language wasn't picked: for when
+    /// `files.associations` may say another. A diff's sides with no file
+    /// go by the file compared ([`DiffView::detect_languages_again`]).
+    pub(crate) fn detect_languages_again(&self, cx: &mut Context<Self>) {
+        let mut editors = self.open_editors(cx);
+        let mut diffs = Vec::new();
+        for pane in self.panes(cx) {
+            for tab in pane.read(cx).tabs() {
+                if let Some(diff) = tab.item().downcast_ref::<DiffView>() {
+                    let view = diff.read(cx);
+                    let sides = [view.left().clone(), view.right().clone()];
+                    let with_files = sides
+                        .into_iter()
+                        .filter(|side| side.read(cx).language_path().is_some());
+                    editors.extend(with_files);
+                    diffs.push(diff.clone());
+                }
+            }
+        }
+        for editor in editors {
+            if !editor.read(cx).is_language_chosen() {
+                editor.update(cx, |editor, cx| editor.detect_language(cx));
+            }
+        }
+        for diff in diffs {
+            diff.update(cx, |diff, cx| diff.detect_languages_again(cx));
+        }
+    }
+
     /// Applies reloaded settings to the open editors and to editors yet to
     /// open, and `status_bar.visible` to the status bar and
     /// `workbench.rail` to the rail and sidebar if the reload changed them,
@@ -337,6 +453,7 @@ impl Workbench {
         for pane in self.panes(cx) {
             pane.update(cx, |pane, cx| pane.reload_settings(event, cx));
         }
+        self.publish_associations(Some(&event.settings.files), cx);
         // Editors restored from a saved layout open as the panes' do.
         let theme = self.active.read(cx).theme().clone();
         self.terminal
@@ -383,6 +500,128 @@ impl Workbench {
         // The settings changed: the Settings tab reads its files again.
         self.reload_settings_editors(cx);
     }
+}
+
+/// Each workbench's `files.associations`, with its root: from the
+/// settings it was last given (the app's, until its own load gives them),
+/// dropped with it. What editors detect a file's language by
+/// ([`associated_language`]).
+#[derive(Default)]
+struct RootAssociations {
+    workbenches: HashMap<EntityId, WindowAssociations>,
+    /// Bumped by each change, so the newest settings win a tie.
+    serial: u64,
+    /// Whether [`watch_pending_languages`] is waiting.
+    watching: bool,
+}
+
+impl gpui::Global for RootAssociations {}
+
+/// One workbench's [`RootAssociations`].
+struct WindowAssociations {
+    root: Option<PathBuf>,
+    files: FilesSettings,
+    /// The project's patterns, then the user's.
+    compiled: Arc<FileAssociations>,
+    /// The user's alone.
+    user: Arc<FileAssociations>,
+    serial: u64,
+}
+
+/// The language `files.associations` give the file at `path`: those of the
+/// deepest root a workbench has it under, the newest of a root's, with
+/// patterns with a `/` matching from there; else the user's, by its name,
+/// as last given. So a project's associations apply to its own files in
+/// any window, and to no others.
+fn associated_language(path: &Path, cx: &App) -> Option<&'static str> {
+    let associations = cx.try_global::<RootAssociations>()?;
+    let windows = || associations.workbenches.values();
+    let under = windows()
+        .filter_map(|entry| Some((entry.root.as_deref()?, entry)))
+        .filter(|(root, _)| path.starts_with(root))
+        .max_by_key(|(root, entry)| (root.components().count(), entry.serial));
+    match under {
+        Some((root, entry)) => entry.compiled.language_for(path, Some(root)),
+        None => {
+            let newest = windows().max_by_key(|entry| entry.serial)?;
+            newest.user.language_for(path, None)
+        }
+    }
+}
+
+/// Runs `f` on every window's workbench, but one being updated now.
+fn each_workbench(cx: &mut App, f: impl Fn(&mut Workbench, &mut Window, &mut Context<Workbench>)) {
+    for window in cx.windows() {
+        if let Some(window) = window.downcast::<Workbench>() {
+            window
+                .update(cx, |workbench, window, cx| f(workbench, window, cx))
+                .ok();
+        }
+    }
+}
+
+/// How often [`watch_pending_languages`] looks, at first, then after
+/// [`PENDING_SLOW_AFTER`].
+const PENDING_POLL: Duration = Duration::from_millis(250);
+const PENDING_SLOW_POLL: Duration = Duration::from_secs(5);
+const PENDING_SLOW_AFTER: Duration = Duration::from_secs(30);
+
+/// The languages the associations name that aren't registered yet but
+/// are on their way ([`crate::grammar_prompt::language_on_its_way`]): an
+/// installed extension's grammar the loader is still registering.
+fn pending_languages(cx: &App) -> BTreeSet<String> {
+    let Some(associations) = cx.try_global::<RootAssociations>() else {
+        return BTreeSet::new();
+    };
+    let known: BTreeSet<&str> = fe_syntax::language_names().collect();
+    (associations.workbenches.values())
+        .flat_map(|entry| {
+            let files = &entry.files;
+            files
+                .project_associations()
+                .chain(files.user_associations())
+        })
+        .map(|(_, language)| language)
+        .filter(|language| !known.contains(language))
+        .filter(|language| crate::grammar_prompt::language_on_its_way(language, cx))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Waits, once per app, for the languages the associations name that are
+/// on their way ([`pending_languages`]): as each registers, every
+/// window's editors are detected again and its config problems listed
+/// again. Stops when none is on its way.
+fn watch_pending_languages(cx: &mut App) {
+    let watching = &mut cx.default_global::<RootAssociations>().watching;
+    if *watching || pending_languages(cx).is_empty() {
+        return;
+    }
+    cx.default_global::<RootAssociations>().watching = true;
+    cx.spawn(async move |cx| {
+        let executor = cx.background_executor().clone();
+        let slow_from = executor.now() + PENDING_SLOW_AFTER;
+        let mut pending = cx.update(|cx| pending_languages(cx));
+        while !pending.is_empty() {
+            let poll = match executor.now() < slow_from {
+                true => PENDING_POLL,
+                false => PENDING_SLOW_POLL,
+            };
+            executor.timer(poll).await;
+            let now = cx.update(|cx| pending_languages(cx));
+            if now.len() < pending.len() || !now.is_subset(&pending) {
+                cx.update(|cx| {
+                    each_workbench(cx, |workbench, window, cx| {
+                        workbench.detect_languages_again(cx);
+                        workbench.sync_config_problems(window, cx);
+                    })
+                });
+            }
+            pending = now;
+        }
+        cx.update(|cx| cx.default_global::<RootAssociations>().watching = false);
+    })
+    .detach();
 }
 
 /// The tree's own New File or Delete of `paths`, as the watcher would

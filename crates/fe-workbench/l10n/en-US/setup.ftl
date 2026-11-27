@@ -207,6 +207,21 @@ workbench-setup-config-problem-detail = { $place } · { $severity ->
 # its detail, and its one button. $file is the file's name.
 workbench-setup-config-open-failed = Can't open { $file }
 workbench-setup-config-ok = OK
+
+## A `files.associations` entry that is ignored. $pattern is its glob
+## pattern, $language the language it names, $reason why the pattern isn't
+## a glob (one of the -glob- messages).
+
+workbench-setup-association-unknown-language = { $pattern }: no language is called "{ $language }" (Change Language Mode lists them); entry ignored
+workbench-setup-association-bad-glob = { $pattern } isn't a glob pattern: { $reason }; entry ignored
+workbench-setup-association-glob-empty = it's empty
+workbench-setup-association-glob-unclosed-set = a [ has no ]
+workbench-setup-association-glob-empty-set = a [ ] set has no characters
+workbench-setup-association-glob-unclosed-brace = a {"{"} has no {"}"}
+workbench-setup-association-glob-unopened-brace = a {"}"} has no {"{"}
+workbench-setup-association-glob-too-many = its braces make more than 64 alternatives
+workbench-setup-association-glob-too-deep = it nests braces more than 8 deep
+workbench-setup-association-glob-too-long = it's longer than 1024 characters
 workbench-setup-config-not-a-file = not a regular file
 # $kib is the most a config file may hold, in KiB: 1024.
 workbench-setup-config-too-big = { $kib ->

@@ -900,6 +900,7 @@ impl Workbench {
         .detach();
         workbench.pane_added(&pane, window, cx);
         workbench.track_editors(cx);
+        workbench.follow_file_associations(cx);
         workbench.follow_trust(window, cx);
         workbench.resolve_trust(workbench.root.clone(), as_folder, window, cx);
         workbench.lsp.format_on_save.set(format_on_save);

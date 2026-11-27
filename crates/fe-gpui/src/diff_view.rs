@@ -209,7 +209,9 @@ fn detect_side_languages<T>(views: &[Entity<EditorView>; 2], named: &Path, cx: &
         let text = view.model().text();
         let start = text
             .slice_to_string(0..text.clip_offset(crate::view::DETECT_BYTES, fe_buffer::Bias::Left));
-        fe_syntax::detect_language_name(Some(view.language_path().unwrap_or(named)), &start)
+        let path = view.language_path().unwrap_or(named);
+        let associated = crate::pane_item::associated_language(path, cx);
+        fe_syntax::detect_language_associated(Some(path), associated, &start, "")
     };
     let right_language = language(&views[1], cx);
     for side in views {
@@ -376,6 +378,18 @@ impl DiffView {
         // `EditorView::new` found it no language; the file's name does.
         let file_name = file_name.into();
         detect_side_languages(&views, Path::new(file_name.as_ref()), cx);
+        // Once the caller has named the file compared
+        // ([`DiffView::with_compared_path`]), by its whole path: the host's
+        // `files.associations` may match its folders.
+        cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
+            this.update(cx, |this, cx| {
+                if this.compared_path.is_some() {
+                    this.detect_languages_again(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
         let mut subscriptions = Vec::new();
         for (from, to) in [(0, 1), (1, 0)] {
             // A side's edits, carets and scrolls may change the diff.
@@ -454,11 +468,14 @@ impl DiffView {
     }
 
     /// Detects again the language of each side with no path to detect it from,
-    /// unless one was picked for it: for when a language has become known since
-    /// the view opened.
+    /// unless one was picked for it, by the [file compared](DiffView::with_compared_path)
+    /// or else the file's name: for when a language has become known since
+    /// the view opened, or the host's `files.associations` changed.
     pub fn detect_languages_again(&mut self, cx: &mut Context<Self>) {
         let views = self.views.clone();
-        detect_side_languages(&views, Path::new(self.file_name.as_ref()), cx);
+        let named =
+            (self.compared_path.clone()).unwrap_or_else(|| PathBuf::from(self.file_name.as_ref()));
+        detect_side_languages(&views, &named, cx);
     }
 
     /// The text colour `side`'s (0 left, 1 right) header is drawn in, if it

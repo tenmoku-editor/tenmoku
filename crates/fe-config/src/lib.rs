@@ -52,7 +52,7 @@ pub use paths::{
 };
 pub use recent::{RecentList, recent_path};
 pub use settings::{
-    ChatEffort, ChatSettings, EditorSettings, ExtensionsSettings, FormatterPrefer,
+    ChatEffort, ChatSettings, EditorSettings, ExtensionsSettings, FilesSettings, FormatterPrefer,
     FormatterSettings, LocaleChoice, LocaleSetting, NotificationLevel, PROJECT_CHAT,
     PROJECT_EXTENSIONS, PROJECT_FORMATTERS, PROJECT_TERMINAL_SHELL, PROJECT_VIM_USER_ONLY,
     PluginSettingsSchema, Settings, SettingsEvent, SettingsStore, StickyScrollModel,

@@ -41,6 +41,14 @@ config-formatter-prefer-unknown = { $language }.prefer must be "external" or "ls
 config-formatter-timeout-out-of-range = { $language }.timeout_ms must be a whole number from 1 to 60000; entry ignored
 config-formatters-not-table = must be a table of languages; ignored
 
+## `files.associations`. $pattern is an entry's glob pattern.
+
+config-association-not-language = { $pattern } must be a language's name, as in "python"; entry ignored
+config-associations-not-table = must be a table of glob patterns, each to a language's name; ignored
+
+# $key is the setting, such as `files.user_entries`.
+config-files-entries-set = { $key } can't be set in a file: it's filled from files.associations
+
 ## `editor.spell_check_scopes`. $scope is the entry as written, quotes and
 ## all.
 

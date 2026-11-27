@@ -25,12 +25,15 @@
 //!   [`symbols`] adds fields, enum variants and variables, for a tags index.
 //! - [`fence_language`] is the language a Markdown fence's info string names.
 //! - [`detect_language`] picks a buffer's language from a modeline
-//!   ([`language_name_for_modeline`]), its path, or how it starts.
+//!   ([`language_name_for_modeline`]), its path, or how it starts;
+//!   [`detect_language_associated`] with the language
+//!   [`FileAssociations`] (`files.associations`) give its path too.
 //! - [`suggest_indent`] suggests a row's indentation and [`closer_outdents`]
 //!   the row a `}` lines up with, from per-language indent queries.
 //!
 //! This crate must never depend on GPUI.
 
+mod associations;
 mod brackets;
 mod comment;
 mod detect;
@@ -54,12 +57,14 @@ mod syntax;
 mod textobject;
 mod verbs;
 
+pub use associations::{AssociationProblem, FileAssociations, GlobError, association_problem};
 pub use brackets::{
     BracketDepth, BracketPair, bracket_depths, bracket_pair, enclosing_bracket_pair,
 };
 pub use comment::{CommentTokens, auto_pairs, comment_tokens};
 pub use detect::{
-    detect_language, detect_language_name, language_name_for_shebang, shebang_program,
+    detect_language, detect_language_associated, detect_language_name, language_name_for_shebang,
+    shebang_program,
 };
 pub use driver::{Spawner, SyntaxDriver};
 pub use fence::fence_language;

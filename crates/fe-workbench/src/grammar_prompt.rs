@@ -175,6 +175,15 @@ pub fn set_grammar_offers(cx: &mut App, offers: GrammarOffers) {
     }
 }
 
+/// Whether the app's offers say `language` is installed ([`GrammarOffers::installed`]):
+/// registered, built in, or on its way, as an installed extension's grammar
+/// is while the loader registers it. Without offers, no.
+pub(crate) fn language_on_its_way(language: &str, cx: &App) -> bool {
+    (cx.try_global::<Prompts>())
+        .and_then(|prompts| prompts.offers.as_ref())
+        .is_some_and(|offers| (offers.installed)(language))
+}
+
 /// The app's offers and what's been answered, across its windows.
 #[derive(Default)]
 struct Prompts {

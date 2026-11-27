@@ -1,4 +1,19 @@
 //! Choosing a language from a buffer's content when its path doesn't decide.
+//!
+//! What picks a buffer's language, first to last:
+//!
+//! 1. a language picked for the file and remembered (the host's, ahead of
+//!    detection: `fe_gpui`'s language resolver);
+//! 2. a [modeline](language_name_for_modeline);
+//! 3. the `files.associations` the user's settings or a project's set
+//!    ([`FileAssociations`](crate::FileAssociations), whose module has the
+//!    rule for which of several patterns wins: a project's before the
+//!    user's, then the most specific);
+//! 4. the built-in mapping of extensions and file names
+//!    ([`language_name_for_path`]);
+//! 5. a shebang ([`language_name_for_shebang`]);
+//! 6. another first-line marker (`<?xml`, `<?php`, `<!DOCTYPE html`, ...);
+//! 7. a sniff of the content, for XML and JSON.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -114,20 +129,20 @@ pub(crate) fn built_in_interpreter_clash(interpreter: &str) -> Option<&'static s
 fn language_name_for_first_line(first_line: &str) -> Option<&'static str> {
     let line = first_line.lines().next()?;
     let start = line.trim_start_matches(is_js_space);
-    let language = if is_xml_line(line) {
-        "xml"
-    } else if start.starts_with("<?php") {
-        "php"
-    } else if is_html_line(start) {
-        "html"
-    } else if line.starts_with("#cloud-config") {
-        "yaml"
-    } else if is_shell_mode_line(line) {
-        "bash"
-    } else {
-        return None;
-    };
-    language_names().find(|&compiled| compiled == language)
+    // The opening markers first, so a line that starts as PHP or HTML and
+    // has `<svg` or `<?xml` further on isn't XML, unless that's the one
+    // compiled in.
+    let candidates = [
+        ("php", start.starts_with("<?php")),
+        ("html", is_html_line(start)),
+        ("xml", is_xml_line(line)),
+        ("yaml", line.starts_with("#cloud-config")),
+        ("bash", is_shell_mode_line(line)),
+    ];
+    candidates
+        .into_iter()
+        .filter(|&(_, marked)| marked)
+        .find_map(|(language, _)| language_names().find(|&compiled| compiled == language))
 }
 
 /// A character JavaScript's regex `\s` matches: Rust's whitespace, but with
@@ -210,7 +225,21 @@ pub fn detect_language(
     text_start: &str,
     text_end: &str,
 ) -> Option<&'static str> {
+    detect_language_associated(path, None, text_start, text_end)
+}
+
+/// The language for a buffer as [`detect_language`] picks it, but with
+/// `associated`, the language `files.associations` give its path
+/// ([`FileAssociations::language_for`](crate::FileAssociations::language_for)),
+/// after a modeline and before the path's own.
+pub fn detect_language_associated(
+    path: Option<&Path>,
+    associated: Option<&'static str>,
+    text_start: &str,
+    text_end: &str,
+) -> Option<&'static str> {
     language_name_for_modeline(text_start, text_end)
+        .or(associated)
         .or_else(|| {
             let path = path?;
             language_name_for_path(path).map(|by_path| m_file_language(path, by_path, text_start))

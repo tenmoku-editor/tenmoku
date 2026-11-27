@@ -38,6 +38,24 @@ use kiln_shell::{CloseAnswer, Icon, IconRef, PaneItem, StatusItem, StatusSide, f
 
 use crate::{DiffView, EditorSettings, EditorTheme, EditorView, commands::RunCommand};
 
+/// What the host's `files.associations` say a file's language is, if
+/// anything: a language's name.
+type LanguageAssociations = dyn Fn(&Path, &App) -> Option<&'static str>;
+
+/// The host's [`LanguageAssociations`], set by
+/// [`EditorView::set_language_associations`].
+struct LanguageAssociationsGlobal(Rc<LanguageAssociations>);
+
+impl Global for LanguageAssociationsGlobal {}
+
+/// The language the host's
+/// [associations](EditorView::set_language_associations) give the file at
+/// `path`, if they say one.
+pub(crate) fn associated_language(path: &Path, cx: &App) -> Option<&'static str> {
+    let associate = cx.try_global::<LanguageAssociationsGlobal>()?.0.clone();
+    associate(path, cx)
+}
+
 /// An editor's status bar items, while it's the active item: the vim mode
 /// with vim on, and vim's last message, on the left; the cursor,
 /// indentation, encoding, line ending and language on the right. The
@@ -841,8 +859,28 @@ impl EditorView {
         }
     }
 
+    /// Has `associate` say the language the host's `files.associations`
+    /// give a file, which [detection](EditorView::detect_language) takes
+    /// after a modeline and before the path's own: a language's name, or
+    /// `None` for no say. Replaces the one set before.
+    pub fn set_language_associations(
+        cx: &mut App,
+        associate: impl Fn(&Path, &App) -> Option<&'static str> + 'static,
+    ) {
+        cx.set_global(LanguageAssociationsGlobal(Rc::new(associate)));
+    }
+
+    /// The language the host's
+    /// [associations](EditorView::set_language_associations) give the
+    /// buffer's [path](EditorView::language_path), if they say one.
+    fn associated_language(&self, cx: &App) -> Option<&'static str> {
+        associated_language(self.language_path()?, cx)
+    }
+
     /// Highlights the buffer in the language a modeline in its first or last
-    /// lines, its path or its first lines say, unless it already is.
+    /// lines, the host's `files.associations`
+    /// ([`EditorView::set_language_associations`]), its path or its first
+    /// lines say, unless it already is.
     pub fn detect_language(&mut self, cx: &mut Context<Self>) {
         let text = self.model.text();
         let start =
@@ -858,7 +896,9 @@ impl EditorView {
             text.len()
         };
         let end = text.slice_to_string(tail_start..text.len());
-        let language = fe_syntax::detect_language(self.language_path(), &start, &end);
+        let associated = self.associated_language(cx);
+        let language =
+            fe_syntax::detect_language_associated(self.language_path(), associated, &start, &end);
         let current = self.current_language();
         if current.is_none() || current != Some(language.unwrap_or("")) {
             self.set_language(language, cx);

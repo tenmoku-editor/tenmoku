@@ -16,6 +16,7 @@ settings-group-completion = Completion
 settings-group-minimap = Minimap
 settings-group-sticky_scroll = Sticky Scroll
 settings-group-extensions = Extensions
+settings-group-files = Files
 settings-group-git = Git
 settings-group-lsp = LSP
 settings-group-remote = Remote
@@ -506,6 +507,28 @@ settings-extensions-plugins_preview =
     Run code plugins (WebAssembly) from installed extensions. A preview:
     their API can change in any release. Each plugin still asks for what
     it may do before it runs.
+
+settings-files = Files: the languages patterns give them.
+
+settings-files-associations =
+    Languages for files by glob pattern, as in `"*.conf" = "ini"` or
+    `"**/templates/*.html" = "xml"`: each a language's name, as Change
+    Language Mode lists it. A pattern with no `/` matches a file's name,
+    one with a `/` its path relative to the project root (`**` crosses
+    directories), so a file outside the root matches only those with
+    none. A project file's patterns come before the user's, and replace
+    the user's that are the same; then the most specific wins: the most
+    literal (not wildcard) characters, then one with a `/`, then the
+    pattern written later in its file. They come before the built-in
+    extensions and file names, a shebang and the content, after a
+    modeline and a language picked for the file. A pattern that isn't a
+    glob, or a language that isn't installed, is ignored with a warning.
+
+settings-files-project_entries = A project file's `associations`, as `user_entries` has the user's.
+
+settings-files-user_entries =
+    The user's file's `associations`, each a pattern then a language,
+    in the file's order: filled from them, and no file can set it.
 
 settings-git = Git, in the Changes panel.
 

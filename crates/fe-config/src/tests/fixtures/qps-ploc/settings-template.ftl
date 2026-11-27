@@ -282,6 +282,8 @@ settings-template-extensions-plugins_preview = ⟦settings-template-extensions-p
 
 settings-template-extensions-note-1 = ⟦settings-template-extensions-note-1⟧ Ŧĥîś ŀîñê ĩś ŀōñĝ ēñōūĝĥ ţō ŵŕāƥ āţ ēîĝĥţŷ čōŀūmñś, şō ţĥē ŵŕāƥƥîñĝ îś ţēśţēđ ţōō.
 
+settings-template-files-note-1 = ⟦settings-template-files-note-1⟧ Ŧĥîś ŀîñê ĩś ŀōñĝ ēñōūĝĥ ţō ŵŕāƥ āţ ēîĝĥţŷ čōŀūmñś, şō ţĥē ŵŕāƥƥîñĝ îś ţēśţēđ ţōō.
+
 settings-template-formatters-typescript = ⟦settings-template-formatters-typescript⟧ Ŧĥîś ŀîñê ĩś ŀōñĝ ēñōūĝĥ ţō ŵŕāƥ āţ ēîĝĥţŷ čōŀūmñś, şō ţĥē ŵŕāƥƥîñĝ îś ţēśţēđ ţōō.
 
 settings-template-lsp-servers-my_linter = ⟦settings-template-lsp-servers-my_linter⟧ Ŧĥîś ŀîñê ĩś ŀōñĝ ēñōūĝĥ ţō ŵŕāƥ āţ ēîĝĥţŷ čōŀūmñś, şō ţĥē ŵŕāƥƥîñĝ îś ţēśţēđ ţōō.

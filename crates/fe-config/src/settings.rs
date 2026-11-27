@@ -55,6 +55,9 @@ pub struct Settings {
     /// The project tree.
     #[serde(default)]
     pub tree: TreeSettings,
+    /// Files: the languages patterns give them.
+    #[serde(default)]
+    pub files: FilesSettings,
     /// Git, in the Changes panel.
     #[serde(default)]
     pub git: GitSettings,
@@ -268,6 +271,47 @@ impl Default for TreeSettings {
     fn default() -> Self {
         Self { show_ignored: true }
     }
+}
+
+/// `[files]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct FilesSettings {
+    /// Languages for files by glob pattern, as in `"*.conf" = "ini"` or
+    /// `"**/templates/*.html" = "xml"`: each a language's name, as Change
+    /// Language Mode lists it. A pattern with no `/` matches a file's name,
+    /// one with a `/` its path relative to the project root (`**` crosses
+    /// directories), so a file outside the root matches only those with
+    /// none. A project file's patterns come before the user's, and replace
+    /// the user's that are the same; then the most specific wins: the most
+    /// literal (not wildcard) characters, then one with a `/`, then the
+    /// pattern written later in its file. They come before the built-in
+    /// extensions and file names, a shebang and the content, after a
+    /// modeline and a language picked for the file. A pattern that isn't a
+    /// glob, or a language that isn't installed, is ignored with a warning.
+    pub associations: BTreeMap<String, String>,
+    /// The user's file's `associations`, each a pattern then a language,
+    /// in the file's order: filled from them, and no file can set it.
+    pub user_entries: Vec<[String; 2]>,
+    /// A project file's `associations`, as `user_entries` has the user's.
+    pub project_entries: Vec<[String; 2]>,
+}
+
+impl FilesSettings {
+    /// The user's file's associations, in its order, those a project's
+    /// file replaces too: each a pattern and a language.
+    pub fn user_associations(&self) -> impl Iterator<Item = (&str, &str)> {
+        entries(&self.user_entries)
+    }
+
+    /// The project's file's associations, in its order.
+    pub fn project_associations(&self) -> impl Iterator<Item = (&str, &str)> {
+        entries(&self.project_entries)
+    }
+}
+
+fn entries(entries: &[[String; 2]]) -> impl Iterator<Item = (&str, &str)> {
+    (entries.iter()).map(|[pattern, language]| (pattern.as_str(), language.as_str()))
 }
 
 /// `[git]`: the Changes panel's git.
@@ -2182,6 +2226,14 @@ fn options_for(schemas: Schemas) -> SettingsOptions {
             drop_project_permissions,
         ))
         .layer_filter(ProjectFilter::new("formatters", drop_bad_formatters))
+        .layer_filter(ProjectFilter::new(USER_ENTRIES_KEY, |layer: &mut Layer| {
+            drop_entries(layer, "user_entries")
+        }))
+        .layer_filter(ProjectFilter::new(
+            PROJECT_ENTRIES_KEY,
+            |layer: &mut Layer| drop_entries(layer, "project_entries"),
+        ))
+        .layer_filter(ProjectFilter::new(ASSOCIATIONS_KEY, drop_bad_associations))
         .layer_filter(ProjectFilter::new(SPELL_SCOPES_KEY, drop_bad_spell_scopes))
         .layer_filter(ProjectFilter::new(
             PYTHON_SERVER_KEY,
@@ -2189,6 +2241,7 @@ fn options_for(schemas: Schemas) -> SettingsOptions {
         ))
         .layer_filter(ProjectFilter::new("extensions", clamp_plugin_limits))
         .layer_filter(ProjectFilter::new(REMOTE_PORTS_KEY, drop_bad_ports))
+        .project_filter(ProjectFilter::new(USER_ENTRIES_KEY, move_project_entries))
         .project_filter(ProjectFilter::new("formatters", drop_formatters))
         .project_filter(ProjectFilter::new("lsp", narrow_lsp))
         .project_filter(ProjectFilter::new("theme", drop_theme))
@@ -2621,6 +2674,111 @@ fn drop_bad_formatters(layer: &mut Layer) {
             .join(".");
         let warning = layer.diagnostic_at(Severity::Warning, Some(key), offset, message);
         layer.diagnostics.push(warning);
+    }
+}
+
+/// `files.associations`, as a diagnostic names it.
+const ASSOCIATIONS_KEY: &str = "files.associations";
+
+/// `files.user_entries`, as a diagnostic names it.
+const USER_ENTRIES_KEY: &str = "files.user_entries";
+
+/// `files.project_entries`, as a diagnostic names it.
+const PROJECT_ENTRIES_KEY: &str = "files.project_entries";
+
+/// Drops each `files.associations` entry whose value isn't a language's
+/// name (a string, not empty), with a warning at it, so the others still
+/// apply; a value that isn't a table goes the same way. Whether a pattern
+/// is a glob and a language is there, the host checks: a grammar may be
+/// installed after the file loads. Then lists the rest, in the file's
+/// order, as `files.user_entries`: a table's keys come sorted, and the
+/// order breaks ties.
+fn drop_bad_associations(layer: &mut Layer) {
+    let Some(toml::Value::Table(files)) = layer.table.get_mut("files") else {
+        return;
+    };
+    let mut problems: Vec<(Vec<String>, String)> = Vec::new();
+    let key = |rest: &[&str]| -> Vec<String> {
+        ["files", "associations"]
+            .iter()
+            .chain(rest)
+            .map(|key| key.to_string())
+            .collect()
+    };
+    match files.get_mut("associations") {
+        None => return,
+        Some(toml::Value::Table(associations)) => {
+            associations.retain(|pattern, language| {
+                let good = language.as_str().is_some_and(|name| !name.is_empty());
+                if !good {
+                    let message = kiln_l10n::tr!(
+                        "config-association-not-language",
+                        pattern = pattern.to_owned()
+                    );
+                    problems.push((key(&[pattern]), message.to_string()));
+                }
+                good
+            });
+        }
+        Some(_) => {
+            files.remove("associations");
+            let message = kiln_l10n::tr!("config-associations-not-table");
+            problems.push((key(&[]), message.to_string()));
+        }
+    }
+    for (path, message) in problems {
+        let warning = layer.value_diagnostic(Severity::Warning, &path, message);
+        layer.diagnostics.push(warning);
+    }
+    let Some(toml::Value::Table(files)) = layer.table.get("files") else {
+        return;
+    };
+    let Some(toml::Value::Table(associations)) = files.get("associations") else {
+        return;
+    };
+    let mut ordered: Vec<(Option<usize>, &String, &toml::Value)> = (associations.iter())
+        .map(|(pattern, language)| (layer.key_offset(&key(&[pattern])), pattern, language))
+        .collect();
+    // Stable, and a key not found (none should be) goes last.
+    ordered.sort_by_key(|&(offset, _, _)| offset.unwrap_or(usize::MAX));
+    let entries: Vec<toml::Value> = (ordered.into_iter())
+        .map(|(_, pattern, language)| {
+            toml::Value::Array(vec![toml::Value::String(pattern.clone()), language.clone()])
+        })
+        .collect();
+    if let Some(toml::Value::Table(files)) = layer.table.get_mut("files") {
+        files.insert("user_entries".into(), toml::Value::Array(entries));
+    }
+}
+
+/// Drops `files.<name>`, `user_entries` or `project_entries`, from any
+/// layer, with a warning: only [`drop_bad_associations`] and
+/// [`move_project_entries`] fill them, from a file's own
+/// `files.associations`, so a file can't pass its patterns off as
+/// another's.
+fn drop_entries(layer: &mut Layer, name: &str) {
+    let Some(toml::Value::Table(files)) = layer.table.get_mut("files") else {
+        return;
+    };
+    if files.remove(name).is_none() {
+        return;
+    }
+    let path = ["files".to_owned(), name.to_owned()];
+    let message = kiln_l10n::tr!("config-files-entries-set", key = path.join(".")).to_string();
+    let warning = layer.key_diagnostic(Severity::Warning, &path, message);
+    layer.diagnostics.push(warning);
+}
+
+/// Moves a project layer's `files.user_entries` to
+/// `files.project_entries`, so its patterns can come before the user's
+/// and the user's own stay whole: merged, `files.associations` has both
+/// files' patterns, the project's replacing the user's that are the same.
+fn move_project_entries(layer: &mut Layer) {
+    let Some(toml::Value::Table(files)) = layer.table.get_mut("files") else {
+        return;
+    };
+    if let Some(entries) = files.remove("user_entries") {
+        files.insert("project_entries".into(), entries);
     }
 }
 

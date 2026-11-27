@@ -894,6 +894,46 @@
       },
       "type": "object"
     },
+    "FilesSettings": {
+      "description": "`[files]`.",
+      "properties": {
+        "associations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Languages for files by glob pattern, as in `\"*.conf\" = \"ini\"` or\n`\"**/templates/*.html\" = \"xml\"`: each a language's name, as Change\nLanguage Mode lists it. A pattern with no `/` matches a file's name,\none with a `/` its path relative to the project root (`**` crosses\ndirectories), so a file outside the root matches only those with\nnone. A project file's patterns come before the user's, and replace\nthe user's that are the same; then the most specific wins: the most\nliteral (not wildcard) characters, then one with a `/`, then the\npattern written later in its file. They come before the built-in\nextensions and file names, a shebang and the content, after a\nmodeline and a language picked for the file. A pattern that isn't a\nglob, or a language that isn't installed, is ignored with a warning.",
+          "type": "object"
+        },
+        "project_entries": {
+          "default": [],
+          "description": "A project file's `associations`, as `user_entries` has the user's.",
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "user_entries": {
+          "default": [],
+          "description": "The user's file's `associations`, each a pattern then a language,\nin the file's order: filled from them, and no file can set it.",
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "FormatterPrefer": {
       "description": "`formatters.<language>.prefer`.",
       "oneOf": [
@@ -2504,6 +2544,15 @@
         "plugins_preview": false
       },
       "description": "Installed extensions. A project file can't set them."
+    },
+    "files": {
+      "$ref": "#/$defs/FilesSettings",
+      "default": {
+        "associations": {},
+        "project_entries": [],
+        "user_entries": []
+      },
+      "description": "Files: the languages patterns give them."
     },
     "formatters": {
       "additionalProperties": {

@@ -924,6 +924,31 @@ The memory the plugin holds for what you wait on, as "128MiB", up to 256MiB.
 - Type: string
 - Default: unset
 
+## `files`
+
+Files: the languages patterns give them.
+
+### `files.associations`
+
+Languages for files by glob pattern, as in `"*.conf" = "ini"` or `"**/templates/*.html" = "xml"`: each a language's name, as Change Language Mode lists it. A pattern with no `/` matches a file's name, one with a `/` its path relative to the project root (`**` crosses directories), so a file outside the root matches only those with none. A project file's patterns come before the user's, and replace the user's that are the same; then the most specific wins: the most literal (not wildcard) characters, then one with a `/`, then the pattern written later in its file. They come before the built-in extensions and file names, a shebang and the content, after a modeline and a language picked for the file. A pattern that isn't a glob, or a language that isn't installed, is ignored with a warning.
+
+- Type: table of string
+- Default: `{}`
+
+### `files.project_entries`
+
+A project file's `associations`, as `user_entries` has the user's.
+
+- Type: array of array of string, at least 2 items
+- Default: `[]`
+
+### `files.user_entries`
+
+The user's file's `associations`, each a pattern then a language, in the file's order: filled from them, and no file can set it.
+
+- Type: array of array of string, at least 2 items
+- Default: `[]`
+
 ## `formatters.<name>`
 
 External formatters, by language name (`rust`, `python`, `typescript`, ...: the names `lsp.servers.<name>.languages` uses). A project file can't set them: a cloned repo shouldn't choose a program to run on save.

@@ -103,6 +103,7 @@ mod draft_commit_message;
 mod editor_menu;
 mod editor_menu_context;
 mod editorconfig_clean_open;
+mod file_associations_redetect;
 mod file_icon_set_surfaces;
 pub(crate) mod find_bar;
 mod find_bar_b3;

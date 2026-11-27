@@ -530,6 +530,16 @@
 # for what you wait on (up to "256MiB").
 # As in [extensions.plugin_limits."acme.cargo"], then background_wall = "30m".
 
+[files]
+# Languages for files by glob pattern, each a language's name as Change
+# Language Mode lists it. A pattern with no / matches a file's name, one with
+# a / its path under the project root (** crosses directories). A project
+# file's patterns come before yours, then the most specific wins. They come
+# after a modeline and a language picked for the file, before the extension.
+# A pattern that isn't a glob, or a language not installed, is ignored with a
+# warning. As in [files.associations], then "*.conf" = "ini" or
+# "**/templates/*.html" = "xml".
+
 # External formatters, one table per language, named as the language is
 # (rust, python, typescript, go, ...). A project file can't set them. A table
 # needs a command; the rest are optional:

@@ -72,8 +72,8 @@ impl Workbench {
     }
 
     /// Sets the status item for the problems now.
-    fn sync_config_status(&mut self, cx: &mut Context<Self>) {
-        let item = status_item(config::diagnostics(cx).len());
+    pub(crate) fn sync_config_status(&mut self, cx: &mut Context<Self>) {
+        let item = status_item(self.config_problems_now(cx).len());
         self.status_bar().clone().update(cx, |bar, cx| match item {
             Some(item) => bar.set_item(item, cx),
             None => bar.remove_item(ITEM, cx),
@@ -84,7 +84,7 @@ impl Workbench {
     /// them; with none, the list goes.
     pub(crate) fn sync_config_problems(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_config_status(cx);
-        let problems = config::diagnostics(cx).to_vec();
+        let problems = self.config_problems_now(cx);
         if self.palette != Some(Palette::ConfigProblems) {
             return;
         }
@@ -97,6 +97,17 @@ impl Workbench {
             picker.delegate.set_problems(problems);
             picker.delegate.update_matches(query, cx);
         });
+    }
+
+    /// Every config problem this window lists: kiln's service's, then
+    /// those of the `files.associations` that apply to it
+    /// ([`association_problems`]).
+    pub(crate) fn config_problems_now(&self, cx: &Context<Self>) -> Vec<Diagnostic> {
+        let mut problems = config::diagnostics(cx).to_vec();
+        if let Some(files) = self.root_files(cx) {
+            problems.extend(association_problems(&files, self.root.as_deref(), cx));
+        }
+        problems
     }
 
     /// The config problems list, shown by [`SHOW`].
@@ -114,8 +125,14 @@ impl Workbench {
     /// Shows the config problems list, focused, in place of any other
     /// palette, or afresh if it shows. Nothing while there are none.
     pub(crate) fn show_config_problems(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let problems = config::diagnostics(cx).to_vec();
+        let problems = self.config_problems_now(cx);
         if problems.is_empty() {
+            // A language installed since may have cleared the last, and a
+            // list showing them goes.
+            self.sync_config_status(cx);
+            if self.palette == Some(Palette::ConfigProblems) {
+                self.dismiss_palette(window, cx);
+            }
             return;
         }
         // Dismissing it would hide it again once its dismissal lands.
@@ -244,6 +261,103 @@ impl ConfigProblemsPicker {
             editor.update(cx, |editor, cx| place_caret(editor, line, column, cx));
         }
     }
+}
+
+/// A warning at each of `files`' associations, in effect for `root`
+/// ([`Workbench::root_files`]), that is ignored: its pattern
+/// isn't a glob, or its language isn't compiled in or registered now
+/// ([`fe_syntax::association_problem`]) nor on its way, an installed
+/// grammar the loader is still registering
+/// ([`crate::grammar_prompt::language_on_its_way`]). Checked when asked,
+/// and again as such a grammar registers, so it is never unknown; each
+/// file is read only to place a problem in it, at the entry's value.
+fn association_problems(
+    files: &fe_config::FilesSettings,
+    root: Option<&Path>,
+    cx: &App,
+) -> Vec<Diagnostic> {
+    let layers = [
+        (
+            root.map(fe_config::project_settings_path),
+            files.project_associations().collect::<Vec<_>>(),
+        ),
+        (
+            crate::open::settings_path(cx),
+            files.user_associations().collect(),
+        ),
+    ];
+    let mut diagnostics = Vec::new();
+    for (file, entries) in layers {
+        let problems: Vec<(&str, String)> = (entries.into_iter())
+            .filter_map(|(pattern, language)| {
+                let problem = fe_syntax::association_problem(pattern, language)?;
+                let pending = problem == fe_syntax::AssociationProblem::UnknownLanguage
+                    && crate::grammar_prompt::language_on_its_way(language, cx);
+                if pending {
+                    return None;
+                }
+                Some((pattern, association_message(pattern, language, problem)))
+            })
+            .collect();
+        if problems.is_empty() {
+            continue;
+        }
+        let file = file.unwrap_or_default();
+        let text = read_settings(&file).unwrap_or_default();
+        let layer = fe_config::parse_layer(&file, text);
+        for (pattern, message) in problems {
+            let key = ["files", "associations", pattern].map(str::to_owned);
+            diagnostics.push(layer.value_diagnostic(Severity::Warning, &key, message));
+        }
+    }
+    diagnostics
+}
+
+/// What's wrong with the association of `pattern` to `language`.
+fn association_message(
+    pattern: &str,
+    language: &str,
+    problem: fe_syntax::AssociationProblem,
+) -> String {
+    use fe_syntax::{AssociationProblem, GlobError};
+    let message = match problem {
+        AssociationProblem::UnknownLanguage => tr!(
+            "workbench-setup-association-unknown-language",
+            pattern = pattern,
+            language = language
+        ),
+        AssociationProblem::BadPattern(error) => {
+            let reason = match error {
+                GlobError::Empty => tr!("workbench-setup-association-glob-empty"),
+                GlobError::UnclosedSet => tr!("workbench-setup-association-glob-unclosed-set"),
+                GlobError::EmptySet => tr!("workbench-setup-association-glob-empty-set"),
+                GlobError::UnclosedBrace => tr!("workbench-setup-association-glob-unclosed-brace"),
+                GlobError::UnopenedBrace => tr!("workbench-setup-association-glob-unopened-brace"),
+                GlobError::TooManyAlternatives => {
+                    tr!("workbench-setup-association-glob-too-many")
+                }
+                GlobError::TooDeep => tr!("workbench-setup-association-glob-too-deep"),
+                GlobError::TooLong => tr!("workbench-setup-association-glob-too-long"),
+            };
+            tr!(
+                "workbench-setup-association-bad-glob",
+                pattern = pattern,
+                reason = reason
+            )
+        }
+    };
+    message.to_string()
+}
+
+/// The text of the settings file at `path`, up to the size kiln reads.
+fn read_settings(path: &Path) -> io::Result<String> {
+    let mut text = String::new();
+    OpenOptions::new()
+        .read(true)
+        .open(path)?
+        .take(1 << 20)
+        .read_to_string(&mut text)?;
+    Ok(text)
 }
 
 /// Puts `editor`'s caret at 1-based `line` and `column`, in chars, of its
