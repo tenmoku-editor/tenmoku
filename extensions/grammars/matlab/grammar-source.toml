@@ -1,0 +1,8 @@
+git = "https://github.com/acristoffers/tree-sitter-matlab"
+# The full 40-hex commit: main at 1.3.4.
+rev = "1bdb8cf5e73620892a199f659ceb9c06d02e4b2f"
+# The directory holding parser.c and scanner.c.
+src = "src"
+# The export tree_sitter_<grammar>, which fixes the file name
+# tree-sitter-<grammar>.wasm.
+grammar = "matlab"
