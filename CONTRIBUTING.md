@@ -8,6 +8,8 @@ Thanks for helping. Please read this first.
   crates or queries, or Vim and Neovim source. Patches that do are rejected.
 - Open an issue before starting anything non-trivial, so we can agree on the
   approach. Small fixes can go straight to a pull request.
+- If you work with a coding agent, or are one, read [AGENTS.md](AGENTS.md),
+  which says to reuse what the repo already has before writing something new.
 - Security issues: do not open a public issue. Email the maintainer at
   TODO(lead): security contact address.
 
