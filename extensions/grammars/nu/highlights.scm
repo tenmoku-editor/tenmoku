@@ -1,0 +1,432 @@
+; From tree-sitter-nu at 5a5f9c25f9c356f703a637bb3658248a29713684,
+; https://github.com/nushell/tree-sitter-nu, path queries/nu/highlights.scm,
+; license MIT (see LICENSE). Later patterns win.
+;
+; Changes: adds patterns colouring the names `mut`, `const` and `for` bind,
+; as upstream colours `let`'s. For captures fe-syntax has no colour for:
+; - `@constant.character.escape` is `@string.escape`.
+; - `@special` (`$in`, `$ans`) is `@variable.builtin`.
+; - `@none` (around a variable) and `@spell` (on doc comments) are dropped.
+; - the helper capture `@cmd` is `@_cmd`.
+; - the last three patterns (`@string.regexp` twice and `@string.code`, with
+;   their `@_cmd` and `@_flag` helpers) are dropped: they painted a string's
+;   content as the string it already is. injections.scm parses those.
+
+; ---
+; keywords
+[
+  "let"
+  "mut"
+  "const"
+  "type"
+] @keyword
+
+[
+  "if"
+  "else"
+  "match"
+] @keyword.conditional
+
+[
+  "loop"
+  "while"
+] @keyword.repeat
+
+"def" @keyword.function
+
+[
+  "try"
+  "catch"
+  "finally"
+  "error"
+] @keyword.exception
+
+[
+  "module"
+  "use"
+] @keyword.import
+
+[
+  "alias"
+  "export-env"
+  "export"
+  "extern"
+] @keyword.modifier
+
+(decl_use
+  "use" @keyword)
+
+(ctrl_for
+  "for" @keyword
+  "in" @keyword)
+
+; ---
+; literals
+(val_number) @number
+
+(val_duration
+  unit: _ @variable.parameter)
+
+(val_filesize
+  unit: _ @variable.parameter)
+
+(val_binary
+  [
+    "0b"
+    "0o"
+    "0x"
+  ] @number
+  "[" @punctuation.bracket
+  digit: [
+    "," @punctuation.delimiter
+    (hex_digit) @number
+  ]
+  "]" @punctuation.bracket) @number
+
+(val_bool) @constant.builtin
+
+(val_nothing) @constant.builtin
+
+(val_string) @string
+
+arg_str: (val_string) @variable.parameter
+
+file_path: (val_string) @variable.parameter
+
+(val_date) @number
+
+(inter_escape_sequence) @string.escape
+
+(escape_sequence) @string.escape
+
+(val_interpolated
+  [
+    "$\""
+    "$\'"
+    "\""
+    "\'"
+  ] @string)
+
+(unescaped_interpolated_content) @string
+
+(escaped_interpolated_content) @string
+
+(expr_interpolated
+  [
+    "("
+    ")"
+  ] @variable.parameter)
+
+(raw_string_begin) @punctuation.special
+
+(raw_string_end) @punctuation.special
+
+; ---
+; operators
+(expr_binary
+  opr: _ @operator)
+
+(where_predicate
+  opr: _ @operator)
+
+(assignment
+  [
+    "="
+    "+="
+    "-="
+    "*="
+    "/="
+    "++="
+  ] @operator)
+
+(expr_unary
+  [
+    "not"
+    "-"
+  ] @operator)
+
+(val_range
+  [
+    ".."
+    "..="
+    "..<"
+  ] @operator)
+
+[
+  "=>"
+  "="
+  "|"
+] @operator
+
+[
+  "o>"
+  "out>"
+  "e>"
+  "err>"
+  "e+o>"
+  "err+out>"
+  "o+e>"
+  "out+err>"
+  "o>>"
+  "out>>"
+  "e>>"
+  "err>>"
+  "e+o>>"
+  "err+out>>"
+  "o+e>>"
+  "out+err>>"
+  "e>|"
+  "err>|"
+  "e+o>|"
+  "err+out>|"
+  "o+e>|"
+  "out+err>|"
+] @operator
+
+; ---
+; punctuation
+[
+  ","
+  ";"
+] @punctuation.special
+
+(param_long_flag
+  "--" @punctuation.delimiter)
+
+(long_flag
+  "--" @punctuation.delimiter)
+
+(short_flag
+  "-" @punctuation.delimiter)
+
+(long_flag
+  "=" @punctuation.special)
+
+(short_flag
+  "=" @punctuation.special)
+
+(param_short_flag
+  "-" @punctuation.delimiter)
+
+(param_rest
+  "..." @punctuation.delimiter)
+
+(param_type
+  ":" @punctuation.special)
+
+(param_value
+  "=" @punctuation.special)
+
+(param_completer
+  "@" @punctuation.special)
+
+(attribute
+  "@" @punctuation.special)
+
+(param_opt
+  "?" @punctuation.special)
+
+(returns
+  "->" @punctuation.special)
+
+[
+  "("
+  ")"
+  "{"
+  "}"
+  "["
+  "]"
+  "...["
+  "...("
+  "...{"
+] @punctuation.bracket
+
+key: (identifier) @property
+
+; ---
+; identifiers
+(param_rest
+  name: (_) @variable.parameter)
+
+(param_opt
+  name: (_) @variable.parameter)
+
+(parameter
+  param_name: (_) @variable.parameter)
+
+(param_completer
+  (cmd_identifier) @string)
+
+(param_long_flag
+  (long_flag_identifier) @attribute)
+
+(param_short_flag
+  (param_short_flag_identifier) @attribute)
+
+(attribute
+  (attribute_identifier) @attribute)
+
+(short_flag
+  (short_flag_identifier) @attribute)
+
+(long_flag_identifier) @attribute
+
+(scope_pattern
+  (wild_card) @function)
+
+(cmd_identifier) @function
+
+; generated with Nu 0.117.0
+; help commands
+; | where $it.command_type == built-in and $it.category != core
+; | each {$'"($in.name | split row " " | $in.0)"'}
+; | uniq
+; | str join ' '
+(command
+  head: (cmd_identifier) @function.builtin
+  (#any-of? @function.builtin
+    "abbr" "all" "ansi" "any" "append" "ast" "bits" "bytes" "cal" "cd" "char" "chunk-by" "chunks"
+    "clear" "columns" "combinations" "compact" "complete" "config" "cp" "date" "debug" "decode"
+    "default" "detect" "difference" "drop" "du" "each" "encode" "enumerate" "every" "exec" "exit"
+    "explain" "explore" "fill" "find" "first" "flatten" "format" "from" "generate" "get" "glob"
+    "grid" "group-by" "hash" "headers" "histogram" "history" "http" "idx" "input" "insert" "inspect"
+    "interleave" "intersect" "into" "is-empty" "is-not-empty" "is-redirected" "is-terminal" "items"
+    "job" "join" "keybindings" "kill" "last" "length" "lines" "load-env" "ls" "math" "matrix"
+    "merge" "metadata" "mkdir" "mktemp" "move" "mv" "nu-check" "nu-highlight" "open" "panic"
+    "par-each" "parse" "path" "peek" "permutations" "plugin" "port" "prepend" "print" "ps" "query"
+    "random" "record" "reduce" "reject" "rename" "reverse" "rm" "roll" "rotate" "run-external"
+    "run-internal" "save" "schema" "select" "semver" "seq" "shuffle" "skip" "sleep" "slice" "sort"
+    "sort-by" "split" "start" "stor" "str" "sys" "table" "take" "tee" "term" "timeit" "to" "touch"
+    "transpose" "tui" "tutor" "ulimit" "umask" "uname" "union" "uniq" "uniq-by" "unlet" "update"
+    "upsert" "url" "values" "version" "view" "watch" "which" "whoami" "window" "with-env" "wrap"
+    "zip"))
+
+(command
+  head: (cmd_identifier) @keyword.repeat
+  (#any-of? @keyword.repeat "break" "continue" "return"))
+
+(command
+  head: (cmd_identifier) @keyword
+  (#any-of? @keyword "do" "source" "source-env" "hide" "hide-env" "collect" "run"))
+
+(command
+  head: (cmd_identifier) @keyword
+  .
+  arg_str: (val_string) @keyword.import
+  (#any-of? @keyword "overlay" "error"))
+
+(command
+  head: (cmd_identifier) @_cmd
+  arg_str: (val_string) @keyword
+  (#eq? @_cmd "overlay")
+  (#eq? @keyword "as"))
+
+(command
+  [
+  "^"
+  "%"
+  ] @punctuation.delimiter
+  head: (_) @function)
+
+(where_command
+  [
+    "where"
+    "any"
+    "all"
+  ] @function.builtin)
+
+(where_predicate
+  [
+    "?"
+    "!"
+  ] @punctuation.delimiter)
+
+(path
+  [
+    "."
+    "?"
+    "!"
+  ]* @punctuation.delimiter) @variable.parameter
+
+(stmt_let
+  (identifier) @variable)
+
+; Added: the names `mut`, `const` and `for` bind, as `let`'s.
+(stmt_mut
+  (identifier) @variable)
+
+(stmt_const
+  (identifier) @variable)
+
+(ctrl_for
+  (identifier) @variable)
+
+(val_variable
+  "$"? @punctuation.special
+  "...$"? @punctuation.special
+  [
+    (identifier) @variable
+    "in" @variable.builtin
+    "nu" @namespace
+    "env" @constant
+  ])
+
+(val_variable
+  name: (identifier) @variable.builtin
+  (#eq? @variable.builtin "ans"))
+
+(val_cellpath
+  "$" @punctuation.special)
+
+(record_entry
+  ":" @punctuation.special)
+
+; ---
+; types
+(flat_type) @type
+
+(decl_type
+  name: (_) @type.definition)
+
+(list_type
+  "list" @type.enum
+  [
+    "<"
+    ">"
+  ] @punctuation.bracket)
+
+(collection_type
+  [
+    "record"
+    "table"
+  ] @type.enum)
+
+(collection_type
+  key: (_) @variable.parameter)
+
+(collection_type
+  [
+    "<"
+    ">"
+  ] @punctuation.bracket)
+
+(collection_type
+  ":" @punctuation.special)
+
+(composite_type
+  "oneof" @type.enum
+  [
+    "<"
+    ">"
+  ] @punctuation.bracket)
+
+(shebang) @keyword.directive
+
+(comment) @comment
+
+((comment)+ @comment.documentation
+  .
+  (decl_def))
+
+(parameter
+  (comment) @comment.documentation)

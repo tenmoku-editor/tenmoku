@@ -1,0 +1,17 @@
+id = "tenmoku.grammar_nu"
+name = "Nushell syntax"
+version = "0.0.1"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "nu"
+wasm = "tree-sitter-nu.wasm"
+extensions = ["nu"]
+line_comment = "#"
+shebangs = ["nu"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false

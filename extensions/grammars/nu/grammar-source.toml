@@ -1,0 +1,4 @@
+git = "https://github.com/nushell/tree-sitter-nu"
+rev = "5a5f9c25f9c356f703a637bb3658248a29713684"
+src = "src"
+grammar = "nu"
