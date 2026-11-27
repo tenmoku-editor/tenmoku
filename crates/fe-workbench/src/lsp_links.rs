@@ -8,6 +8,12 @@
 //! current version; until one lands the old links stay, following the
 //! edits. `editor.links` off clears them and asks for nothing.
 //!
+//! A buffer's links are merged across the servers it's on, in fe-lsp, and
+//! each resolves through the server that sent it. A server handed a
+//! notification ([`fe_lsp::LspEvent::Notified`]), or whose poll comes due
+//! ([`fe_lsp::LspManager::repoll_due`]), is asked again, the links shown
+//! kept until the answer; an answer equal to the last changes nothing.
+//!
 //! Opening a link (`editor.open_link` at the caret, or
 //! `nav.goto_definition`, which a cmd-click runs, over a link): one without
 //! a target is resolved first. A `file:` target opens in an editor tab, at
@@ -15,7 +21,13 @@
 //! (1-based); `http`, `https` and `mailto` go to the system's opener; any
 //! other scheme is refused with a toast.
 
-use std::{borrow::Cow, collections::HashMap, ops::Range, path::PathBuf, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    ops::Range,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use fe_buffer::{Anchor, BufferId, PointUtf16, Version};
 use fe_command::Source;
@@ -27,6 +39,7 @@ use gpui::{
 };
 use kiln_l10n::{tr, verbatim};
 
+use super::{InFlight, Reask};
 use crate::{
     Workbench,
     pane::{Pane, Reveal},
@@ -40,8 +53,8 @@ const REST: Duration = Duration::from_millis(500);
 /// How many times a request is retried on the server's asking.
 const RETRIES: u32 = 8;
 
-/// The opening of a document a server has: its session and incarnation.
-type Identity = (SessionId, IncarnationId);
+/// A server the buffer is on, and the opening of the document it has.
+type Served = (ServerId, SessionId, IncarnationId);
 
 /// What a request answers.
 type Answer = Result<Option<Vec<DocumentLink>>, LspError>;
@@ -49,20 +62,24 @@ type Answer = Result<Option<Vec<DocumentLink>>, LspError>;
 struct Slot {
     /// The editors given the links.
     editors: HashMap<EntityId, Entity<EditorView>>,
-    /// The server the buffer is on while links are wanted.
-    server: Option<ServerId>,
-    /// The opening the server had when links were last asked for. A new
-    /// one (a restarted server, a document reopened) retires the links of
-    /// the old, whose `data` only it can resolve.
-    identity: Option<Identity>,
+    /// The servers the buffer is on while links are wanted, each with the
+    /// opening it had when links were last asked for. A new opening of one
+    /// (a restarted server, a document reopened), or a server left,
+    /// retires the links of the old, whose `data` only it can resolve; a
+    /// server joining asks again.
+    asked_of: Vec<Served>,
     /// The version last seen, to ask again when it changes.
     key: Option<Version>,
     /// The version of the latest request.
     asked: Option<Version>,
-    /// The server that said it has no provider.
-    no_provider: Option<ServerId>,
+    /// The servers that answered that none of them provides links.
+    no_provider: Option<Vec<Served>>,
     /// The wait, then the request.
     task: Option<Task<()>>,
+    /// Whether `task` is still waiting or asking.
+    in_flight: InFlight,
+    /// The latest poll of each server the slot has seen.
+    polled: HashMap<ServerId, Instant>,
     /// The links, anchored at `found`, the version they were found at.
     links: Vec<(Range<Anchor>, DocumentLink)>,
     found: Option<Version>,
@@ -72,12 +89,13 @@ impl Slot {
     fn new() -> Self {
         Self {
             editors: HashMap::new(),
-            server: None,
-            identity: None,
+            asked_of: Vec::new(),
             key: None,
             asked: None,
             no_provider: None,
             task: None,
+            in_flight: InFlight::default(),
+            polled: HashMap::new(),
             links: Vec::new(),
             found: None,
         }
@@ -179,27 +197,28 @@ impl Workbench {
             self.drop_links(buffer, cx);
         }
         for (buffer, (version, editors)) in wanted {
-            let server = (self.lsp.manager.as_ref())
-                .and_then(|manager| super::lock(manager).server_of(buffer))
-                .filter(|_| on);
-            let Some(server) = server else {
+            let served = (self.lsp.manager.as_ref())
+                .filter(|_| on)
+                .map(|manager| super::lock(manager))
+                .filter(|manager| manager.is_served(buffer))
+                .map(|manager| manager.served_identities(buffer));
+            let Some(served) = served else {
                 self.drop_links(buffer, cx);
                 continue;
             };
-            let identity = (self.lsp.manager.as_ref())
-                .and_then(|manager| super::lock(manager).active_identity(buffer, server));
-            // Nothing is asked of a document the server hasn't been told of;
+            // Nothing is asked of a document no server has been told of;
             // the next draw looks again once it activates.
-            if identity.is_none() {
+            if served.is_empty() {
                 continue;
             }
             let slot = self.lsp.links.slots.entry(buffer).or_insert_with(Slot::new);
-            if slot.server != Some(server) || slot.identity != identity {
-                // Another server's, or opening's, links aren't this one's.
-                let moved = slot.server.is_some_and(|was| was != server)
-                    || (slot.identity.is_some() && slot.identity != identity);
-                slot.server = Some(server);
-                slot.identity = identity;
+            if slot.asked_of != served {
+                // A server's links leave with it, or with its opening; a
+                // server joining only asks again.
+                let moved = slot.asked_of.iter().any(|was| !served.contains(was));
+                slot.polled
+                    .retain(|was, _| served.iter().any(|(server, ..)| server == was));
+                slot.asked_of = served;
                 slot.key = None;
                 slot.no_provider = None;
                 if moved {
@@ -225,7 +244,7 @@ impl Workbench {
                     .collect();
                 give_links(editor, ranges, cx);
             }
-            if slot.no_provider == Some(server) || slot.key == Some(version) {
+            if slot.no_provider.as_ref() == Some(&slot.asked_of) || slot.key == Some(version) {
                 continue;
             }
             // The first ask goes at once; later ones wait for the text to
@@ -234,6 +253,63 @@ impl Workbench {
             slot.key = Some(version);
             let delay = if first { Duration::ZERO } else { REST };
             self.ask_links_in(buffer, delay, 0, cx);
+        }
+    }
+
+    /// The buffers whose links are asked of `server`.
+    fn link_slots_of(&self, server: ServerId) -> Vec<BufferId> {
+        (self.lsp.links.slots.iter())
+            .filter(|(_, slot)| slot.asked_of.iter().any(|(of, ..)| *of == server))
+            .map(|(buffer, _)| *buffer)
+            .collect()
+    }
+
+    /// Asks the links of every buffer on `server` again, keeping those
+    /// shown, for `why` (see [`Reask`]).
+    pub(super) fn reask_links_of(&mut self, server: ServerId, why: Reask, cx: &mut Context<Self>) {
+        for buffer in self.link_slots_of(server) {
+            self.reask_links(buffer, why, cx);
+        }
+    }
+
+    /// Asks `buffer`'s links again for `why`, if it has asked before: a
+    /// poll only while no request of its own is in flight.
+    fn reask_links(&mut self, buffer: BufferId, why: Reask, cx: &mut Context<Self>) {
+        let Some(slot) = self.lsp.links.slots.get(&buffer) else {
+            return;
+        };
+        if slot.key.is_none() || slot.no_provider.as_ref() == Some(&slot.asked_of) {
+            return;
+        }
+        match why {
+            Reask::Notified(rest) => self.ask_links_in(buffer, rest, 0, cx),
+            Reask::Poll if !slot.in_flight.busy() => {
+                self.ask_links_in(buffer, Duration::ZERO, 0, cx)
+            }
+            Reask::Poll => {}
+        }
+    }
+
+    /// Asks again each buffer's links of a server whose poll in `dues`
+    /// came since the buffer last saw one.
+    pub(super) fn repoll_links(
+        &mut self,
+        dues: &HashMap<ServerId, Instant>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut due = Vec::new();
+        for (buffer, slot) in &mut self.lsp.links.slots {
+            let servers: Vec<ServerId> = slot.asked_of.iter().map(|(server, ..)| *server).collect();
+            let mut came = false;
+            for server in servers {
+                came |= super::poll_came(&mut slot.polled, server, dues);
+            }
+            if came {
+                due.push(*buffer);
+            }
+        }
+        for buffer in due {
+            self.reask_links(buffer, Reask::Poll, cx);
         }
     }
 
@@ -256,11 +332,16 @@ impl Workbench {
         attempt: u32,
         cx: &mut Context<Self>,
     ) {
+        let Some(asking) = (self.lsp.links.slots.get(&buffer)).map(|slot| slot.in_flight.asking())
+        else {
+            return;
+        };
         let task = cx.spawn(async move |workbench, cx| {
+            let _asking = asking;
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            let Ok(Some((version, identity, reply))) =
+            let Ok(Some((version, asked_of, reply))) =
                 workbench.update(cx, |workbench, cx| workbench.send_links(buffer, cx))
             else {
                 return;
@@ -268,7 +349,7 @@ impl Workbench {
             let answer = reply.await;
             workbench
                 .update(cx, |workbench, cx| {
-                    workbench.links_landed(buffer, version, identity, attempt, answer, cx)
+                    workbench.links_landed(buffer, version, &asked_of, attempt, answer, cx)
                 })
                 .ok();
         });
@@ -285,7 +366,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> Option<(
         Version,
-        Option<Identity>,
+        Vec<Served>,
         std::pin::Pin<Box<dyn std::future::Future<Output = Answer> + Send>>,
     )> {
         let manager = self.lsp.manager.clone()?;
@@ -294,19 +375,19 @@ impl Workbench {
         let version = editor.read(cx).model().snapshot().version();
         slot.asked = Some(version);
         let reply = super::lock(&manager).document_links(buffer, version);
-        Some((version, slot.identity, Box::pin(reply)))
+        Some((version, slot.asked_of.clone(), Box::pin(reply)))
     }
 
     /// Hands `answer`, the reply to the request for `buffer` at `version`,
-    /// made on the opening `identity`, to its editors, if it is still the
-    /// latest, the server still has that opening, and the text hasn't
+    /// made on the openings `asked_of`, to its editors, if it is still the
+    /// latest, the servers still have those openings, and the text hasn't
     /// moved on. A server's asking for a retry is asked again, as the
     /// `attempt`th retry, after [`REST`], up to [`RETRIES`] times.
     fn links_landed(
         &mut self,
         buffer: BufferId,
         version: Version,
-        identity: Option<Identity>,
+        asked_of: &[Served],
         attempt: u32,
         answer: Answer,
         cx: &mut Context<Self>,
@@ -314,13 +395,13 @@ impl Workbench {
         if !self.lsp.links_on.get() {
             return;
         }
+        let current = (self.lsp.manager.as_ref())
+            .map(|manager| super::lock(manager).served_identities(buffer))
+            .unwrap_or_default();
         let Some(slot) = self.lsp.links.slots.get_mut(&buffer) else {
             return;
         };
-        let current = (self.lsp.manager.as_ref())
-            .zip(slot.server)
-            .and_then(|(manager, server)| super::lock(manager).active_identity(buffer, server));
-        if slot.asked != Some(version) || identity.is_none() || identity != current {
+        if slot.asked != Some(version) || asked_of.is_empty() || asked_of != current {
             return;
         }
         let snapshot =
@@ -331,7 +412,7 @@ impl Workbench {
         let links = match answer {
             Ok(Some(links)) => links,
             Ok(None) => {
-                slot.no_provider = slot.server;
+                slot.no_provider = Some(asked_of.to_vec());
                 Vec::new()
             }
             Err(LspError::Retry) => {
@@ -342,6 +423,14 @@ impl Workbench {
             }
             Err(error) => return log::debug!("no document links: {error}"),
         };
+        // Asked again with nothing changed (a poll, say): nothing to give
+        // the editors anew.
+        let same = slot.found == Some(version)
+            && slot.links.len() == links.len()
+            && (slot.links.iter().zip(&links)).all(|((_, shown), link)| shown == link);
+        if same {
+            return;
+        }
         let ranges: Vec<Range<usize>> = links.iter().map(|link| link.range.clone()).collect();
         // Text typed at a link's edge stays outside it.
         slot.links = (links.into_iter())

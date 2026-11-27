@@ -875,7 +875,7 @@ impl Workbench {
         let manager = self
             .lsp
             .manager()
-            .filter(|manager| lock(manager).server_of(buffer).is_some());
+            .filter(|manager| lock(manager).is_served(buffer));
         let Some(manager) = manager else {
             toast::show(cx, Toast::info(tr!("workbench-lsp-no-server")));
             return;

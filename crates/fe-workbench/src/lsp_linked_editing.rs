@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use fe_buffer::Version;
 use fe_gpui::EditorView;
-use fe_lsp::LinkedEditing;
+use fe_lsp::{Feature, LinkedEditing};
 use gpui::{App, Context, Entity, EntityId, Task};
 
 use crate::Workbench;
@@ -48,8 +48,10 @@ impl Workbench {
     /// is the only selection, and is outside any range already linked.
     fn linked_wanted(&self, editor: &Entity<EditorView>, cx: &App) -> Option<Wanted> {
         let model = editor.read(cx).model();
-        // Only a buffer on a server is asked about.
-        super::lock(self.lsp.manager.as_ref()?).server_of(model.buffer().id())?;
+        // Only a buffer with a provider (§5: linked ranges come from one
+        // server) is asked about.
+        super::lock(self.lsp.manager.as_ref()?)
+            .provider_of(model.buffer().id(), Feature::LinkedEditing)?;
         if model.selections().len() != 1 {
             return None;
         }
@@ -89,8 +91,9 @@ impl Workbench {
         }
         let served = |editor: &Entity<EditorView>| {
             let buffer = editor.read(cx).model().buffer().id();
-            (self.lsp.manager.as_ref())
-                .is_some_and(|manager| super::lock(manager).server_of(buffer).is_some())
+            (self.lsp.manager.as_ref()).is_some_and(|manager| {
+                (super::lock(manager).provider_of(buffer, Feature::LinkedEditing)).is_some()
+            })
         };
         let stopped = (self.lsp.linked.linked_on.as_ref()).is_some_and(|editor| !served(editor));
         if stopped || self.lsp.linked.linked_on != active {

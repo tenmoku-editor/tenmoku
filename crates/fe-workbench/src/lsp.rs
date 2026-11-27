@@ -135,7 +135,8 @@ use fe_editor::{
 };
 use fe_lsp::{
     FileDiagnostic, KillSwitch, LOGIN_SHELL_TIMEOUT, LocalLauncher, LspEvent, LspManager,
-    LspNavigation, PositionEncoding, PythonEnv, ServerId, ServerLauncher, ServerSpec, ServerStatus,
+    LspNavigation, PositionEncoding, PythonEnv, RouteServer, ServerId, ServerLauncher, ServerSpec,
+    ServerStatus,
 };
 use gpui::{App, AppContext as _, Context, Global, Subscription, Task, WeakEntity, Window};
 
@@ -641,6 +642,10 @@ pub(crate) struct Lsp {
     _root: Option<Task<()>>,
     /// The code actions being asked for.
     pub(crate) code_actioning: Option<Task<()>>,
+    /// The manager's clock, which servers' polls are due on.
+    clock: Arc<dyn fe_lsp::Clock>,
+    /// Wakes to look for polls due while a server of the manager polls.
+    repoll_tick: Option<Task<()>>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -678,6 +683,26 @@ pub(crate) fn routed_language(view: &fe_gpui::EditorView) -> Option<Cow<'static,
     Some(Cow::Owned(extension.to_ascii_lowercase()))
 }
 
+/// `route`, a document's configured servers as last seen, brought up to
+/// `now`'s: each server keeps the instance it last went to while it has
+/// none now (it stopped, or its document waits), so that statuses and
+/// diagnostics can still be matched; one never placed has its entry by
+/// name and root alone. With no servers now (`[lsp]` turned off, say),
+/// the last are kept, stopped, as they were.
+fn refresh_route(route: &mut Vec<RouteServer>, mut now: Vec<RouteServer>) {
+    if now.is_empty() {
+        return;
+    }
+    for server in &mut now {
+        if server.placed.is_none() {
+            server.placed = (route.iter())
+                .find(|was| was.name == server.name && was.root == server.root)
+                .and_then(|was| was.placed);
+        }
+    }
+    *route = now;
+}
+
 /// A buffer opened on the manager.
 struct Document {
     /// Its file, resolved.
@@ -686,8 +711,10 @@ struct Document {
     server_name: Option<String>,
     /// fe-syntax's name for it, or its extension: see [`routed_language`].
     language: Cow<'static, str>,
-    /// The server it went to, kept after the server stops.
-    server: Option<ServerId>,
+    /// Its configured servers, the lead first, placed or not, then its
+    /// add-ons ([`LspManager::route_servers`]), each by name and root with
+    /// the instance it went to, kept after that server stops.
+    route: Vec<RouteServer>,
     /// The folder its server runs in, or would: the window root for a file
     /// under it, else the file's marker root.
     root: Option<PathBuf>,
@@ -697,8 +724,8 @@ struct Document {
 
 impl Lsp {
     /// Whether owners are the documents the manager serves: each served
-    /// document owns its path on its server, and one parked owns it only
-    /// where none is served.
+    /// document (placed on any server of its route) owns its path for its
+    /// lead, and one parked owns it only where none is served.
     #[cfg(test)]
     pub(crate) fn owners_match_manager(&self) -> bool {
         let Some(manager) = &self.manager else {
@@ -706,16 +733,16 @@ impl Lsp {
         };
         let manager = lock(manager);
         let served = self.documents.iter().all(|(&buffer, document)| {
-            manager.server_of(buffer).is_none()
+            !manager.is_served(buffer)
                 || self
                     .owners
                     .get(&(manager.route_of(buffer), document.path.clone()))
                     == Some(&buffer)
         });
         let parked = self.owners.iter().all(|(route, &buffer)| {
-            manager.server_of(buffer).is_some()
+            manager.is_served(buffer)
                 || !self.documents.iter().any(|(&other, document)| {
-                    manager.server_of(other).is_some()
+                    manager.is_served(other)
                         && (manager.route_of(other), document.path.clone()) == *route
                 })
         });
@@ -835,6 +862,8 @@ impl Lsp {
             root_save_pending: false,
             _root: None,
             code_actioning: None,
+            clock: Arc::new(fe_lsp::SystemClock),
+            repoll_tick: None,
             _tasks: Vec::new(),
             _subscriptions: Vec::new(),
         }
@@ -852,9 +881,25 @@ impl Lsp {
         lock(self.manager.as_ref()?).python_env(server)
     }
 
-    /// The active editor's server's name and status, if it has one.
+    /// `buffer`'s configured servers, the lead first, placed or not, then
+    /// its add-ons: none for a buffer not opened on the manager.
+    pub(crate) fn route(&self, buffer: BufferId) -> &[RouteServer] {
+        self.documents
+            .get(&buffer)
+            .map_or(&[], |document| document.route.as_slice())
+    }
+
+    /// `buffer`'s lead by configured identity: the first of its
+    /// [`route`](Self::route), whether it's placed or not, never the first
+    /// server it's placed on.
+    pub(crate) fn lead(&self, buffer: BufferId) -> Option<&RouteServer> {
+        self.route(buffer).first()
+    }
+
+    /// The active editor's lead's instance, name and status, if it went to
+    /// one.
     fn server(&self, buffer: Option<BufferId>) -> Option<(ServerId, &str, &ServerStatus)> {
-        let server = self.documents.get(&buffer?)?.server?;
+        let server = self.lead(buffer?)?.placed?;
         let (name, status) = self.servers.get(&server)?;
         Some((server, name, status))
     }
@@ -1278,10 +1323,20 @@ impl Workbench {
         };
         #[cfg(not(test))]
         let mut manager = LspManager::new(launcher, sink);
+        #[cfg(not(test))]
+        {
+            lsp.clock = Arc::new(fe_lsp::SystemClock);
+        }
         #[cfg(test)]
         let mut manager = match cx.try_global::<TestClock>() {
-            Some(clock) => LspManager::with_clock(launcher, clock.0.clone(), sink),
-            None => LspManager::new(launcher, sink),
+            Some(clock) => {
+                lsp.clock = clock.0.clone();
+                LspManager::with_clock(launcher, clock.0.clone(), sink)
+            }
+            None => {
+                lsp.clock = Arc::new(fe_lsp::SystemClock);
+                LspManager::new(launcher, sink)
+            }
         };
         manager.set_extension_specs(extension_servers(cx));
         manager.update_settings(&lsp.settings);
@@ -1574,6 +1629,7 @@ impl Workbench {
         self.sync_symbols(cx);
         self.sync_folds(cx);
         self.sync_semantic_tokens(cx);
+        self.repoll_cached(cx);
         self.sync_markdown_renderers(cx);
         self.sweep_debug_hover(&editors, cx);
         self.lsp.hover.ignore.sync(&editors, cx);
@@ -1658,14 +1714,16 @@ impl Workbench {
         // move them on the manager by themselves: owners are taken anew
         // from where the manager has each document, those it serves first,
         // then those parked (by a document of the URI there, or a root not
-        // trusted) where none is served.
+        // trusted) where none is served. Placed on any server of its route
+        // is served: with the lead down and an add-on placed, the holder
+        // still owns its path.
         for (&buffer, document) in documents.iter_mut() {
             document.server_name = manager.route_of(buffer);
         }
         owners.clear();
         for served in [true, false] {
             for (&buffer, document) in documents.iter() {
-                if manager.server_of(buffer).is_some() == served {
+                if manager.is_served(buffer) == served {
                     owners
                         .entry((document.server_name.clone(), document.path.clone()))
                         .or_insert(buffer);
@@ -1775,10 +1833,9 @@ impl Workbench {
             // close first.
             lock(&lsp.asked).take();
             let opened = manager.open(root, buffer, text, version, synced, &path, &language);
-            let server = opened.unwrap_or_else(|error| {
+            if let Err(error) = opened {
                 log::warn!("{}: {error}", path.display());
-                None
-            });
+            }
             let server_root = lock(&lsp.asked).take();
             owners.insert(route, buffer);
             documents.insert(
@@ -1787,7 +1844,7 @@ impl Workbench {
                     path,
                     server_name,
                     language,
-                    server,
+                    route: manager.route_servers(buffer),
                     root: server_root,
                     moved,
                 },
@@ -1857,9 +1914,7 @@ impl Workbench {
             if !document.moved.drain().is_empty() {
                 manager.changed(buffer);
             }
-            if let Some(server) = manager.server_of(buffer) {
-                document.server = Some(server);
-            }
+            refresh_route(&mut document.route, manager.route_servers(buffer));
         }
         if handed_over {
             cx.notify();
@@ -2148,12 +2203,18 @@ impl Workbench {
                 server,
                 what: fe_lsp::Refresh::SemanticTokens,
             } => self.refresh_semantic_tokens(server, cx),
+            // Its answers may change once it has read what it was handed:
+            // its part of what the shown buffers cache is asked again, what
+            // they show kept meanwhile (§5, asking again).
+            LspEvent::Notified { server, .. } => self.reask_cached_of(server, NOTIFIED_REST, cx),
             _ => {}
         }
     }
 
     /// Asks what renaming at `offset` of `buffer` at `version` would
-    /// rename: `None` if there's no manager or no server for `buffer`.
+    /// rename: `None` if there's no manager or `buffer` is on no server.
+    /// Every server of `buffer` that renames is asked, and the first in
+    /// server order to accept owns the rename (its target's `owner`).
     pub(crate) fn lsp_prepare_rename(
         &self,
         buffer: BufferId,
@@ -2161,22 +2222,42 @@ impl Workbench {
         offset: usize,
     ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = RenameAnswer> + Send>>> {
         let manager = lock(self.lsp.manager.as_ref()?);
-        manager.server_of(buffer)?;
+        if !manager.is_served(buffer) {
+            return None;
+        }
         Some(Box::pin(manager.prepare_rename(buffer, version, offset)))
     }
 
-    /// Asks for the edits renaming at `offset` of `buffer` at `version` to
-    /// `new_name`, as [`Self::lsp_prepare_rename`] does.
+    /// Asks for the edits renaming `target`, prepared at `offset` of
+    /// `buffer` at `version`, to `new_name`, as
+    /// [`Self::lsp_prepare_rename`] does: of `target`'s owner alone, and
+    /// only while its session has the document open as it had it then;
+    /// otherwise nothing is sent, and the answer is that it restarted.
     pub(crate) fn lsp_rename(
         &self,
         buffer: BufferId,
         version: Version,
+        target: &fe_lsp::rename::RenameTarget,
         offset: usize,
         new_name: String,
     ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = RenameEdits> + Send>>> {
         let manager = lock(self.lsp.manager.as_ref()?);
-        manager.server_of(buffer)?;
-        Some(Box::pin(manager.rename(buffer, version, offset, new_name)))
+        if !manager.is_served(buffer) {
+            return None;
+        }
+        Some(Box::pin(
+            manager.rename_prepared(buffer, version, target, offset, new_name),
+        ))
+    }
+
+    /// The opening of `owner`'s document its server has now: another than
+    /// the one a rename was prepared on means it restarted, or reopened the
+    /// document, since.
+    pub(crate) fn lsp_owner_opening(
+        &self,
+        owner: &fe_lsp::Owner,
+    ) -> Option<(fe_lsp::SessionId, fe_lsp::IncarnationId)> {
+        lock(self.lsp.manager.as_ref()?).active_identity(owner.buffer, owner.server)
     }
 
     /// The open editors showing `buffer`.
@@ -2214,11 +2295,13 @@ impl Workbench {
         self.show_lsp_status(cx);
     }
 
-    /// The code actions client of the server `buffer` is open on, if it
-    /// has one.
+    /// The code actions client of the servers `buffer` is open on, if it's
+    /// on any: their actions are merged in fe-lsp.
     pub(crate) fn lsp_code_actioner(&self, buffer: BufferId) -> Option<CodeActioner> {
         let manager = self.lsp.manager.as_ref()?;
-        lock(manager).server_of(buffer)?;
+        if !lock(manager).is_served(buffer) {
+            return None;
+        }
         Some(CodeActioner(manager.clone()))
     }
 
@@ -2380,9 +2463,10 @@ impl Workbench {
                 // Until its own status comes.
                 lsp.servers
                     .insert(restarted, (name.clone(), ServerStatus::Starting));
-                for document in lsp.documents.values_mut() {
-                    if document.server == Some(server) {
-                        document.server = Some(restarted);
+                let documents = lsp.documents.values_mut();
+                for entry in documents.flat_map(|document| &mut document.route) {
+                    if entry.placed == Some(server) {
+                        entry.placed = Some(restarted);
                     }
                 }
             }
@@ -2409,6 +2493,125 @@ impl Workbench {
             retiring.push(watch);
         }
     }
+}
+
+/// How long after a server was handed a notification
+/// ([`LspEvent::Notified`]) its part of the shown buffers' hints, lenses and
+/// links is asked again: time for it to read what it was handed.
+const NOTIFIED_REST: Duration = Duration::from_millis(250);
+
+/// How often the workbench looks for a server's poll come due
+/// ([`LspManager::repoll_due`]) while one of its servers polls.
+const REPOLL_TICK: Duration = Duration::from_millis(250);
+
+/// Far enough ahead that a server that polls at all has a poll due by
+/// then.
+const REPOLL_HORIZON: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether a slot's request (its wait, then the request) is in flight:
+/// while any [`Asking`] it handed out is held, by the task that asks.
+#[derive(Clone, Default)]
+pub(crate) struct InFlight(Rc<std::cell::Cell<usize>>);
+
+impl InFlight {
+    /// Held by the task that asks, until it's done or dropped.
+    pub(crate) fn asking(&self) -> Asking {
+        self.0.set(self.0.get() + 1);
+        Asking(self.0.clone())
+    }
+
+    pub(crate) fn busy(&self) -> bool {
+        self.0.get() > 0
+    }
+}
+
+/// A request in flight, until dropped.
+pub(crate) struct Asking(Rc<std::cell::Cell<usize>>);
+
+impl Drop for Asking {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
+}
+
+/// Why a slot's cached answer is asked again of a server, with no edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reask {
+    /// It was handed a notification, `NOTIFIED_REST` ago by the time the
+    /// ask is sent.
+    Notified(Duration),
+    /// A poll of it came due: asked at once, unless the slot has a request
+    /// of its own in flight.
+    Poll,
+}
+
+impl Workbench {
+    /// Asks `server`'s part of what the shown buffers cache (inlay hints,
+    /// lenses, links) again after `rest`, without clearing what they show:
+    /// for [`LspEvent::Notified`].
+    fn reask_cached_of(&mut self, server: ServerId, rest: Duration, cx: &mut Context<Self>) {
+        let why = Reask::Notified(rest);
+        self.reask_inlay_hints_of(server, why, cx);
+        self.reask_lenses_of(server, why, cx);
+        self.reask_links_of(server, why, cx);
+    }
+
+    /// Asks the shown buffers' hints, lenses and links again of each server
+    /// whose poll came due since each slot last looked
+    /// ([`LspManager::repoll_due`], on the manager's clock), and keeps a
+    /// tick going to look again while any server of the manager polls.
+    pub(crate) fn repoll_cached(&mut self, cx: &mut Context<Self>) {
+        let Some(manager) = self.lsp.manager.clone() else {
+            self.lsp.repoll_tick = None;
+            return;
+        };
+        let now = self.lsp.clock.now();
+        let (dues, polls) = {
+            let manager = lock(&manager);
+            let mut dues = HashMap::new();
+            let mut polls = false;
+            for &server in self.lsp.servers.keys() {
+                if let Some(due) = manager.repoll_due(server, now) {
+                    dues.insert(server, due);
+                }
+                polls |= (now.checked_add(REPOLL_HORIZON))
+                    .is_some_and(|later| manager.repoll_due(server, later).is_some());
+            }
+            (dues, polls)
+        };
+        self.repoll_inlay_hints(&dues, cx);
+        self.repoll_lenses(&dues, cx);
+        self.repoll_links(&dues, cx);
+        if !polls {
+            self.lsp.repoll_tick = None;
+        } else if self.lsp.repoll_tick.is_none() {
+            self.lsp.repoll_tick = Some(cx.spawn(async move |workbench, cx| {
+                loop {
+                    cx.background_executor().timer(REPOLL_TICK).await;
+                    let ticked = workbench.update(cx, |workbench, cx| {
+                        workbench.repoll_cached(cx);
+                        workbench.lsp.repoll_tick.is_some()
+                    });
+                    if !matches!(ticked, Ok(true)) {
+                        return;
+                    }
+                }
+            }));
+        }
+    }
+}
+
+/// Whether a slot that last saw `server`'s poll at `seen` sees a newer
+/// one in `dues`, recording it: a slot asks again once per poll.
+pub(crate) fn poll_came(
+    seen: &mut HashMap<ServerId, Instant>,
+    server: ServerId,
+    dues: &HashMap<ServerId, Instant>,
+) -> bool {
+    let Some(&due) = dues.get(&server) else {
+        return false;
+    };
+    seen.insert(server, due) != Some(due)
 }
 
 /// A buffer's server's code actions, through the workbench's manager.
@@ -2925,15 +3128,13 @@ impl Workbench {
         self.lsp.manager.as_ref().map(|_| self.lsp.local)
     }
 
-    /// The server the active editor's buffer went to, if it was opened on
-    /// the manager.
+    /// The instance the active editor's buffer's lead went to, if it was
+    /// opened on the manager.
     pub(crate) fn lsp_active_server(&self, cx: &App) -> Option<Option<ServerId>> {
         let editor = self.active_editor(cx)?;
         let buffer = editor.read(cx).model().buffer().id();
-        self.lsp
-            .documents
-            .get(&buffer)
-            .map(|document| document.server)
+        let document = self.lsp.documents.get(&buffer)?;
+        Some(document.route.first().and_then(|lead| lead.placed))
     }
 
     /// How many `Diagnostics` events the managers' sinks have sent.

@@ -1,14 +1,14 @@
 //! The lightbulb by the caret's row, as VS Code shows it: once the active
-//! editor's caret (or selection) has rested [`REST`] on a buffer whose
-//! server provides code actions, the server is asked for the actions there
-//! (`triggerKind` automatic, no kind named), and the gutter shows a
-//! lightbulb on the caret's row if any enabled action other than a
-//! `source` one comes back: the blue one when one is a preferred quick
-//! fix. A click on it runs Quick Fix (`lsp.code_actions`).
+//! editor's caret (or selection) has rested [`REST`] on a buffer one of
+//! whose servers provides code actions, they're asked for the actions there
+//! (merged in fe-lsp), with `triggerKind` automatic and no kind named, and
+//! the gutter shows a lightbulb on the caret's row if any enabled action
+//! other than a `source` one comes back: the blue one when one is a
+//! preferred quick fix. A click on it runs Quick Fix (`lsp.code_actions`).
 //!
 //! Moving or editing hides it at once and restarts the wait, and an answer
 //! for an old selection or version is dropped. Another editor becoming
-//! active, `editor.lightbulb` turning off, or the buffer leaving its server
+//! active, `editor.lightbulb` turning off, or the buffer leaving its servers
 //! clears the glyph and the pending request.
 
 use std::{ops::Range, rc::Rc, time::Duration};
@@ -33,8 +33,9 @@ type Click = Rc<dyn Fn(&mut Window, &mut App)>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Wanted {
     editor: EntityId,
-    /// The server the buffer is on: another one asks again.
-    server: fe_lsp::ServerId,
+    /// The servers the buffer is on that provide code actions: another set
+    /// asks again.
+    servers: Vec<fe_lsp::ServerId>,
     version: Version,
     range: Range<usize>,
     /// The end of the selection the caret is at: its row gets the glyph.
@@ -92,17 +93,22 @@ impl Workbench {
         let model = editor.read(cx).model();
         let buffer = model.buffer();
         let manager = super::lock(self.lsp.manager.as_ref()?);
-        let server = manager.server_of(buffer.id())?;
-        // `Simple(false)` says there is none. (`lsp_types` isn't this
-        // crate's dependency to name the variants with.)
-        let provider = manager.capabilities(server)?.code_action_provider?;
-        if format!("{provider:?}") == "Simple(false)" {
+        let servers: Vec<_> = (manager.servers_of(buffer.id()).into_iter())
+            .filter(|&server| {
+                // `Simple(false)` says there is none. (`lsp_types` isn't
+                // this crate's dependency to name the variants with.)
+                (manager.capabilities(server))
+                    .and_then(|capabilities| capabilities.code_action_provider)
+                    .is_some_and(|provider| format!("{provider:?}") != "Simple(false)")
+            })
+            .collect();
+        if servers.is_empty() {
             return None;
         }
         let selection = model.primary_selection();
         Some(Wanted {
             editor: editor.entity_id(),
-            server,
+            servers,
             version: buffer.version(),
             head: selection.head(),
             range: selection.range,

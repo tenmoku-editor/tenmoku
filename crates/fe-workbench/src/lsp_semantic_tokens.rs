@@ -15,7 +15,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Duration
 use fe_buffer::{BufferId, Version};
 use fe_editor::decorations::{Decoration, DecorationKind, DecorationSet, ProviderId, Tint};
 use fe_gpui::EditorView;
-use fe_lsp::{LspError, SemanticTokens, ServerId};
+use fe_lsp::{Feature, LspError, SemanticTokens, ServerId};
 use gpui::{App, Context, Entity, EntityId, Task};
 
 use crate::Workbench;
@@ -166,7 +166,10 @@ impl Workbench {
         if on && let Some(manager) = self.lsp.manager.clone() {
             for editor in self.open_editors(cx) {
                 let buffer = editor.read(cx).model().buffer().id();
-                let Some(server) = super::lock(&manager).server_of(buffer) else {
+                // The provider (§5): one server's tokens, whose legend they're
+                // in. A change of provider retires the old one's.
+                let provider = super::lock(&manager).provider_of(buffer, Feature::SemanticTokens);
+                let Some(server) = provider else {
                     continue;
                 };
                 wanted

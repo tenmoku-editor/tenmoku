@@ -7,6 +7,12 @@
 //! - **Name.** A [`RenamePicker`] shows as [`Palette::Rename`], its input
 //!   holding the current name as if all selected: the first edit replaces
 //!   it. Its one row, `Rename to <name>`, shows while the name is new.
+//! - **Owner.** Preparation asks every server of the buffer that renames,
+//!   and the first in server order to accept owns the rename: the target's
+//!   `owner`, which the picker keeps. Confirming asks it alone, an add-on
+//!   too, never the lead or another server in its place. If it restarted,
+//!   or reopened the document, since, nothing is asked of anyone and
+//!   nothing renamed: the picker closes with a toast saying so.
 //! - **Rename.** Confirming asks for the edits at the version the picker
 //!   opened on, then applies them ([`Workbench::apply_file_edits`]), or,
 //!   if they reach past the file, previews them in the AI Changes panel
@@ -22,7 +28,7 @@ use std::{ops::Range, rc::Rc};
 
 use fe_buffer::{BufferId, Version};
 use fe_gpui::EditorView;
-use fe_lsp::{LspError, rename::RenameTarget};
+use fe_lsp::{IncarnationId, LspError, SessionId, rename::RenameTarget};
 use fe_ui::TextInput;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, IntoElement as _,
@@ -36,10 +42,14 @@ use crate::{
     find_bar::FindRename,
     lsp::{RenameAnswer, RenameEdits},
     picker::{Picker, PickerDelegate},
-    workbench::Palette,
+    workbench::{
+        Palette,
+        toast::{self, Toast},
+    },
 };
 
 /// What the picker asks about, as it opened.
+#[derive(Clone)]
 struct Request {
     editor: WeakEntity<EditorView>,
     buffer: BufferId,
@@ -48,6 +58,12 @@ struct Request {
     target: Range<usize>,
     /// The symbol's name now.
     name: String,
+    /// What preparation answered, with its owner: the server the rename
+    /// goes to alone.
+    prepared: RenameTarget,
+    /// The opening of the document the owner had as preparation was
+    /// answered: another by the time it's confirmed means it restarted.
+    opening: Option<(SessionId, IncarnationId)>,
 }
 
 impl Workbench {
@@ -80,13 +96,8 @@ impl Workbench {
             // Held until the picker takes over, or the answer lands.
             workbench
                 .update_in(cx, |workbench, window, cx| {
-                    let request = |target: &RenameTarget| Request {
-                        editor,
-                        buffer,
-                        version,
-                        caret,
-                        target: target.range.clone(),
-                        name: target.placeholder.clone(),
+                    let request = |workbench: &Self, target: &RenameTarget| {
+                        workbench.rename_request(editor, buffer, version, caret, target)
                     };
                     workbench.prepared(answer, request, window, cx);
                 })
@@ -96,11 +107,43 @@ impl Workbench {
         .detach();
     }
 
+    /// What a rename of `target`, prepared at `caret` of `editor`'s
+    /// `buffer` at `version`, asks: with the opening of the document its
+    /// owner has now.
+    fn rename_request(
+        &self,
+        editor: WeakEntity<EditorView>,
+        buffer: BufferId,
+        version: Version,
+        caret: usize,
+        target: &RenameTarget,
+    ) -> Request {
+        Request {
+            editor,
+            buffer,
+            version,
+            caret,
+            target: target.range.clone(),
+            name: target.placeholder.clone(),
+            prepared: target.clone(),
+            opening: (target.owner.as_ref()).and_then(|owner| self.lsp_owner_opening(owner)),
+        }
+    }
+
+    /// Whether the server that owns `request`'s rename restarted, or
+    /// reopened the document, since preparation answered.
+    fn rename_owner_restarted(&self, request: &Request) -> bool {
+        let Some(owner) = &request.prepared.owner else {
+            return false;
+        };
+        request.opening.is_none() || self.lsp_owner_opening(owner) != request.opening
+    }
+
     /// The server's answer to what to rename: the picker, or why not.
     fn prepared(
         &mut self,
         answer: RenameAnswer,
-        request: impl FnOnce(&RenameTarget) -> Request,
+        request: impl FnOnce(&Self, &RenameTarget) -> Request,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -110,7 +153,7 @@ impl Workbench {
             Err(error) => return self.say(&reason(&error), window, cx),
         };
         self.dismiss_palette(window, cx);
-        let request = request(&target);
+        let request = request(self, &target);
         let workbench = cx.entity().downgrade();
         let delegate = RenamePicker::new(workbench, request, target.placeholder.clone());
         let placeholder = text!("workbench-lsp-rename-placeholder");
@@ -205,28 +248,52 @@ impl Workbench {
         if current != version {
             return self.say(&tr!("workbench-lsp-rename-stale"), window, cx);
         }
-        let Some(asked) = self.lsp_rename(buffer, version, range.start, name.to_owned()) else {
+        // Prepared again, for the server that accepts it now: the rename
+        // goes to it alone, as the picker's does.
+        let Some(prepared) = self.lsp_prepare_rename(buffer, version, range.start) else {
             return self.say(&tr!("workbench-lsp-no-server"), window, cx);
         };
         let guard = Rc::new(());
         self.lsp.rename = Rc::downgrade(&guard);
         cx.notify();
-        let request = Request {
-            editor: editor.downgrade(),
-            buffer,
-            version,
-            caret,
-            target: range,
-            name: old,
-        };
+        let editor = editor.downgrade();
         let name = name.to_owned();
         cx.spawn_in(window, async move |workbench, cx| {
-            let answer = asked.await;
-            workbench
-                .update_in(cx, |workbench, window, cx| {
-                    workbench.finish_rename(&request, &name, answer, window, cx)
-                })
-                .ok();
+            let answer = prepared.await;
+            let asked = workbench.update_in(cx, |workbench, window, cx| {
+                let target = match answer {
+                    Ok(Some(target)) if target.range == range => target,
+                    Ok(_) => {
+                        workbench.say(&tr!("workbench-lsp-rename-nothing"), window, cx);
+                        return None;
+                    }
+                    Err(error) => {
+                        workbench.say(&reason(&error), window, cx);
+                        return None;
+                    }
+                };
+                let mut request = workbench.rename_request(editor, buffer, version, caret, &target);
+                request.name = old;
+                let asked = workbench.lsp_rename(
+                    buffer,
+                    version,
+                    &request.prepared,
+                    range.start,
+                    name.clone(),
+                );
+                if asked.is_none() {
+                    workbench.say(&tr!("workbench-lsp-no-server"), window, cx);
+                }
+                Some((request, asked?))
+            });
+            if let Ok(Some((request, asked))) = asked {
+                let answer = asked.await;
+                workbench
+                    .update_in(cx, |workbench, window, cx| {
+                        workbench.finish_rename(&request, &name, answer, window, cx)
+                    })
+                    .ok();
+            }
             drop(guard);
         })
         .detach();
@@ -255,7 +322,8 @@ impl Workbench {
     }
 
     /// The server's edits for the rename of `request` to `to`, applied or
-    /// previewed, or said why not.
+    /// previewed, or said why not: a toast if its owner restarted since it
+    /// was prepared, which renamed nothing and asked no other server.
     fn finish_rename(
         &mut self,
         request: &Request,
@@ -264,6 +332,12 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Err(error) = &answer
+            && self.rename_owner_restarted(request)
+        {
+            toast::show(cx, Toast::info(reason(error)));
+            return;
+        }
         // The server's edits were made for the version asked about: a
         // changed or closed source buffer discards all of them.
         let current = request
@@ -431,9 +505,11 @@ impl PickerDelegate for RenamePicker {
         let current = editor.read(cx).model().buffer().version();
         let asked = if current == request.version {
             workbench.update(cx, |workbench, cx| {
+                // The owner alone, whichever server it is.
                 let asked = workbench.lsp_rename(
                     request.buffer,
                     request.version,
+                    &request.prepared,
                     request.caret,
                     new_name.clone(),
                 );
@@ -456,14 +532,7 @@ impl PickerDelegate for RenamePicker {
             workbench.update(cx, |workbench, cx| workbench.say(&message, window, cx));
             return true;
         };
-        let request = Request {
-            editor: self.request.editor.clone(),
-            buffer: self.request.buffer,
-            version: self.request.version,
-            caret: self.request.caret,
-            target: self.request.target.clone(),
-            name: self.request.name.clone(),
-        };
+        let request = self.request.clone();
         let task = cx.spawn_in(window, async move |picker, cx| {
             let answer = asked.await;
             let Some(picker) = picker.upgrade() else {

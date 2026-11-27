@@ -4,24 +4,30 @@
 //! server asks for a refresh. `editor.inlay_hints` off shows none and asks
 //! for none.
 //!
-//! An answer lands only if it is for the latest request the editor made; a
-//! server without a provider is not asked again until the buffer's server
-//! changes.
+//! A buffer's hints are merged across the servers it's on, in fe-lsp, and
+//! each resolves through the server that sent it. An answer lands only if
+//! it is for the latest request the editor made; servers none of which
+//! provides hints aren't asked again until the buffer's servers change.
+//! A server asking for a refresh, or handed a notification
+//! ([`fe_lsp::LspEvent::Notified`]), or whose poll comes due
+//! ([`fe_lsp::LspManager::repoll_due`]) is asked again, what shows kept
+//! until the answer; an answer equal to the hints shown changes nothing.
 
 use std::{
     collections::HashMap,
     ops::Range,
     rc::Rc,
     sync::{Arc, Mutex, Weak},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use fe_buffer::Version;
 use fe_gpui::{EditorView, InlayHint, InlayHintFuture, InlayHintHost, InlayHintKind};
 use fe_lsp::LspManager;
-use fe_lsp::{LspError, ServerId};
+use fe_lsp::{IncarnationId, LspError, ServerId, SessionId};
 use gpui::{AppContext as _, Context, Entity, EntityId, Task};
 
+use super::{InFlight, Reask};
 use crate::Workbench;
 
 /// How long the buffer and the rows in view hold still before hints are
@@ -37,18 +43,26 @@ type Key = (Version, (u32, u32));
 /// What a request answers.
 type Answer = Result<Option<Vec<fe_lsp::InlayHint>>, LspError>;
 
+/// A server the buffer is on, and the opening of it the server has.
+type Served = (ServerId, SessionId, IncarnationId);
+
 struct Slot {
     editor: Entity<EditorView>,
-    /// The server the buffer is on while hints are wanted.
-    server: Option<ServerId>,
+    /// The servers the buffer is on while hints are wanted, each with its
+    /// opening: another set asks again.
+    asked_of: Vec<Served>,
     /// The version and rows last seen, to ask again when they change.
     key: Option<Key>,
     /// The version and byte range of the latest request.
     asked: Option<(Version, Range<usize>)>,
-    /// The server that said it has no provider.
-    no_provider: Option<ServerId>,
+    /// The servers that answered that none of them provides hints.
+    no_provider: Option<Vec<Served>>,
     /// The wait, then the request.
     task: Option<Task<()>>,
+    /// Whether `task` is still waiting or asking.
+    in_flight: InFlight,
+    /// The latest poll of each server the slot has seen.
+    polled: HashMap<ServerId, Instant>,
     /// The manager the editor's host resolves through.
     hosted: Option<Weak<Mutex<LspManager>>>,
     /// The server's hints and the version they're of.
@@ -84,12 +98,10 @@ impl Workbench {
                 let model = editor.read(cx).model();
                 (model.buffer().id(), model.snapshot().version())
             };
-            let server = self
-                .lsp
-                .manager
-                .as_ref()
-                .and_then(|manager| super::lock(manager).server_of(buffer))
-                .filter(|_| on);
+            let served = match (&self.lsp.manager, on) {
+                (Some(manager), true) => super::lock(manager).served_identities(buffer),
+                _ => Vec::new(),
+            };
             let rows = editor.read(cx).viewport_rows();
             let slot = self
                 .lsp
@@ -98,11 +110,13 @@ impl Workbench {
                 .entry(id)
                 .or_insert_with(|| Slot {
                     editor: editor.clone(),
-                    server: None,
+                    asked_of: Vec::new(),
                     key: None,
                     asked: None,
                     no_provider: None,
                     task: None,
+                    in_flight: InFlight::default(),
+                    polled: HashMap::new(),
                     hosted: None,
                     served: None,
                     closing: None,
@@ -119,7 +133,8 @@ impl Workbench {
                     .is_some_and(|w| Weak::ptr_eq(w, &manager))
                 {
                     if slot.hosted.replace(manager.clone()).is_some() {
-                        slot.server = None;
+                        slot.asked_of.clear();
+                        slot.polled.clear();
                         slot.key = None;
                         slot.asked = None;
                         slot.no_provider = None;
@@ -133,8 +148,10 @@ impl Workbench {
                     publish(slot, cx);
                 }
             }
-            let Some(server) = server else {
-                if slot.server.take().is_some() {
+            if served.is_empty() {
+                if !slot.asked_of.is_empty() {
+                    slot.asked_of.clear();
+                    slot.polled.clear();
                     slot.key = None;
                     slot.asked = None;
                     slot.no_provider = None;
@@ -143,21 +160,26 @@ impl Workbench {
                     publish(slot, cx);
                 }
                 continue;
-            };
-            if slot.server != Some(server) {
-                // Straight from another server: its hints and its request
-                // in flight go.
-                let moved = slot.server.replace(server).is_some();
+            }
+            if slot.asked_of != served {
+                // A server the buffer left takes its hints and the request
+                // in flight with it; one joining, or a server's new opening,
+                // only asks again.
+                let left = (slot.asked_of.iter())
+                    .any(|(was, ..)| !served.iter().any(|(server, ..)| server == was));
+                slot.polled
+                    .retain(|was, _| served.iter().any(|(server, ..)| server == was));
+                slot.asked_of = served;
                 slot.key = None;
                 slot.no_provider = None;
-                if moved {
+                if left {
                     slot.asked = None;
                     slot.task = None;
                     slot.served = None;
                     publish(slot, cx);
                 }
             }
-            if slot.no_provider == Some(server) {
+            if slot.no_provider.as_ref() == Some(&slot.asked_of) {
                 continue;
             }
             let Some(rows) = rows else { continue };
@@ -267,11 +289,7 @@ impl Workbench {
 
     /// Asks again, at once, for every editor whose buffer is on `server`.
     pub(super) fn refresh_inlay_hints(&mut self, server: ServerId, cx: &mut Context<Self>) {
-        let ids: Vec<EntityId> = (self.lsp.inlay_hints.slots.iter())
-            .filter(|(_, slot)| slot.server == Some(server))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids {
+        for id in self.inlay_hint_slots_of(server) {
             if let Some(slot) = self.lsp.inlay_hints.slots.get_mut(&id) {
                 slot.no_provider = None;
             }
@@ -279,10 +297,78 @@ impl Workbench {
         }
     }
 
+    /// The editors whose hints are asked of `server`.
+    fn inlay_hint_slots_of(&self, server: ServerId) -> Vec<EntityId> {
+        (self.lsp.inlay_hints.slots.iter())
+            .filter(|(_, slot)| slot.asked_of.iter().any(|(of, ..)| *of == server))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Asks the hints of every editor whose buffer is on `server` again,
+    /// keeping those shown, for `why` (see [`Reask`]).
+    pub(super) fn reask_inlay_hints_of(
+        &mut self,
+        server: ServerId,
+        why: Reask,
+        cx: &mut Context<Self>,
+    ) {
+        for id in self.inlay_hint_slots_of(server) {
+            self.reask_inlay_hints(id, why, cx);
+        }
+    }
+
+    /// Asks editor `id`'s hints again for `why`, if it has asked before:
+    /// a poll only while no request of its own is in flight.
+    fn reask_inlay_hints(&mut self, id: EntityId, why: Reask, cx: &mut Context<Self>) {
+        let Some(slot) = self.lsp.inlay_hints.slots.get(&id) else {
+            return;
+        };
+        if slot.key.is_none() || slot.no_provider.as_ref() == Some(&slot.asked_of) {
+            return;
+        }
+        match why {
+            Reask::Notified(rest) => self.ask_inlay_hints_in(id, rest, cx),
+            Reask::Poll if !slot.in_flight.busy() => {
+                self.ask_inlay_hints_in(id, Duration::ZERO, cx)
+            }
+            Reask::Poll => {}
+        }
+    }
+
+    /// Asks again each editor's hints of a server whose poll in `dues`
+    /// came since the editor last saw one.
+    pub(super) fn repoll_inlay_hints(
+        &mut self,
+        dues: &HashMap<ServerId, Instant>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut due = Vec::new();
+        for (id, slot) in &mut self.lsp.inlay_hints.slots {
+            let servers: Vec<ServerId> = slot.asked_of.iter().map(|(server, ..)| *server).collect();
+            let mut came = false;
+            for server in servers {
+                came |= super::poll_came(&mut slot.polled, server, dues);
+            }
+            if came {
+                due.push(*id);
+            }
+        }
+        for id in due {
+            self.reask_inlay_hints(id, Reask::Poll, cx);
+        }
+    }
+
     /// Has editor `id` ask for its hints after `delay`, in place of any
     /// request waiting or in flight.
     fn ask_inlay_hints_in(&mut self, id: EntityId, delay: Duration, cx: &mut Context<Self>) {
+        let Some(asking) =
+            (self.lsp.inlay_hints.slots.get(&id)).map(|slot| slot.in_flight.asking())
+        else {
+            return;
+        };
         let task = cx.spawn(async move |workbench, cx| {
+            let _asking = asking;
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
@@ -355,11 +441,18 @@ impl Workbench {
         }
         match answer {
             Ok(Some(found)) => {
+                // Asked again with nothing changed (a poll, say): nothing to
+                // show anew.
+                let same = (slot.served.as_ref())
+                    .is_some_and(|(at, shown)| *at == version && same_hints(shown, &found));
+                if same {
+                    return;
+                }
                 slot.served = Some((version, found.into_iter().map(convert).collect()));
                 publish(slot, cx);
             }
             Ok(None) => {
-                slot.no_provider = slot.server;
+                slot.no_provider = Some(slot.asked_of.clone());
                 slot.served = None;
                 publish(slot, cx);
             }
@@ -423,6 +516,17 @@ impl InlayHintHost for Host {
             }
         })
     }
+}
+
+/// Whether `shown`, hints as editors draw them, are `found`, as servers
+/// answered them.
+fn same_hints(shown: &[InlayHint], found: &[fe_lsp::InlayHint]) -> bool {
+    shown.len() == found.len()
+        && shown.iter().zip(found).all(|(shown, found)| {
+            (shown.data.as_ref())
+                .and_then(|data| data.downcast_ref::<fe_lsp::InlayHint>())
+                .is_some_and(|hint| hint == found)
+        })
 }
 
 /// `hint` as an editor draws it, keeping the server's in `data`.

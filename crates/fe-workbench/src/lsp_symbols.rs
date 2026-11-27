@@ -13,7 +13,7 @@ use std::{collections::HashMap, time::Duration};
 
 use fe_buffer::{BufferSnapshot, Version};
 use fe_gpui::EditorView;
-use fe_lsp::DocumentSymbol;
+use fe_lsp::{DocumentSymbol, Feature};
 use fe_syntax::{Outline, OutlineItem};
 use gpui::{Context, Entity, EntityId, Task};
 
@@ -99,12 +99,13 @@ impl Slot {
 }
 
 impl Workbench {
-    /// The session `editor`'s buffer is open in on its server, if it is.
+    /// The session `editor`'s buffer is open in on its provider of
+    /// symbols (§5: one outline, from one server), if it is.
     fn session_of(&self, editor: &Entity<EditorView>, cx: &gpui::App) -> Option<Session> {
         let manager = self.lsp.manager.as_ref()?;
         let buffer = editor.read(cx).model().buffer().id();
         let manager = super::lock(manager);
-        let server = manager.server_of(buffer)?;
+        let server = manager.provider_of(buffer, Feature::DocumentSymbols)?;
         let (session, incarnation) = manager.active_identity(buffer, server)?;
         Some((self.lsp.generation, server, session, incarnation))
     }

@@ -11,7 +11,7 @@ use std::{collections::HashMap, ops::RangeInclusive, time::Duration};
 
 use fe_buffer::{BufferId, Version};
 use fe_gpui::EditorView;
-use fe_lsp::{FoldingRange, IncarnationId, LspError, ServerId, SessionId};
+use fe_lsp::{Feature, FoldingRange, IncarnationId, LspError, ServerId, SessionId};
 use gpui::{Context, Entity, EntityId, Task};
 
 use crate::Workbench;
@@ -73,8 +73,10 @@ impl Workbench {
             self.drop_folds(buffer, cx);
         }
         for (buffer, (version, editors)) in wanted {
+            // The provider (§5): one server's ranges, never two overlapping
+            // sets.
             let server = (self.lsp.manager.as_ref())
-                .and_then(|manager| super::lock(manager).server_of(buffer));
+                .and_then(|manager| super::lock(manager).provider_of(buffer, Feature::Folding));
             let Some(server) = server else {
                 self.drop_folds(buffer, cx);
                 continue;
