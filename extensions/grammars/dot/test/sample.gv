@@ -1,0 +1,23 @@
+# 1 "network.gv"
+/* A strict undirected graph: repeated edges are merged. */
+Strict Graph network {
+    layout=neato
+    overlap=false
+
+    Node [shape=circle width=0.6]
+    Edge [len=1.5]
+
+    router [label="Router", pos="0,0!"]
+    switch_a; switch_b
+
+    router -- switch_a [label="10 Gb/s"]
+    router -- switch_b
+    switch_a -- { host1 host2 } // two hosts
+    switch_b:e -- "host 3":w -- host4
+
+    SubGraph cluster_dmz {
+        label=<<FONT COLOR="red">DMZ</FONT>>
+        web -- mail
+    }
+    router -- web
+}

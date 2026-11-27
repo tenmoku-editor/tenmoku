@@ -1,0 +1,53 @@
+/*
+ * The build pipeline of a small service: sources flow through the
+ * stages into the release artifacts.
+ */
+# Render with: dot -Tsvg sample.dot -o pipeline.svg
+
+strict digraph pipeline {
+    // Graph-wide settings.
+    rankdir=LR;
+    graph [fontname="Helvetica", fontsize=12, nodesep=0.4, ranksep=.75];
+    node [shape=box, style="rounded,filled", fillcolor="#eeeeee"];
+    edge [color=gray40, arrowsize=0.8, minlen=1];
+
+    label = "Build " + "pipeline";
+    labelloc = t;
+
+    source [label="Source\ncheckout", shape=folder];
+    "unit tests" [label="Unit \"fast\" tests", peripheries=2];
+
+    subgraph cluster_0 {
+        label="Compile";
+        style=dashed;
+        color=blue;
+
+        parse -> check -> codegen;
+        check -> lint [style=dotted, weight=-1.5];
+    }
+
+    subgraph "cluster test" {
+        label = "Test";
+        "unit tests"; integration; bench
+    }
+
+    // A record with named ports.
+    cache [shape=record, label="<p1> objects|<p2> metadata"];
+
+    // An HTML-like label, highlighted as HTML.
+    report [shape=plaintext, label=<
+        <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">
+            <TR><TD PORT="head" BGCOLOR="lightblue"><B>Report</B></TD></TR>
+            <TR><TD PORT="body">passed &amp; failed</TD></TR>
+        </TABLE>
+    >];
+
+    source -> parse [label="42 files"];
+    codegen -> cache:p1 [headport=w];
+    codegen -> cache:p2:s;
+    codegen -> { "unit tests" integration bench };
+    { rank=same; integration; bench }
+    "unit tests" -> report:head:w;
+    integration -> report:body [penwidth=2.0, constraint=false];
+    bench -> report [label=<<I>timings</I>>];
+}
