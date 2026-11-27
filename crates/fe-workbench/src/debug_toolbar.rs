@@ -27,7 +27,7 @@
 //!   Step Over, Step Into, Step Out, Restart, Stop Debugging), its tooltip
 //!   adding its key; the label names the session and its state.
 
-use fe_command::{CommandId, ContextFrame, ContextStack, Source, Value};
+use fe_command::{ContextFrame, ContextStack, Source};
 use fe_dap::{Control, Controls, Disabled, SessionState};
 use fe_ui::{ActiveTheme as _, Button, Icon, IconButton, height, radius};
 use gpui::{
@@ -35,6 +35,7 @@ use gpui::{
     Pixels, SharedString, Styled as _, Window, div, point, px,
 };
 use kiln_l10n::{Text, tr};
+use kiln_shell::KeyHints;
 
 use crate::{
     KEY_CONTEXT, Workbench,
@@ -182,16 +183,10 @@ pub(crate) fn specs(debugger: &Debugger) -> (Vec<Spec>, usize) {
 /// debugger's `flag` set, as this platform prints it: read from the
 /// keymap now, so it follows reloads.
 pub(crate) fn key(command: &str, flag: &str, cx: &App) -> Option<String> {
-    let command = CommandId::parse(command).ok()?;
     let frame = ContextFrame::new(KEY_CONTEXT)
         .flag(DEBUG_SESSION)
         .flag(flag);
-    let stack = ContextStack::new().with(frame);
-    let keymap = fe_gpui::current_keymap(cx);
-    fe_keymap::shortcuts(&keymap, &command, &Value::Null, &stack)
-        .iter()
-        .find(|keys| keys.keystrokes().len() == 1)
-        .map(fe_keymap::shortcut_label)
+    KeyHints::new(ContextStack::new().with(frame)).single(command, cx)
 }
 
 /// The label's accessible name: the session, and its state.

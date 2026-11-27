@@ -20,6 +20,7 @@ use fe_command::{CommandId, ContextFrame, ContextStack, Invocation, Source, Valu
 use fe_gpui::{EditorView, commands::RunCommand};
 use fe_syntax::{Outline, OutlineKind};
 use gpui::{App, EntityId, Hsla, SharedString, Window};
+use kiln_shell::KeyHints;
 
 /// Which of back and forward can run, which the title bar's buttons show;
 /// both are off until there's a navigation history.
@@ -119,13 +120,7 @@ pub(crate) fn caret(editor: &EditorView) -> usize {
 /// this platform prints it, read from the keymap now so it follows
 /// reloads. A chord isn't shown.
 pub(crate) fn shortcut(command: &str, cx: &App) -> Option<String> {
-    let command = CommandId::parse(command).ok()?;
-    let stack = editor_context();
-    let keymap = fe_gpui::current_keymap(cx);
-    fe_keymap::shortcuts(&keymap, &command, &Value::Null, &stack)
-        .iter()
-        .find(|keys| keys.keystrokes().len() == 1)
-        .map(fe_keymap::shortcut_label)
+    KeyHints::new(editor_context()).single(command, cx)
 }
 
 /// The keys the pane menu shows for `command`: of those the active keymap

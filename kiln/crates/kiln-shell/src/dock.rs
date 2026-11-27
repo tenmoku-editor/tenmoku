@@ -64,8 +64,7 @@ use gpui::{
     Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Window, WindowId,
     anchored, canvas, deferred, div, prelude::FluentBuilder as _, px,
 };
-use kiln_command::{CommandId, ContextFrame, ContextStack, Invocation, Source, Value};
-use kiln_core::{shortcut_label, shortcuts};
+use kiln_command::{Invocation, Source, Value};
 use kiln_l10n::tr;
 use kiln_platform::{command_actions::dispatch_invocation, keys};
 use kiln_ui::{
@@ -73,6 +72,7 @@ use kiln_ui::{
     RAIL_WIDTH, RailButton, Role, TAB_HEIGHT, Tab, TabBar, Tooltip, UI_HEADING, ui_theme,
 };
 
+use crate::KeyHints;
 use crate::pane_group::{MIN_PANE_HEIGHT, MIN_PANE_WIDTH};
 
 mod groups;
@@ -1488,14 +1488,7 @@ impl DockState {
         if contexts.is_empty() {
             return None;
         }
-        let command = CommandId::parse(command).ok()?;
-        let stack: ContextStack = contexts
-            .iter()
-            .map(|context| ContextFrame::new(context.as_ref()))
-            .collect();
-        let keymap = keys::current_keymap(cx);
-        let found = shortcuts(&keymap, &command, &Value::Null, &stack);
-        found.first().map(shortcut_label)
+        KeyHints::in_contexts(contexts).label(command, cx)
     }
 
     /// A title-row button, `id`, named `name`: its tooltip shows the key

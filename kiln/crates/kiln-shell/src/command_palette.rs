@@ -22,7 +22,7 @@ use gpui::{
     ParentElement as _, SharedString, Styled as _, Window, div,
 };
 use kiln_command::{CommandId, CommandMeta, ContextStack, Invocation, Source, Value};
-use kiln_core::{CatalogError, CommandCatalog, shortcut_label, shortcuts};
+use kiln_core::{CatalogError, CommandCatalog};
 use kiln_l10n::{text, tr};
 use kiln_platform::{
     command_actions::{Command as _, TypedCommand, dispatch_invocation, typed_commands},
@@ -30,7 +30,7 @@ use kiln_platform::{
 };
 use kiln_ui::{HighlightedLabel, UiTheme, char_ranges, ui_theme};
 
-use crate::{ModalId, Picker, PickerDelegate};
+use crate::{KeyHints, ModalId, Picker, PickerDelegate};
 
 kiln_platform::commands!(
     command_palette,
@@ -135,8 +135,8 @@ pub struct CommandPalette {
     matches: Vec<(usize, Vec<Range<usize>>)>,
     /// Where focus was, which a pick gives it back to.
     previous: Option<FocusHandle>,
-    /// The context stack it was in.
-    stack: ContextStack,
+    /// The context stack it was in, to look keys up in.
+    hints: KeyHints,
     /// Each entry's key, looked up as its row first draws.
     keys: RefCell<HashMap<usize, Option<SharedString>>>,
 }
@@ -153,14 +153,14 @@ impl CommandPalette {
             matches: (0..entries.len()).map(|ix| (ix, Vec::new())).collect(),
             entries,
             previous: window.focused(cx),
-            stack,
+            hints: KeyHints::new(stack),
             keys: RefCell::default(),
         }
     }
 
     /// The context stack it lists commands for.
     pub fn context_stack(&self) -> &ContextStack {
-        &self.stack
+        self.hints.stack()
     }
 
     /// The commands matching the query, in order.
@@ -178,13 +178,8 @@ impl CommandPalette {
         labels
             .entry(entry)
             .or_insert_with(|| {
-                let keymap = keys::current_keymap(cx);
-                let id = &self.entries[entry].id;
-                if keymap.bindings_for(id).is_empty() {
-                    return None;
-                }
-                let found = shortcuts(&keymap, id, &Value::Null, &self.stack);
-                found.first().map(|keys| shortcut_label(keys).into())
+                let id = self.entries[entry].id.as_str();
+                self.hints.label(id, cx).map(SharedString::from)
             })
             .clone()
     }
@@ -275,7 +270,7 @@ impl PickerDelegate for CommandPalette {
         };
         let invocation = Invocation::new(self.entries[*entry].id.clone())
             .source(Source::Palette)
-            .context(self.stack.clone());
+            .context(self.hints.stack().clone());
         if let Some(previous) = self.previous.take() {
             window.focus(&previous, cx);
         }

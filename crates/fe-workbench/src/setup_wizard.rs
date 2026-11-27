@@ -21,7 +21,7 @@
 
 use std::{cell::Cell, collections::HashMap, io, path::PathBuf, rc::Rc};
 
-use fe_command::{ContextFrame, ContextStack, Invocation, Source, Value};
+use fe_command::{Invocation, Source};
 use fe_config::first_run::{self, Outcome};
 use fe_gpui::commands::RunCommand;
 use fe_ui::{ActiveTheme as _, Button, Switch, Tooltip};
@@ -40,6 +40,7 @@ use kiln::{
     prelude::AppExt as _,
 };
 use kiln_l10n::{Text, text, tr, verbatim};
+use kiln_shell::KeyHints;
 
 use crate::{
     KEY_CONTEXT as WORKBENCH_CONTEXT, Workbench,
@@ -1284,14 +1285,7 @@ impl SetupWizard {
 /// The label of what the active keymap runs `command` with where the
 /// workbench's editor has focus, the usual place for it.
 fn shortcut(command: &str, cx: &App) -> Option<String> {
-    let command = fe_command::CommandId::parse(command).ok()?;
-    let stack: ContextStack = [WORKBENCH_CONTEXT, fe_gpui::KEY_CONTEXT]
-        .into_iter()
-        .map(ContextFrame::new)
-        .collect();
-    let keymap = keys::current_keymap(cx);
-    let found = fe_keymap::shortcuts(&keymap, &command, &Value::Null, &stack);
-    found.first().map(fe_keymap::shortcut_label)
+    KeyHints::in_contexts(&[WORKBENCH_CONTEXT, fe_gpui::KEY_CONTEXT]).label(command, cx)
 }
 
 /// Runs `app.quit`, as secondary-q would with no sheet.

@@ -39,10 +39,7 @@ use std::{
 };
 
 use fe_buffer::{Bias, BufferSnapshot, Text, Version};
-use fe_command::{
-    Actor, CommandId, CommandTarget, ContextFrame, ContextPredicate, ContextStack, Dispatched,
-    Effect, Registry, Value,
-};
+use fe_command::{Actor, CommandTarget, ContextPredicate, Dispatched, Effect, Registry, Value};
 use fe_editor::{
     EditorModel,
     decorations::{Decoration, DecorationKind, DecorationProvider, Tint, overlaps},
@@ -811,13 +808,7 @@ impl DiffView {
 /// The single-key shortcut that runs `command` in a diff view, as the
 /// keymap has it now.
 fn key_label(command: &str, cx: &App) -> Option<String> {
-    let command = CommandId::parse(command).ok()?;
-    let stack: ContextStack = [KEY_CONTEXT].into_iter().map(ContextFrame::new).collect();
-    let keymap = crate::current_keymap(cx);
-    fe_keymap::shortcuts(&keymap, &command, &Value::Null, &stack)
-        .iter()
-        .find(|keys| keys.keystrokes().len() == 1)
-        .map(fe_keymap::shortcut_label)
+    kiln_shell::KeyHints::in_contexts(&[KEY_CONTEXT]).single(command, cx)
 }
 
 /// A diff and the texts it was made from, as diff bases, with their row

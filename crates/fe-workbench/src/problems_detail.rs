@@ -40,7 +40,6 @@ use std::{
 
 use fe_buffer::{BufferId, Version};
 use fe_chat::Rows;
-use fe_command::{CommandId, ContextFrame, ContextStack, Value};
 use fe_editor::diagnostics::Problem;
 use fe_gpui::EditorView;
 use fe_lsp::{CodeAction, EditTarget, FileEdits, code_action::CodeActionQuery};
@@ -53,6 +52,7 @@ use gpui::{
 };
 use kiln::Cx;
 use kiln_l10n::{text, tr};
+use kiln_shell::KeyHints;
 
 use super::{KEY_CONTEXT, ProblemsPanel, read_text};
 use crate::chat_panel::agent_actions::{AgentAsk, rows_item};
@@ -1005,16 +1005,7 @@ fn fixed_lines(
 /// single key the keymap binds to [`APPLY_FIX`] in the panel, read now so
 /// it follows reloads.
 fn apply_key(cx: &App) -> Option<String> {
-    let command = CommandId::parse(APPLY_FIX).ok()?;
-    let stack: ContextStack = [crate::KEY_CONTEXT, KEY_CONTEXT]
-        .into_iter()
-        .map(ContextFrame::new)
-        .collect();
-    let keymap = fe_gpui::current_keymap(cx);
-    fe_keymap::shortcuts(&keymap, &command, &Value::Null, &stack)
-        .iter()
-        .find(|keys| keys.keystrokes().len() == 1)
-        .map(fe_keymap::shortcut_label)
+    KeyHints::in_contexts(&[crate::KEY_CONTEXT, KEY_CONTEXT]).single(APPLY_FIX, cx)
 }
 
 /// What the pane drew last, for the tests.

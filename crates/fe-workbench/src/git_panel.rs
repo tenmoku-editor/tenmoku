@@ -112,7 +112,7 @@ use std::{
 };
 
 use fe_buffer::{HunkStatus, Origin, Version};
-use fe_command::{CommandId, ContextFrame, ContextStack, Invocation, Source, Value};
+use fe_command::{ContextFrame, Invocation, Source, Value};
 use fe_editor::lane::LaneId;
 use fe_git::{ChangeKind, FileStatus, GitError, Repo, SplitStatus};
 use fe_gpui::{EditorView, commands::RunCommand};
@@ -130,6 +130,7 @@ use gpui::{
 };
 use kiln::Cx;
 use kiln_l10n::{Text, text, tr, verbatim};
+use kiln_shell::KeyHints;
 
 use crate::{
     Workbench,
@@ -2817,16 +2818,8 @@ fn commit_button(commit: &CommitBox, staged: usize, cx: &App) -> CommitButton {
 /// first single key the keymap binds to [`COMMIT_COMMAND`] in the box, read
 /// now so it follows reloads.
 fn commit_key(cx: &App) -> Option<String> {
-    let command = CommandId::parse(COMMIT_COMMAND).ok()?;
-    let stack: ContextStack = [crate::KEY_CONTEXT, KEY_CONTEXT, fe_gpui::KEY_CONTEXT]
-        .into_iter()
-        .map(ContextFrame::new)
-        .collect();
-    let keymap = fe_gpui::current_keymap(cx);
-    fe_keymap::shortcuts(&keymap, &command, &Value::Null, &stack)
-        .iter()
-        .find(|keys| keys.keystrokes().len() == 1)
-        .map(fe_keymap::shortcut_label)
+    KeyHints::in_contexts(&[crate::KEY_CONTEXT, KEY_CONTEXT, fe_gpui::KEY_CONTEXT])
+        .single(COMMIT_COMMAND, cx)
 }
 
 /// Where `root` is in the working tree at `workdir`, through symlinks and

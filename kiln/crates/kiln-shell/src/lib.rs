@@ -30,14 +30,16 @@
 //!
 //! The shell's leaf modules, which a host can use before it adopts the
 //! rest: the status bar's items ([`status`]), a picker palette over a
-//! delegate ([`picker`]), and a background writer for saved state
-//! ([`persist`]).
+//! delegate ([`picker`]), a background writer for saved state
+//! ([`persist`]), and the key that runs a command, for its tooltip or
+//! button ([`KeyHints`]).
 
 pub mod close;
 pub mod command_palette;
 pub mod crumbs;
 pub mod dock;
 pub mod item;
+pub mod key_hints;
 pub mod l10n;
 pub mod layout;
 pub mod menu_bar;
@@ -67,6 +69,7 @@ pub use dock::{Dock, DockItem, DockPosition, DockState, DockView, PanelId, RailA
 pub use dock::{DockMenuItem, PaneAction};
 // The frame-request watchdog, for a host whose windows aren't `Root`s.
 pub use item::{CloseAnswer, ItemCrumb, ItemHandle, ItemId, PaneItem};
+pub use key_hints::KeyHints;
 pub use kiln_platform::frame_watch::watch_frame_requests;
 pub use menu_bar::MenuBarView;
 pub use modal::{ModalEvent, ModalId, ModalLayer, ModalView};
