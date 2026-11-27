@@ -97,8 +97,8 @@ use fe_gpui::{EditorTheme, EditorView, commands::RunCommand};
 use fe_lsp::{FileDiagnostic, PositionEncoding, decode_file_diagnostics};
 use fe_text::Text;
 use fe_ui::{
-    ActiveTheme as _, CODE_SMALL, FamilySlot, FontFamilies, ROW_HEIGHT, SegmentedControl,
-    ToggleButton, UI_HEADING, UI_SMALL, file_icon_ref, radius,
+    ActiveTheme as _, CODE_SMALL, EmptyState, FamilySlot, FontFamilies, ROW_HEIGHT,
+    SegmentedControl, ToggleButton, UI_SMALL, file_icon_ref, radius,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
@@ -1137,38 +1137,6 @@ impl ProblemsPanel {
             )
     }
 
-    /// The empty state, centred: an icon, the heading and the hint.
-    fn render_empty(heading: SharedString, hint: SharedString, cx: &App) -> gpui::Div {
-        let c = cx.theme().colors;
-        div()
-            .debug_selector(|| EMPTY_SELECTOR.into())
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .px_4()
-            .text_center()
-            .child(
-                svg()
-                    .path(fe_ui::Icon::CircleCheck.path())
-                    .size(px(24.))
-                    .flex_none()
-                    .text_color(c.text.muted),
-            )
-            .child(
-                div()
-                    .text_size(UI_HEADING.size)
-                    .line_height(UI_HEADING.line_height)
-                    .font_weight(gpui::FontWeight(UI_HEADING.weight as f32))
-                    .text_color(c.text.primary)
-                    .child(heading),
-            )
-            .child(div().text_color(c.text.muted).child(hint))
-    }
-
     fn render_rows(
         &mut self,
         range: Range<usize>,
@@ -1448,7 +1416,12 @@ impl Render for ProblemsPanel {
         self.drawn_chips.clear();
         let detail = self.render_detail(cx);
         let body = match self.empty_state() {
-            Some((heading, hint)) => Self::render_empty(heading, hint, cx).into_any_element(),
+            Some((heading, hint)) => EmptyState::new()
+                .icon(fe_ui::Icon::CircleCheck)
+                .heading(heading)
+                .hint(hint)
+                .selector(EMPTY_SELECTOR)
+                .into_any_element(),
             None => uniform_list(
                 "problem-rows",
                 self.rows.len(),

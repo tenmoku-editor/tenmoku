@@ -75,8 +75,8 @@ use fe_project::{
     SearchSummary,
 };
 use fe_ui::{
-    Icon, IconButton, ROW_HEIGHT, TREE_INDENT, TextInput, TextInputEvent, ToggleButton, UI_BODY,
-    UI_HEADING, UI_SMALL, UiTheme,
+    EmptyState, Icon, IconButton, ROW_HEIGHT, TREE_INDENT, TextInput, TextInputEvent, ToggleButton,
+    UI_SMALL, UiTheme,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontFeatures,
@@ -2209,44 +2209,6 @@ impl SearchPanel {
             .collect()
     }
 
-    /// What shows in place of the results when a search found nothing: a
-    /// search icon, a heading and one hint line, centred.
-    fn render_empty(&self, ui: &UiTheme) -> impl IntoElement + use<> {
-        div()
-            .debug_selector(|| "search-empty".into())
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .px_4()
-            .text_center()
-            .child(
-                svg()
-                    .path(Icon::Search.path())
-                    .size(px(24.))
-                    .flex_none()
-                    .text_color(ui.muted_text),
-            )
-            .child(
-                div()
-                    .text_size(UI_HEADING.size)
-                    .line_height(UI_HEADING.line_height)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(ui.text)
-                    .child(tr!("workbench-search-empty-heading")),
-            )
-            .child(
-                div()
-                    .text_size(UI_BODY.size)
-                    .line_height(UI_BODY.line_height)
-                    .text_color(ui.muted_text)
-                    .child(tr!("workbench-search-empty-hint")),
-            )
-    }
-
     /// Whether the last search finished with nothing found, which the
     /// empty state says in place of the status line.
     fn found_nothing(&self) -> bool {
@@ -2394,7 +2356,12 @@ impl Render for SearchPanel {
                 )
         });
         let body = if self.found_nothing() {
-            self.render_empty(&ui).into_any_element()
+            EmptyState::new()
+                .icon(Icon::Search)
+                .heading(tr!("workbench-search-empty-heading"))
+                .hint(tr!("workbench-search-empty-hint"))
+                .selector("search-empty")
+                .into_any_element()
         } else {
             results.into_any_element()
         };

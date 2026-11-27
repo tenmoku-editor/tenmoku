@@ -56,7 +56,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use fe_gpui::commands::RunCommand;
-use fe_ui::{ActiveTheme as _, Icon, TextInput, TextInputEvent};
+use fe_ui::{ActiveTheme as _, EmptyState, Icon, TextInput, TextInputEvent};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyContext, KeyDownEvent, ParentElement as _, Render,
@@ -883,37 +883,24 @@ impl Render for DebugPanel {
 }
 
 impl DebugPanel {
-    /// An empty state, centred, in muted body text, with at most one
-    /// button.
+    /// An empty state: a message, with at most one button.
     fn empty(
         &self,
         message: SharedString,
         button: Option<(kiln_l10n::Text, &'static str)>,
-        cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) -> AnyElement {
-        let c = cx.theme().colors;
-        div()
-            .debug_selector(|| EMPTY_SELECTOR.to_owned())
-            .flex_1()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .text_size(fe_ui::UI_BODY.size)
-            .text_color(c.text.muted)
-            .child(message)
-            .when_some(button, |empty, (label, command)| {
-                empty.child(
-                    fe_ui::Button::new(verbatim!("debug-panel-empty-button"), label)
-                        .small()
-                        .on_click(move |_, window, cx| {
-                            kiln_shell::dock::run_action(command, window, cx)
-                        }),
-                )
-            })
-            .into_any_element()
+        let mut empty = EmptyState::new().hint(message).selector(EMPTY_SELECTOR);
+        if let Some((label, command)) = button {
+            empty = empty.action(
+                fe_ui::Button::new(verbatim!("debug-panel-empty-button"), label)
+                    .small()
+                    .on_click(move |_, window, cx| {
+                        kiln_shell::dock::run_action(command, window, cx)
+                    }),
+            );
+        }
+        empty.into_any_element()
     }
 
     /// The empty state the Variables tab shows instead of its columns, if

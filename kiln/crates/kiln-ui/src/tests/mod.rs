@@ -12,6 +12,7 @@ mod button_command;
 mod coloured_icon_set;
 mod coloured_icons;
 mod controls;
+mod empty_state;
 mod file_icon_set;
 mod file_icons;
 mod icon_stroke;

@@ -53,8 +53,8 @@ use std::{
 };
 
 use fe_ui::{
-    ActiveTheme as _, CODE_SMALL, FamilySlot, FontFamilies, Icon, IconButton, List, ListDelegate,
-    ListEvent, ListRow, RowState, Spinner, Tokens, UI_HEADING, UI_SMALL,
+    ActiveTheme as _, CODE_SMALL, EmptyState, FamilySlot, FontFamilies, Icon, IconButton, List,
+    ListDelegate, ListEvent, ListRow, RowState, Spinner, Tokens, UI_SMALL,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Hsla,
@@ -716,43 +716,15 @@ impl RunsPanel {
         }));
     }
 
-    /// The empty state, centred: an icon, the heading and a hint naming the
-    /// command that runs a task.
-    fn render_empty(&self, cx: &App) -> gpui::Div {
-        let c = cx.theme().colors;
+    /// The empty state, its hint naming the command that runs a task.
+    fn empty_state(&self, cx: &App) -> EmptyState {
         let command = fe_command::l10n::command_label(START_COMMAND, "");
-        div()
-            .debug_selector(|| EMPTY_SELECTOR.into())
+        EmptyState::new()
+            .icon(ICON)
+            .heading(tr!("workbench-runs-empty"))
+            .hint(tr!("workbench-runs-empty-hint", command = command))
+            .selector(EMPTY_SELECTOR)
             .track_focus(&self.list.focus_handle(cx))
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .px_4()
-            .text_center()
-            .child(
-                svg()
-                    .path(ICON.path())
-                    .size(px(24.))
-                    .flex_none()
-                    .text_color(c.text.muted),
-            )
-            .child(
-                div()
-                    .text_size(UI_HEADING.size)
-                    .line_height(UI_HEADING.line_height)
-                    .font_weight(gpui::FontWeight(UI_HEADING.weight as f32))
-                    .text_color(c.text.primary)
-                    .child(tr!("workbench-runs-empty")),
-            )
-            .child(
-                div()
-                    .text_color(c.text.muted)
-                    .child(tr!("workbench-runs-empty-hint", command = command)),
-            )
     }
 }
 
@@ -834,7 +806,7 @@ impl Render for RunsPanel {
         }
         let detail = self.detail.read(cx).run().is_some() || self.build.read(cx).run().is_some();
         let body = if empty {
-            self.render_empty(cx).into_any_element()
+            self.empty_state(cx).into_any_element()
         } else if detail {
             self.render_with_detail(cx).into_any_element()
         } else {

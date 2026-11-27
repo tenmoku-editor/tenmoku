@@ -19,6 +19,7 @@ mod assets;
 mod badge;
 mod breadcrumbs;
 mod controls;
+mod empty_state;
 mod file_icons;
 mod file_icons_coloured;
 mod file_icons_tinted;
@@ -58,6 +59,7 @@ pub use badge::{BADGE_OVERHANG, BADGE_RING, Badge, BadgeTone};
 pub use breadcrumbs::{Breadcrumbs, Crumb, CrumbKind, TOOLBAR_HEIGHT};
 pub use controls::{Button, ButtonSize, ButtonVariant, Checkbox, Switch};
 pub use controls::{ButtonLook, DISABLED_OPACITY, TOGGLE_ON_ALPHA, focus_ring};
+pub use empty_state::EmptyState;
 pub use file_icons::{
     BuildFiles, FolderContext, Icon, IconRef, IconSet, LucideIcons, file_icon, file_icon_path,
     file_icon_ref, folder_icon, folder_icon_path, folder_icon_ref, folder_icon_ref_in,
