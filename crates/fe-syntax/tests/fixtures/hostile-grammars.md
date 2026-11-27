@@ -1,12 +1,17 @@
 # Hostile grammars
 
-Grammars of ours that misbehave, for `tests/runtime_grammar.rs`. They're this
-repository's own code, under its licence.
+Grammars of ours that misbehave, for `tests/runtime_grammar.rs` and
+`tests/wasm_memory_cap.rs`. They're this repository's own code, under its
+licence.
 
 - `loop`: its external scanner never returns
   (`a_looping_grammar_is_stopped_at_its_deadline`,
   `a_looping_injection_is_stopped_at_its_deadline`).
 - `loopinit`: a constructor never returns, so its module initializer doesn't.
+- `grow`: at a `!`, its external scanner grows the module's memory a page at
+  a time until that's refused, then finds `capped` if the memory stayed
+  within the store's 64 MiB cap, else `uncapped`
+  (`a_grammar_growing_its_memory_stops_at_the_cap`).
 - The rest are for `hostile_grammars_are_errors_not_crashes`:
   - `lexnull`: a constructor calls the host's `eof` lexer callback while no
     lexer runs.
@@ -24,7 +29,9 @@ Each was generated with the tree-sitter CLI 0.27.0 (its release binary):
 same way. `loop` was compiled with `tree-sitter build --wasm -o
 tree-sitter-loop.wasm .`. The others were compiled by `build.sh` below, from
 the parent directory (`sh build.sh loopinit lexnull …`), with the wasi-sdk 34
-clang the CLI fetched. `build.sh` passes the same flags as `tree-sitter build`,
+clang the CLI fetched. `grow` was generated with `tree-sitter generate
+--js-runtime native` (the CLI's QuickJS, where `node` isn't installed) and
+built by `build.sh` (`sh build.sh grow`). `build.sh` passes the same flags as `tree-sitter build`,
 but also exports `__wasm_call_ctors`, without which a constructor wouldn't run,
 and puts `scanner.c` first, which `lexnull` relies on. (`loopinit` was built
 with `parser.c` first, before that change; its order doesn't matter.)
@@ -39,6 +46,7 @@ b13f2e191c83b8adf7d601db152466779d6e175f5c4b36331520a689c5900ab3  tree-sitter-lo
 d148d54432a3eaaeab955166671360ff4512911c74a532048cf233ecee913935  tree-sitter-badkeyword.wasm
 fd92d09dd046cd14e7048e01aa3f4d40c0b023b5f995982c579adc17cbdaa150  tree-sitter-lexnull.wasm
 855f03b30c3e6782edb8215ed9fedbde70b01b59e23e9c7b6d2c5cbb863448f0  tree-sitter-debugmsg.wasm
+753d11843695606c003b3191c9ff67f9d7b851ec81ac1b737f48ee743a2f3a5a  tree-sitter-grow.wasm
 ```
 
 ## build.sh
@@ -121,6 +129,56 @@ __attribute__((constructor, used)) static void spin(void) {
   for (;;) {
     spins++;
   }
+}
+```
+
+## grow
+
+`grammar.js`:
+
+```js
+module.exports = grammar({
+  name: 'grow',
+  externals: $ => [$.capped, $.uncapped],
+  rules: {
+    source: $ => repeat(choice($.capped, $.uncapped, $.word)),
+    word: _ => /[a-z]+/,
+  },
+});
+```
+
+`src/scanner.c`:
+
+```c
+#include "tree_sitter/parser.h"
+
+enum { CAPPED, UNCAPPED };
+
+// The store's cap, in 64 KiB pages: MAX_MEMORY_SIZE in
+// vendor/tree-sitter/src/wasm_store.c, 64 MiB.
+#define CAP_PAGES 1024
+
+void *tree_sitter_grow_external_scanner_create(void) { return NULL; }
+void tree_sitter_grow_external_scanner_destroy(void *payload) {}
+unsigned tree_sitter_grow_external_scanner_serialize(void *payload, char *buffer) { return 0; }
+void tree_sitter_grow_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {}
+
+// At a `!`, grows the memory a page at a time until that's refused, writing
+// a byte to each new page so it's really there, then says whether the
+// memory stayed within the cap.
+bool tree_sitter_grow_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
+  while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+         lexer->lookahead == '\n' || lexer->lookahead == '\r') {
+    lexer->advance(lexer, true);
+  }
+  if (lexer->lookahead != '!' || !valid_symbols[CAPPED]) return false;
+  lexer->advance(lexer, false);
+  while (__builtin_wasm_memory_grow(0, 1) != (__SIZE_TYPE__)-1) {
+    volatile char *page = (volatile char *)((__builtin_wasm_memory_size(0) - 1) * 65536);
+    *page = 1;
+  }
+  lexer->result_symbol = __builtin_wasm_memory_size(0) <= CAP_PAGES ? CAPPED : UNCAPPED;
+  return true;
 }
 ```
 

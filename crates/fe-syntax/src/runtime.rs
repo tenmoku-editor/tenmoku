@@ -4,8 +4,10 @@
 //!
 //! A module is compiled once, on a shared [`Engine`], into a language every
 //! thread can use. Parsing it needs a [`WasmStore`] in the parser, which
-//! instantiates each module it parses, so each thread keeps one parser with
-//! its store instead of making one per parse.
+//! instantiates the module, so each thread keeps a parser with a store for
+//! each WebAssembly grammar it parsed lately, instead of making one per parse
+//! ([`WASM_PARSERS_PER_THREAD`]). A store of its own holds a grammar to the
+//! store's memory cap, whatever the others use.
 //!
 //! A grammar's code runs under a deadline ([`GrammarDeadlines`]): loading
 //! it, and each parse. The engine checks it once an epoch, which a ticker
@@ -14,7 +16,7 @@
 
 use kiln_l10n::tr;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::BTreeSet,
     fmt, fs,
     hash::{DefaultHasher, Hash as _, Hasher as _},
@@ -324,8 +326,9 @@ fn loading() -> std::sync::MutexGuard<'static, ()> {
     LOADING.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The WebAssembly stores parsers hold, across threads: each thread's
-/// parser keeps the one it was given.
+/// The WebAssembly stores parsers hold, across threads: each thread keeps
+/// one per grammar between parses, up to [`WASM_PARSERS_PER_THREAD`], and
+/// has one more for each parser in use from outside its cache.
 static LIVE_STORES: AtomicUsize = AtomicUsize::new(0);
 /// The WebAssembly grammars [`register_language`] made a language of: each
 /// is kept for the process's life, withdrawn or not.
@@ -336,7 +339,7 @@ static LOADED_GRAMMARS: AtomicUsize = AtomicUsize::new(0);
 /// expose a store's memory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WasmStats {
-    /// Stores in parsers, each instantiating the modules it parses.
+    /// Stores in parsers, each for one grammar on one thread.
     pub stores: usize,
     /// Grammars loaded by [`register_language`].
     pub grammars: usize,
@@ -637,26 +640,139 @@ pub(crate) fn names() -> Vec<&'static str> {
         .collect()
 }
 
+/// The most WebAssembly parsers a thread keeps between parses, each with
+/// a store of its own for one grammar; past that the least recently used is
+/// dropped, with its store. A store per grammar makes the store's memory cap
+/// (`MAX_MEMORY_SIZE`, `vendor/tree-sitter/src/wasm_store.c`) a cap on each
+/// grammar: one can't fill the memory the others parse in. Eight hold a
+/// file's language and the few its injections bring in (a Markdown file's
+/// fences, a web template's script and style) for several files at once,
+/// so switching between them doesn't instantiate a module again, which runs
+/// its initializer. It bounds the cache, not the stores alive at once:
+/// parsers in use are outside it, a grammar new to the thread gets its store
+/// before the oldest cached one goes, and a grammar taken twice at once (an
+/// injection of itself) has a second store until it's given back.
+pub(crate) const WASM_PARSERS_PER_THREAD: usize = 8;
+
 thread_local! {
-    static PARSER: Cell<Option<Cached>> = const { Cell::new(None) };
+    static PARSERS: RefCell<Parsers> = const {
+        RefCell::new(Parsers {
+            native: None,
+            wasm: Vec::new(),
+        })
+    };
+}
+
+/// A thread's parsers, kept between parses.
+struct Parsers {
+    /// The one native languages share: they need no store.
+    native: Option<Cached>,
+    /// One per WebAssembly language, least recently used first, at most
+    /// [`WASM_PARSERS_PER_THREAD`].
+    wasm: Vec<Cached>,
 }
 
 struct Cached {
     parser: Parser,
-    /// Whether it has a [`WasmStore`], counted in [`LIVE_STORES`].
-    wasm: bool,
+    /// The WebAssembly language its [`WasmStore`] is for ([`wasm_key`]),
+    /// counted in [`LIVE_STORES`]; `None` for the native parser, which has
+    /// no store.
+    store_for: Option<usize>,
+}
+
+impl Cached {
+    fn native() -> Self {
+        Self {
+            parser: Parser::new(),
+            store_for: None,
+        }
+    }
 }
 
 impl Drop for Cached {
     fn drop(&mut self) {
-        if self.wasm {
+        if self.store_for.is_some() {
             LIVE_STORES.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }
 
-/// This thread's parser, back in its cache when dropped, reset to parse
-/// afresh. When that one's taken already, a new one.
+/// Which WebAssembly language a parser's store is for: the language's
+/// address, which a registered one keeps for the process's life.
+fn wasm_key(language: &Language) -> usize {
+    std::ptr::from_ref(language) as usize
+}
+
+/// This thread's native parser, or a new one when it's taken.
+fn take_native() -> Cached {
+    (PARSERS.try_with(|parsers| parsers.borrow_mut().native.take()))
+        .ok()
+        .flatten()
+        .unwrap_or_else(Cached::native)
+}
+
+/// This thread's parser for the WebAssembly language `key`, or, when it has
+/// none or it's taken, a new one with a store of its own.
+fn take_wasm(key: usize, name: &str) -> Result<Cached, LanguageError> {
+    let kept = PARSERS.try_with(|parsers| {
+        let wasm = &mut parsers.borrow_mut().wasm;
+        let at = wasm
+            .iter()
+            .position(|cached| cached.store_for == Some(key))?;
+        Some(wasm.remove(at))
+    });
+    if let Some(kept) = kept.ok().flatten() {
+        return Ok(kept);
+    }
+    let store = engine()
+        .map_err(str::to_owned)
+        .and_then(|engine| WasmStore::new(engine).map_err(|error| error.to_string()))
+        .map_err(|error| {
+            log::error!("{name}: no WebAssembly store: {error}");
+            LanguageError::Wasm
+        })?;
+    let mut parser = Parser::new();
+    parser.set_wasm_store(store)?;
+    LIVE_STORES.fetch_add(1, Ordering::Relaxed);
+    Ok(Cached {
+        parser,
+        store_for: Some(key),
+    })
+}
+
+/// Puts `cached` back in this thread's cache, reset to parse afresh: as its
+/// language's most recently used, dropping the least recently used past
+/// [`WASM_PARSERS_PER_THREAD`]. One the cache holds already for its
+/// language, as when it was taken twice, is just dropped.
+fn give_back(mut cached: Cached) {
+    // A parse stopped part way would otherwise resume.
+    cached.parser.reset();
+    if cached.parser.set_included_ranges(&[]).is_err() {
+        return;
+    }
+    // Gone at thread exit, when the parser is just dropped. What isn't kept
+    // is dropped once the cache is no longer borrowed.
+    let _dropped = PARSERS.try_with(move |parsers| {
+        let parsers = &mut *parsers.borrow_mut();
+        let Some(key) = cached.store_for else {
+            if parsers.native.is_some() {
+                return Some(cached);
+            }
+            parsers.native = Some(cached);
+            return None;
+        };
+        if (parsers.wasm.iter()).any(|other| other.store_for == Some(key)) {
+            return Some(cached);
+        }
+        parsers.wasm.push(cached);
+        (parsers.wasm.len() > WASM_PARSERS_PER_THREAD).then(|| parsers.wasm.remove(0))
+    });
+}
+
+/// One of this thread's parsers, back in its cache when dropped, reset to
+/// parse afresh: the native one, or, once [set](Self::set_language) to a
+/// WebAssembly language, that language's own. When the one wanted is taken
+/// already, a new one, dropped after.
 pub(crate) struct ThreadParser {
     cached: Option<Cached>,
     /// The WebAssembly language set, if it is one.
@@ -675,12 +791,8 @@ struct WasmLanguage {
 
 impl ThreadParser {
     pub(crate) fn take() -> Self {
-        let cached = PARSER.try_with(Cell::take).ok().flatten();
         Self {
-            cached: Some(cached.unwrap_or_else(|| Cached {
-                parser: Parser::new(),
-                wasm: false,
-            })),
+            cached: Some(take_native()),
             wasm: None,
         }
     }
@@ -692,25 +804,24 @@ impl ThreadParser {
         Ok(parser)
     }
 
-    /// Sets the parser's language. A WebAssembly one gets the parser a store
-    /// if it has none, and is set when it [parses](Self::parse).
+    /// Sets the parser's language. A WebAssembly one swaps in the parser
+    /// with that language's store, making it if the thread has none, and is
+    /// set when it [parses](Self::parse); a native one swaps in the native
+    /// parser.
     pub(crate) fn set_language(&mut self, language: &Language) -> Result<(), LanguageError> {
         self.wasm = None;
-        let cached = self.cached();
-        if !language.grammar.is_wasm() {
-            return cached.parser.set_language(&language.grammar);
+        let key = language.grammar.is_wasm().then(|| wasm_key(language));
+        if self.cached().store_for != key {
+            let next = match key {
+                None => take_native(),
+                Some(key) => take_wasm(key, language.name())?,
+            };
+            if let Some(previous) = self.cached.replace(next) {
+                give_back(previous);
+            }
         }
-        if !cached.wasm {
-            let store = engine()
-                .map_err(str::to_owned)
-                .and_then(|engine| WasmStore::new(engine).map_err(|error| error.to_string()))
-                .map_err(|error| {
-                    log::error!("{}: no WebAssembly store: {error}", language.name());
-                    LanguageError::Wasm
-                })?;
-            cached.parser.set_wasm_store(store)?;
-            cached.wasm = true;
-            LIVE_STORES.fetch_add(1, Ordering::Relaxed);
+        if key.is_none() {
+            return self.cached().parser.set_language(&language.grammar);
         }
         self.wasm = Some(WasmLanguage {
             name: language.name(),
@@ -780,23 +891,9 @@ impl DerefMut for ThreadParser {
 
 impl Drop for ThreadParser {
     fn drop(&mut self) {
-        let Some(mut cached) = self.cached.take() else {
-            return;
-        };
-        // A parse stopped part way would otherwise resume.
-        cached.parser.reset();
-        if cached.parser.set_included_ranges(&[]).is_err() {
-            return;
+        if let Some(cached) = self.cached.take() {
+            give_back(cached);
         }
-        // Gone at thread exit, when the parser is just dropped.
-        let _ = PARSER.try_with(|slot| {
-            // One with a store is the one worth keeping.
-            let kept = match slot.take() {
-                Some(other) if other.wasm || !cached.wasm => other,
-                _ => cached,
-            };
-            slot.set(Some(kept));
-        });
     }
 }
 
@@ -841,5 +938,72 @@ mod tests {
         register_language(&spec("json_counted", &good)).unwrap();
         assert_eq!(wasm_stats().grammars, before + 1);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A thread keeps one native parser, however many were taken at once,
+    /// and one per WebAssembly language, the least recently used dropped
+    /// past [`WASM_PARSERS_PER_THREAD`]; a parser set from one kind to the
+    /// other swaps the thread's parser for it in.
+    #[cfg(feature = "json")]
+    #[test]
+    fn a_thread_keeps_one_native_parser_and_one_per_wasm_language() {
+        use super::{PARSERS, ThreadParser, WASM_PARSERS_PER_THREAD, wasm_key};
+
+        let manifest = std::env::var_os("CARGO_MANIFEST_DIR").expect("run by cargo");
+        let wasm = Path::new(&manifest).join("tests/fixtures/tree-sitter-json.wasm");
+        let languages: Vec<_> = (0..=WASM_PARSERS_PER_THREAD)
+            .map(|i| {
+                let name = format!("json_cache{i}");
+                register_language(&GrammarSpec {
+                    language: name.clone(),
+                    wasm: wasm.clone(),
+                    extensions: vec![format!("{name}x")],
+                    ..GrammarSpec::default()
+                })
+                .unwrap()
+            })
+            .collect();
+        let json = crate::language_by_name("json").unwrap();
+        std::thread::spawn(move || {
+            let kept = || {
+                PARSERS.with(|parsers| {
+                    let parsers = parsers.borrow();
+                    let wasm = parsers.wasm.iter().map(|cached| cached.store_for);
+                    (parsers.native.is_some(), wasm.collect::<Vec<_>>())
+                })
+            };
+            let key = |i: usize| Some(wasm_key(languages[i]));
+
+            let both = (
+                ThreadParser::for_language(json).unwrap(),
+                ThreadParser::for_language(json).unwrap(),
+            );
+            assert_eq!(kept(), (false, vec![]));
+            drop(both);
+            assert_eq!(kept(), (true, vec![]));
+
+            let mut parser = ThreadParser::for_language(languages[0]).unwrap();
+            assert_eq!(parser.cached().store_for, key(0));
+            assert_eq!(kept(), (true, vec![]));
+            parser.set_language(json).unwrap();
+            assert_eq!(parser.cached().store_for, None);
+            assert_eq!(kept(), (false, vec![key(0)]));
+            parser.set_language(languages[0]).unwrap();
+            assert_eq!(kept(), (true, vec![]));
+            drop(parser);
+            assert_eq!(kept(), (true, vec![key(0)]));
+
+            for language in &languages[1..] {
+                drop(ThreadParser::for_language(language).unwrap());
+            }
+            let newest: Vec<_> = (1..=WASM_PARSERS_PER_THREAD).map(key).collect();
+            assert_eq!(kept(), (true, newest));
+            // Used again, the oldest is the newest.
+            drop(ThreadParser::for_language(languages[1]).unwrap());
+            let order: Vec<_> = (2..=WASM_PARSERS_PER_THREAD).chain([1]).map(key).collect();
+            assert_eq!(kept(), (true, order));
+        })
+        .join()
+        .unwrap();
     }
 }

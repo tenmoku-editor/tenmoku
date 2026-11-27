@@ -212,7 +212,12 @@ typedef struct {
 
 // Linear memory layout:
 // [ <-- stack | stdlib statics | lexer | language statics --> | serialization_buffer | heap --> ]
-#define MAX_MEMORY_SIZE (128 * 1024 * 1024 / MEMORY_PAGE_SIZE)
+// fastedit patch: 64 MiB, not 128. The runtime gives each grammar a store of
+// its own on each thread, so this caps one grammar. The largest first-party
+// module needs 21.3 MiB (verilog: 17.2 MiB of static data, plus the stdlib's
+// two pages, the lexer, the serialization buffer and the 4 MiB scanner heap);
+// this is the smallest power of two at least twice that.
+#define MAX_MEMORY_SIZE (64 * 1024 * 1024 / MEMORY_PAGE_SIZE)
 
 /************************
  * WasmDylinkMemoryInfo
@@ -1286,7 +1291,16 @@ static bool ts_wasm_store__instantiate(
   }
 
   // Grow the memory to make room for the new data.
-  uint32_t needed_memory_size = ts_wasm_store__heap_address(self) + dylink_info->memory_size;
+  // fastedit patch: summed in 64 bits, so a static size near 4 GiB can't
+  // wrap to a small one, and a module whose static data doesn't fit under
+  // the store's cap is a load error. The offset that grows by it after
+  // then stays under the cap too.
+  uint64_t needed_memory_size_64 = (uint64_t)ts_wasm_store__heap_address(self) + dylink_info->memory_size;
+  if (needed_memory_size_64 > (uint64_t)MAX_MEMORY_SIZE * MEMORY_PAGE_SIZE) {
+    format(error_message, "invalid memory size %u", dylink_info->memory_size);
+    goto error;
+  }
+  uint32_t needed_memory_size = (uint32_t)needed_memory_size_64;
   uint32_t current_memory_size = wasmtime_memory_data_size(context, &self->memory);
   if (needed_memory_size > current_memory_size) {
     uint32_t pages_to_grow = (

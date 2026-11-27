@@ -34,6 +34,10 @@ someone else's, and 0.27.0 trusts it in ways the extensions decision
   copied out of the module's memory after checking only that they lie inside
   it, and the parser then indexed them unchecked, so a module with correct
   exports but corrupt tables could make it read out of bounds.
+- **Unchecked memory sums.** A store's one linear memory is capped
+  (`MAX_MEMORY_SIZE`), but a module's static size (its `dylink.0`
+  `memory_size`, which costs nothing in the file) was added to the store's
+  32-bit offsets unchecked, so a size near 4 GiB wrapped round to a small one.
 
 `crates/fe-syntax/tests/runtime_grammar.rs` checks the first three stay fixed
 (`a_looping_grammar_is_stopped_at_its_deadline`,
@@ -41,11 +45,65 @@ someone else's, and 0.27.0 trusts it in ways the extensions decision
 `a_bad_export_is_an_error_not_an_abort`,
 `hostile_grammars_are_errors_not_crashes`), with the fixtures
 `tests/fixtures/hostile-grammars.md` describes, and
-`crates/fe-syntax/tests/wasm_table_validation.rs` the last, with a hostile
-module for each table.
+`crates/fe-syntax/tests/wasm_table_validation.rs` the tables, with a hostile
+module for each, and `crates/fe-syntax/tests/wasm_memory_cap.rs` the memory
+(`a_grammar_that_fills_its_store_leaves_other_grammars_parsing`,
+`a_grammar_growing_its_memory_stops_at_the_cap`,
+`an_overflowing_static_size_is_a_load_error`).
 
 So a grammar's Wasm code can't touch host memory, and a malformed grammar
 can't crash the editor: it fails to load, as an error naming its file.
+
+## Memory
+
+A store's linear memory is capped at 64 MiB (`MAX_MEMORY_SIZE`), and
+fe-syntax gives each WebAssembly grammar a store of its own on each thread
+that parses it (`crates/fe-syntax/src/runtime.rs`). So the cap is per
+store, and a store is one grammar's: a grammar's static data and its own
+`memory.grow` stop at 64 MiB, and a grammar that fills its store leaves the
+others parsing in theirs.
+
+Between parses a thread keeps at most `WASM_PARSERS_PER_THREAD` (8) of
+these parsers, least recently used dropped first. That limits the cache,
+not the stores alive at once. While parsers are in use, a thread also has
+one store for each grammar it's parsing with a parser taken from outside
+the cache: a grammar new to the thread, or one already taken. A ninth
+grammar's store is made before a cached one is dropped, and a grammar taken
+twice at once (a parse and an injection layer inside it, for instance) has
+a second store until that parse ends. So a thread holds at most
+64 MiB × (8 + the parsers it has in use), and one grammar holds at most
+64 MiB × the parsers taking it at once, per thread. Usually that's one, and
+two or more only while a parse nests the grammar inside itself.
+
+A hostile grammar so holds 64 MiB times the threads that parse
+WebAssembly, times its nesting while a nested parse runs. On Linux, those
+threads are the main thread, GPUI's background workers
+(`available_parallelism`, at least 2), fe-nav's index build workers (half
+that, at least 1, while a build runs) and fe-nav's search threads (at most
+2 for symbols and 4 for the fallback). That's about 1.5 × cores + 7: 43
+threads, and 2.7 GiB, on a 24-core machine. On macOS, GPUI's background
+work runs on GCD's queues, whose thread count isn't fixed but is about the
+core count. These bound the memory a grammar can reserve; a store's memory
+is resident only where it was written.
+
+The cap was chosen from the first-party grammars
+(`scripts/build-grammar-wasm.sh`, every language, 2026-11-27); the decision
+is `docs/decisions/aqqz9w5mhj-wasm-grammar-memory-cap.md`. A grammar's
+store needs its static data plus the stdlib's two pages (its stack and
+statics), the lexer and the serialization buffer (128 KiB in all), and the
+4 MiB a scanner's `malloc` heap may reach (`MAX_HEAP_SIZE` in
+`src/wasm-stdlib/external_scanner_allocator.c`). The five largest:
+
+| Grammar | Static data | Needs |
+| --- | --- | --- |
+| verilog | 17.16 MiB | 21.28 MiB |
+| fsharp | 10.74 MiB | 14.87 MiB |
+| razor | 10.00 MiB | 14.13 MiB |
+| nim | 7.97 MiB | 12.09 MiB |
+| cuda | 6.57 MiB | 10.70 MiB |
+
+The cap is the smallest power of two at least twice the largest need, and no
+more than upstream's 128 MiB.
 
 ## What changed
 
@@ -77,6 +135,12 @@ Every change is marked `fastedit patch` in a comment.
   and an external scanner's below its `external_token_count`. Otherwise the call
   fails and the parse stops. The memory is re-read after the call, in case
   the call grew it.
+
+- `MAX_MEMORY_SIZE` is 64 MiB, not 128 (see Memory, above).
+- A module's static size is added to the store's memory offset in 64 bits
+  when it's instantiated (`ts_wasm_store__instantiate`), and a total past
+  the cap is an error ("invalid memory size") from the load or the
+  instantiation, so neither the sum nor the offset that grows by it wraps.
 
 - Every static table is validated when the language is loaded
   (`ts_wasm_language__validate`), before `ts_wasm_store_load_language` returns
