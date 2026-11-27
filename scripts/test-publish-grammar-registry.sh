@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Fixture test for scripts/publish-grammar-registry.sh: a two-language registry
-# built and signed by grammar-registry with a throwaway key, published against
-# a fake gh on PATH that keeps its releases in a directory. No network.
+# Fixture test for scripts/publish-grammar-registry.sh: a registry of two
+# languages and a plugin, built by grammar-registry and
+# scripts/build-plugin-registry.sh --dry-run (python3 3.11 or later) and signed
+# with a throwaway key, published against a fake gh on PATH that keeps its
+# releases in a directory. No network.
 #
 #   scripts/test-publish-grammar-registry.sh
 #   GRAMMAR_REGISTRY=target/debug/grammar-registry scripts/test-publish-grammar-registry.sh
@@ -29,7 +31,8 @@ repo=test-owner/registry
 grammars=$t/grammars
 wasm=$t/wasm
 dist=$t/dist
-mkdir -p "$grammars" "$wasm" "$t/bin" "$t/state"
+plugins=$t/plugins
+mkdir -p "$grammars" "$wasm" "$plugins/demo" "$t/bin" "$t/state"
 
 # The fake gh: `release view|create|edit|upload|download <tag> ...`. Each call is
 # a line of the log, `<verb> <tag>` and the base names of the files it was
@@ -142,6 +145,27 @@ language kotlin Kotlin jvm $'crate = "tree-sitter-kotlin-sg"\nversion = "0.4.1"\
 language ruby Ruby web $'git = "https://github.com/tree-sitter/tree-sitter-ruby"\nrev = "0123456789abcdef0123456789abcdef01234567"'
 echo "ruby's NOTICE" >"$grammars/ruby/NOTICE"
 
+# The fixture plugin, its module prebuilt.
+cat >"$plugins/demo/extension.toml" <<'EOF'
+id = "acme.demo"
+name = "Demo"
+version = "0.2.0"
+license = "MIT"
+
+[engine]
+tenmoku = "1.1"
+
+[contributes.plugin]
+wasm = "demo.wasm"
+capabilities = ["commands"]
+EOF
+echo 'listed = true' >"$plugins/demo/registry.toml"
+printf '\0asm demo' >"$plugins/demo/demo.wasm"
+echo "demo's LICENSE" >"$plugins/demo/LICENSE"
+echo "# Demo" >"$plugins/demo/README.md"
+plugin_file=acme.demo-0.2.0.tar.gz
+plugin_path=plugins/acme.demo/0.2.0/$plugin_file
+
 # A signed registry in $1 at the serial $2, as CI builds it.
 build_dist() {
   "${registry[@]}" generate --grammars "$grammars" --wasm "$wasm" --out "$1" --serial "$2" >/dev/null
@@ -151,10 +175,18 @@ build_dist() {
     echo "stub  $name.tar.gz" >"$1/packs/$name.tar.gz.sha256"
   done
   "${registry[@]}" finalize --index "$1/index.json" --tarballs "$1/packs" >/dev/null
+  "$here/build-plugin-registry.sh" --dry-run --plugins-dir "$plugins" --out "$1" >/dev/null
   "${registry[@]}" sign --index "$1/index.json" --registry-toml "$grammars/registry.toml" \
     <"$t/key" >/dev/null
 }
 build_dist "$dist" 7
+# A plugin's tag: <id>-<the first 16 hex digits of its archive's SHA-256>.
+tag_of_archive() {
+  local sum
+  sum=$(if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi)
+  printf 'acme.demo-%s\n' "${sum:0:16}"
+}
+plugin_tag=$(tag_of_archive "$dist/$plugin_path")
 cp "$dist/index.json" "$t/index.json.good"
 cp "$dist/index.json.sig" "$t/index.json.sig.good"
 
@@ -194,8 +226,10 @@ run || fail "the first publish failed"
 expected="view index
 view $kotlin
 view $ruby
+view $plugin_tag
 create $kotlin $(files_of kotlin)
 create $ruby $(files_of ruby)
+create $plugin_tag $plugin_file
 create index
 upload index Tenmoku-language-pack-jvm.tar.gz Tenmoku-language-pack-jvm.tar.gz.sha256 Tenmoku-language-pack-web.tar.gz Tenmoku-language-pack-web.tar.gz.sha256 Tenmoku-language-pack.tar.gz Tenmoku-language-pack.tar.gz.sha256
 upload index index.json.sig
@@ -209,6 +243,7 @@ ok "a new tag is created with exactly its files, and the index uploads come last
   fail "ruby's files: $(files_of ruby)"
 held=$(cd "$t/state/$kotlin" && printf '%s ' *)
 [ "$held" = "$(files_of kotlin) " ] || fail "kotlin's release holds $held"
+cmp -s "$t/state/$plugin_tag/$plugin_file" "$dist/$plugin_path" || fail "the plugin's release doesn't hold its archive"
 ok "the fake's releases hold the entries' files"
 
 # 2. Published again, as a retry does: both releases match their entries and
@@ -218,6 +253,8 @@ grep -q "^create" "$t/log" && fail "the second publish created a release:
 $(log)"
 grep -q "^download index" "$t/log" || fail "the second publish didn't read the published index"
 grep -q "kotlin: $kotlin is published" "$t/out" || fail "kotlin wasn't reported as published"
+grep -q "^download $plugin_tag" "$t/log" || fail "the published plugin archive wasn't checked"
+grep -q "acme.demo 0.2.0: $plugin_tag is published" "$t/out" || fail "the plugin wasn't reported as published"
 [ "$(tail -n 2 "$t/log")" = "upload index index.json.sig
 upload index index.json" ] || fail "the second publish didn't end with the sig, then the index"
 ok "an existing matching release is skipped"
@@ -285,8 +322,10 @@ commands=$(grep '^gh ' "$t/out" | awk '{ print $2, $3, $4 }')
 expected="release view index
 release view $kotlin
 release view $ruby
+release view $plugin_tag
 release create $kotlin
 release create $ruby
+release create $plugin_tag
 release create index
 release upload index
 release upload index
@@ -296,6 +335,8 @@ $commands"
 grep -q "^gh release create $kotlin .*--title Kotlin\\\\ syntax\\\\ 1.2.3" "$t/out" || fail "the dry run's title"
 tail -n 3 "$t/out" | head -n 1 | grep -q 'index.json.sig$' || fail "the dry run's sig upload isn't before the index"
 tail -n 2 "$t/out" | head -n 1 | grep -q 'index.json$' || fail "the dry run's last upload isn't the index"
+grep -q "^gh release create $plugin_tag --repo $repo .*--latest=false --title Demo\\\\ plugin\\\\ 0.2.0 .*/$plugin_path\$" "$t/out" ||
+  fail "the dry run's plugin upload"
 ok "--dry-run prints every gh command and runs none"
 
 # The release notes name the source pin and the commit.
@@ -393,3 +434,83 @@ dist=$t/dist-b
 run || fail "B's retry failed"
 dist=$dist_a
 ok "an equal serial is a retry only if the bytes are the same"
+
+# 11. Plugins. A missing, changed or extra file in dist publishes nothing, the
+# new languages' releases included.
+nothing_published() {
+  grep -qvE "^(view|download) " "$t/log" && fail "$1 still published:
+$(log)"
+  true
+}
+reset
+cp "$dist/$plugin_path" "$t/archive.good"
+rm "$dist/$plugin_path"
+run && fail "an index whose plugin archive is missing was published"
+grep -q "the index names .*$plugin_file, which isn't there" "$t/out" || fail "the missing archive isn't named"
+nothing_published "a missing plugin archive"
+run --dry-run && fail "the dry run passed a missing plugin archive"
+grep -qE "^gh release (create|upload)" "$t/out" && fail "the dry run would publish with a missing plugin archive"
+head -c "$(wc -c <"$t/archive.good" | tr -d ' ')" /dev/zero >"$dist/$plugin_path"
+run && fail "a changed plugin archive was published"
+grep -q "$plugin_file isn't the file the index names" "$t/out" || fail "the changed archive isn't named"
+nothing_published "a changed plugin archive"
+cp "$t/archive.good" "$dist/$plugin_path"
+echo extra >"$dist/plugins/acme.demo/0.2.0/extra"
+run && fail "an unlisted plugin file was passed over"
+grep -q "holds files its index entry doesn't list" "$t/out" || fail "the unlisted file isn't reported"
+nothing_published "an unlisted plugin file"
+rm "$dist/plugins/acme.demo/0.2.0/extra"
+ok "a missing, changed or unlisted plugin file publishes nothing"
+
+# 12. A published plugin release that differs from the entry (name, size, or
+# only its bytes) fails naming it, publishes nothing and is left alone.
+size=$(wc -c <"$t/archive.good" | tr -d ' ')
+for case in "other.tar.gz $size" "$plugin_file $((size + 1))" "$plugin_file $size"; do
+  read -r held bytes <<<"$case"
+  reset
+  printf '%s\t%s\n' "$held" "$bytes" | fake_release "$plugin_tag"
+  cp "$t/state/$plugin_tag/$held" "$t/held"
+  run && fail "a differing plugin release ($case) didn't fail"
+  grep -q "acme.demo 0.2.0: the release $plugin_tag exists with" "$t/out" ||
+    fail "the failure doesn't name the plugin ($case)"
+  grep -q "A plugin's release is never replaced" "$t/out" || fail "the failure doesn't say what to do ($case)"
+  nothing_published "a differing plugin release ($case)"
+  [ "$(cd "$t/state/$plugin_tag" && echo *)" = "$held" ] && cmp -s "$t/held" "$t/state/$plugin_tag/$held" ||
+    fail "the plugin's release was changed ($case)"
+done
+ok "a published plugin release that differs fails, and is never replaced"
+reset
+mkdir -p "$t/state/$plugin_tag"
+cp "$t/archive.good" "$t/state/$plugin_tag/$plugin_file"
+touch "$t/state/$plugin_tag.draft"
+run && fail "a draft plugin release was taken as published"
+grep -q "acme.demo 0.2.0: the release $plugin_tag is a draft" "$t/out" || fail "the draft plugin release isn't named"
+nothing_published "a draft plugin release"
+ok "a draft plugin release fails the run"
+
+# 13. The tag is a content address: a changed archive, its version unchanged,
+# is a new release, and the old one, which cached indexes point at, stays.
+reset
+run || fail "the setup publish failed"
+echo "changed" >>"$plugins/demo/README.md"
+build_dist "$t/dist-d" 9
+new_tag=$(tag_of_archive "$t/dist-d/$plugin_path")
+[ "$new_tag" != "$plugin_tag" ] || fail "the changed archive has the old tag"
+dist=$t/dist-d
+run || fail "a changed plugin's publish failed"
+dist=$dist_a
+[ "$(grep '^create' "$t/log")" = "create $new_tag $plugin_file" ] || fail "the changed plugin's creates:
+$(log)"
+cmp -s "$t/state/$plugin_tag/$plugin_file" "$t/archive.good" || fail "the old archive's release was changed"
+ok "a changed plugin archive gets its own release, and the old one stays"
+
+# 14. A version that can't name a release publishes nothing.
+sed -i.bak 's/^version = .*/version = "0.3.0+build"/' "$plugins/demo/extension.toml" && rm "$plugins/demo/extension.toml.bak"
+build_dist "$t/dist-e" 10
+reset
+dist=$t/dist-e
+run && fail "a version with a + was published"
+grep -q "has characters a release can't be named with" "$t/out" || fail "the version's refusal isn't explained"
+nothing_published "an unnameable version"
+dist=$dist_a
+ok "a plugin version that can't name a release publishes nothing"

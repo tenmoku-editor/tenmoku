@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Publishes a signed grammar registry, as scripts/build-grammar-registry.sh
-# wrote it and `grammar-registry sign` signed it, to the GitHub releases of
-# the registry repository (docs/release/grammar-registry.md).
+# wrote it, scripts/build-plugin-registry.sh added the plugins to it and
+# `grammar-registry sign` signed it, to the GitHub releases of the registry
+# repository (docs/release/grammar-registry.md,
+# docs/release/plugin-registry.md).
 #
 #   scripts/publish-grammar-registry.sh --dist target/registry \
 #     [--repo tenmoku-editor/registry] [--registry-toml FILE] [--dry-run]
@@ -10,13 +12,17 @@
 #    registry.toml's public_key (`grammar-registry verify`), that the index's
 #    url_template is the repository's, that the published index's serial
 #    (or its watermark's) isn't newer than this one's, nor equal with other bytes, and that every file it names is in <dist>
-#    with its size and SHA-256. A draft release (a run cut off partway) fails
-#    the run. On any failure it publishes nothing.
+#    with its size and SHA-256, plugins' archives included. A draft release (a
+#    run cut off partway) fails the run. On any failure it publishes nothing.
 # 2. For each language: if the release <tag> exists, its assets' names and
 #    sizes must be the index entry's files', and it's skipped; otherwise
 #    (once every existing one has checked out) it's created with exactly
 #    those files. A language's release is never replaced or deleted: older
 #    indexes still point at it, and its tag is its files' digest.
+#    Each plugin's archive likewise, as the release <id>-<the first 16 hex
+#    digits of its SHA-256>: a changed archive is a new release. The tag holds
+#    only part of the digest, so an existing release's archive is also
+#    downloaded and must have the entry's whole SHA-256.
 # 3. Then the fixed release `index`, created once: the pack tarballs and
 #    their .sha256 files, then index.json.sig, then index.json, each replacing
 #    the last (--clobber). index.json goes last, so a reader never sees an
@@ -168,6 +174,29 @@ release_view() {
   fi
 }
 
+# Each plugin of the index as `<id>\t<version>\t<file>\t<size>\t<sha256>\t<name>`.
+# grammar-registry has no command for them; it has verified and parsed the
+# index by the time this reads it.
+plugin_entries() {
+  python3 -I - "$1" <<'PY'
+import json, sys
+
+with open(sys.argv[1], "rb") as f:
+    plugins = json.load(f).get("plugins", {})
+for _, p in sorted(plugins.items()):
+    # The name, which may be empty or hold any text, goes last.
+    fields = [p["id"], p["version"], p["file"], p["size"], p["sha256"], " ".join(p["name"].split())]
+    print(*fields, sep="\t")
+PY
+}
+
+# The release holding the plugin $1's archive of SHA-256 $2: the {tag} of its
+# URL, a content address, which the app builds the same way
+# (docs/release/plugin-registry.md).
+plugin_tag() {
+  printf '%s-%s\n' "$1" "${2:0:16}"
+}
+
 draft() {
   die "$1: the release $2 is a draft, which an earlier run left when it stopped partway: check it, delete it by hand (gh release delete $2 --repo $repo) and rerun. Publishing nothing."
 }
@@ -184,6 +213,7 @@ expected="https://github.com/$repo/releases/download/{tag}/{file}"
 languages=$("${registry[@]}" languages --index "$index")
 tarballs=$("${registry[@]}" tarballs --index "$index")
 serial=$("${registry[@]}" serial --index "$index")
+plugins=$(plugin_entries "$index") || die "couldn't read the index's plugins: publishing nothing"
 
 # Never replace a newer index: a rerun of an older run keeps its commit, and
 # its older serial. Freshness is judged against two records of what was last
@@ -269,6 +299,45 @@ A language's release is never replaced: find out how it differs before deleting 
   esac
 done <<<"$languages"
 
+create_plugins=()
+while IFS=$'\t' read -r id version file file_size file_sha name; do
+  [ -n "$id" ] || continue
+  # What goes into a path, a tag and a URL: GitHub may rename an asset with
+  # other characters, and then the index's URL wouldn't find it.
+  for part in "$id" "$version" "$file"; do
+    [[ $part =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+      die "the plugin $id $version: \"$part\" has characters a release can't be named with"
+  done
+  tag=$(plugin_tag "$id" "$file_sha")
+  [[ $tag != *..* ]] || die "the plugin $id $version: $tag isn't a valid git tag"
+  dir=$dist/plugins/$id/$version
+  check_file "$dir/$file" "$file_size" "$file_sha"
+  [ "$(find "$dir" -mindepth 1 | wc -l | tr -d ' ')" = 1 ] ||
+    die "$dir holds files its index entry doesn't list"
+  release_view "$tag"
+  case $release_state in
+  absent) create_plugins+=("$id") ;;
+  draft) draft "$id $version" "$tag" ;;
+  published)
+    replaced="A plugin's release is never replaced: find out how it differs before deleting it by hand."
+    if [ "$release_assets" != "$file"$'\t'"$file_size" ]; then
+      die "$id $version: the release $tag exists with other files than its index entry lists:
+$release_assets
+$replaced"
+    fi
+    published=$(mktemp -d)
+    gh release download "$tag" --repo "$repo" --pattern "$file" --dir "$published" </dev/null ||
+      die "$id $version: couldn't download the published $file: publishing nothing"
+    published_sha=$(sha256 "$published/$file")
+    rm -rf "$published"
+    [ "$published_sha" = "$file_sha" ] ||
+      die "$id $version: the release $tag exists with another $file (SHA-256 $published_sha, the index lists $file_sha).
+$replaced"
+    echo "$id $version: $tag is published"
+    ;;
+  esac
+done <<<"$plugins"
+
 while IFS=$'\t' read -r name file_size file_sha; do
   [ -n "$name" ] || continue
   check_file "$dist/packs/$name" "$file_size" "$file_sha"
@@ -294,6 +363,16 @@ for language in ${create[@]+"${create[@]}"}; do
     --title "$name syntax $version" --notes "$text" "${paths[@]}"
 done
 
+# The new plugin archives' releases.
+for id in ${create_plugins[@]+"${create_plugins[@]}"}; do
+  line=$(awk -F'\t' -v id="$id" '$1 == id' <<<"$plugins")
+  IFS=$'\t' read -r _ version file _ file_sha name <<<"$line"
+  gh_run release create "$(plugin_tag "$id" "$file_sha")" --repo "$repo" --target main --latest=false \
+    --title "${name:-$id} plugin $version" \
+    --notes "Tenmoku plugin $id $version."$'\n'"Built from Tenmoku commit $commit." \
+    "$dist/plugins/$id/$version/$file"
+done
+
 # 3. The index, last of all. The concurrency group keeps another run from
 # changing it since the check above.
 index_notes="The grammar registry's index and offline packs. index.json is signed by
@@ -313,7 +392,7 @@ fi
 gh_run release upload index --repo "$repo" --clobber "$sig"
 gh_run release upload index --repo "$repo" --clobber "$index"
 if [ -n "$dry_run" ]; then
-  echo "dry run: would publish ${#create[@]} language releases, if none exist yet, and the index to $repo"
+  echo "dry run: would publish ${#create[@]} language and ${#create_plugins[@]} plugin releases, if none exist yet, and the index to $repo"
 else
-  echo "published ${#create[@]} new language releases and the index (serial $serial) to $repo"
+  echo "published ${#create[@]} new language releases, ${#create_plugins[@]} new plugin releases and the index (serial $serial) to $repo"
 fi

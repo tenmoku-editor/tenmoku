@@ -6,6 +6,8 @@ GitHub releases of the public repository
 new or changed grammar reaches users with no app release. The source stays in
 `extensions/grammars/<language>/`. `crates/fe-registry` builds the index,
 signs it and checks it, and `.github/workflows/grammars.yml` publishes it.
+The first-party plugins are listed in the same index and published by the same
+workflow (`docs/release/plugin-registry.md`).
 
 This file is the index's schema (version 1) and the publishing contract. The
 design records are `docs/decisions/xb65tqark9-grammar-registry-index.md`
@@ -25,16 +27,20 @@ in:
 | A pack's tarball | `…/download/index/Tenmoku-language-pack-<pack>.tar.gz`, and its `.sha256` |
 | Every language in one tarball | `…/download/index/Tenmoku-language-pack.tar.gz`, and its `.sha256` (not in the index) |
 | A language's file | `url_template` with `{tag}` and `{file}` replaced: `https://github.com/tenmoku-editor/registry/releases/download/<tag>/<file>` |
+| A plugin's archive | `url_template` with `{tag}` replaced by `<id>-<first 16 hex digits of the archive's SHA-256>` (`docs/release/plugin-registry.md`) |
 
 A download URL on `github.com` redirects to
 `release-assets.githubusercontent.com`. Those are the two hosts the app
 already allows, and nothing else is needed.
 
-There are two kinds of release:
+There are three kinds of release:
 
 - **One per language version**, tagged with the language's `tag` (below). It
   holds exactly the files in the language's `files`. It's never replaced or
   deleted, because an older cached index can still point at it.
+- **One per plugin archive**, tagged `<id>-<first 16 hex digits of its
+  SHA-256>`, holding that file. It's never replaced or deleted either
+  (`docs/release/plugin-registry.md`).
 - **The fixed release `index`**, whose files are replaced on each publish:
   `index.json`, `index.json.sig`, and the pack tarballs with their `.sha256`
   files.
@@ -66,6 +72,7 @@ A reader must refuse:
 | `url_template` | string | A language file's URL, with `{tag}` and `{file}` placeholders. It's `registry.toml`'s `url_template`. |
 | `packs` | object | Each pack that at least one language lists, keyed by the pack's name. |
 | `languages` | object | Each language, keyed by its directory name under `extensions/grammars/` (for example `kotlin`). |
+| `plugins` | object, optional | Each plugin, keyed by its id (`docs/release/plugin-registry.md`). Left out when there are none. Releases v0.2.2 to v0.2.5 refuse an index that has it. |
 
 ### `packs.<pack>`
 
@@ -169,16 +176,17 @@ can't publish an index the app would refuse.
 
 ## Publishing
 
-`grammars.yml` runs on a push to `main` that touches the grammars, their
-scripts, `crates/fe-registry` or the workflow itself, and it can also be run
-by hand. One run at a time (`concurrency: grammar-registry`), and a run is
-never cancelled partway.
+`grammars.yml` runs on a push to `main` that touches the grammars, the
+plugins (`extensions/plugins/`), their scripts, `crates/fe-registry` or the
+workflow itself, and it can also be run by hand. One run at a time
+(`concurrency: grammar-registry`), and a run is never cancelled partway.
 
 1. **`build`** (`contents: read`, no secrets, because it compiles
    third-party C): `scripts/build-grammar-wasm.sh`, then
    `scripts/build-grammar-registry.sh` with `REGISTRY_SERIAL` set to HEAD's
-   committer time. It uploads `target/registry/` as the workflow artifact
-   `grammar-registry`.
+   committer time, then `scripts/build-plugin-registry.sh`, which adds the
+   plugins to the same index. It uploads `target/registry/` as the workflow
+   artifact `grammar-registry`.
 2. **`publish`** (`needs: build`, only on `refs/heads/main`, environment
    `registry`, which only `main` may deploy to): it builds `grammar-registry`,
    downloads the artifact, and signs the index with the private key piped to
@@ -192,8 +200,8 @@ the first failure:
 
 1. It checks everything before publishing anything. `grammar-registry verify`
    checks the index against its signature, the index's `url_template` must be
-   the target repository's, and every file the index names must be in the
-   dist directory with that size and SHA-256.
+   the target repository's, and every file the index names, plugins' archives
+   included, must be in the dist directory with that size and SHA-256.
 2. **Freshness.** Two records say what was last published: the `index`
    release's `index.json`, and a watermark line in the release's notes,
    `Publication watermark: serial=<n> sha256=<digest of index.json>`, which
@@ -216,11 +224,13 @@ the first failure:
    exactly the entry's file names and sizes, and is skipped. One that doesn't
    match fails the run, naming the language, before anything is created.
    **A draft release fails the run too**, whatever it holds, and so does a
-   draft `index` release (below).
+   draft `index` release (below). Each plugin archive's release is checked the
+   same way, and its SHA-256 too (`docs/release/plugin-registry.md`).
 4. It creates each missing language release:
    `gh release create <tag> --target main --latest=false --title "<Name>
    syntax <version>"`, with notes giving the grammar source pin from
-   `grammar-source.toml` and the commit, and exactly the entry's files.
+   `grammar-source.toml` and the commit, and exactly the entry's files. Then
+   it creates each missing plugin archive's release.
 5. It creates the `index` release if it doesn't exist, then uploads to it with
    `--clobber`, in this order: the pack tarballs and their `.sha256` files,
    then `index.json.sig`, then `index.json`.

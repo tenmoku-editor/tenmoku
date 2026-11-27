@@ -3,13 +3,16 @@ name: Grammars
 # Builds the first-party WebAssembly grammars (extensions/grammars/) and the
 # grammar registry: each language's artifact, the index and the pack
 # tarballs (scripts/build-grammar-wasm.sh, scripts/build-grammar-registry.sh).
-# On main, signs the index and publishes it all to the GitHub releases of
-# tenmoku-editor/registry (scripts/publish-grammar-registry.sh), so a new
-# grammar reaches users with no app release. docs/release/grammar-registry.md
-# documents the registry, and
+# Then adds the first-party plugins (extensions/plugins/) to the same index
+# (scripts/build-plugin-registry.sh). On main, signs the index and publishes
+# it all to the GitHub releases of tenmoku-editor/registry
+# (scripts/publish-grammar-registry.sh), so a new grammar or plugin is
+# published with no app release. docs/release/grammar-registry.md and
+# docs/release/plugin-registry.md document the registry, and
 # docs/decisions/yw5ahyq2bj-grammar-registry-publish.md this workflow.
 #
-# The build job compiles third-party grammar C, so it never sees a secret.
+# The build job compiles third-party grammar C and the plugins' crates, so it
+# never sees a secret.
 # Only the publish job, in the registry environment (its secrets, and only
 # main may deploy to it), can sign or write to the registry.
 
@@ -18,7 +21,9 @@ on:
     branches: [main]
     paths:
       - extensions/grammars/**
+      - extensions/plugins/**
       - scripts/build-grammar-*.sh
+      - scripts/build-plugin-registry.sh
       - scripts/package-language-pack.sh
       - scripts/publish-grammar-registry.sh
       - crates/fe-registry/**
@@ -71,6 +76,11 @@ jobs:
         # The serial is HEAD's committer time, so a later commit's index
         # supersedes an earlier one's.
         run: REGISTRY_SERIAL="$(git log -1 --format=%ct)" scripts/build-grammar-registry.sh
+      - name: Add the plugins to the registry
+        # Into the same index.json, which the publish job then signs whole.
+        run: |
+          rustup target add wasm32-wasip2
+          scripts/build-plugin-registry.sh --plugins-dir extensions/plugins --out target/registry
       - name: Upload the registry as a workflow artifact
         uses: actions/upload-artifact@v7
         with:

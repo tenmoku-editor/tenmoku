@@ -69,11 +69,80 @@ The signature vouches for the bytes the registry reviewed: there are no
 per-plugin keys. An install checks the signature, then the archive's size and
 SHA-256, then that the manifest asks for no capability the entry doesn't list.
 
-## Not wired into CI yet
+## How a plugin reaches users
 
-`.github/workflows/grammars.yml` doesn't run this script, and publishing the
-archives under `plugins/` isn't in `scripts/publish-grammar-registry.sh`.
-Both are a follow-up needing a human workflow approval.
+`.github/workflows/grammars.yml` publishes the plugins with the grammars
+(`docs/release/grammar-registry.md`, "Publishing"). A first-party plugin needs
+no app release:
+
+1. **Merge to `main`.** A push touching `extensions/plugins/**` or
+   `scripts/build-plugin-registry.sh` runs the workflow, as the grammars' paths
+   do, and it can be run by hand.
+2. **Build.** The `build` job, which holds no secret, builds the grammar
+   registry, then runs
+   `scripts/build-plugin-registry.sh --plugins-dir extensions/plugins --out target/registry`
+   with the `wasm32-wasip2` target. The module is built from source; a `.wasm`
+   checked into the plugin's directory isn't what's published. The archives and
+   the combined index go to the `publish` job as one artifact.
+3. **Sign.** The `publish` job signs `index.json` once, which covers the
+   grammars and the plugins.
+4. **Publish.** `scripts/publish-grammar-registry.sh` creates a release for
+   each new plugin archive and uploads the index last.
+5. **Install.** The index lists the plugin as an optional install (above). An
+   app that installs from the registry checks the index's signature, downloads
+   the archive from its URL and checks it against the entry ("Signing").
+
+### An archive's release and URL
+
+Each plugin archive is one release of `tenmoku-editor/registry`, holding
+exactly that file. Its tag is a content address, as a language's is:
+`<id>-<the first 16 hex digits of the archive's SHA-256>`, with no prefix. The
+entry has no URL or tag of its own: the archive is at the index's
+`url_template` with `{tag}` replaced by that tag and `{file}` by the entry's
+`file`. For Blocks 0.1.0:
+
+```text
+https://github.com/tenmoku-editor/registry/releases/download/tenmoku.blocks-<16 hex digits>/tenmoku.blocks-0.1.0.tar.gz
+```
+
+The in-app download (T2076) builds the tag the same way, from the entry's `id`
+and `sha256`. The publish refuses an id, version or file name with anything but
+ASCII letters, digits, `.`, `_` and `-` (so no `+` build metadata), since
+GitHub may rename an asset and a tag must be a valid git tag.
+
+The release is never replaced or deleted, because an older cached index can
+still point at it. Before publishing anything, the script checks that each
+archive in the artifact has the entry's size and SHA-256, and that an existing
+release isn't a draft and holds one asset with the entry's name and size. The
+tag holds only part of the digest, so the script also downloads the existing
+archive and checks its whole SHA-256.
+
+### Releasing a new version
+
+Raise `version` in the plugin's `extension.toml` and merge. The old release
+stays; the new index lists only the new archive.
+
+The publish doesn't require the raise: any change to the archive's bytes makes
+a new tag, and so a new release. Besides the plugin's own files, the bytes can
+change with the WIT files it generates bindings from
+(`kiln/crates/kiln-plugin/wit`, `crates/fe-plugin/wit`), the Rust toolchain
+(`rust-toolchain.toml`) and possibly the build runner's Python or zlib. Those
+don't start the workflow, so such a change is published, under the same
+version, by the next run that something else starts. Raise the version whenever
+users should see a change as one.
+
+Removing a plugin's `registry.toml` takes it out of the next index. Its
+releases stay.
+
+### What apps do with it today
+
+- The app in this repository reads and verifies an index with plugins, and can
+  verify and unpack a listed archive, but doesn't yet download one: installing
+  from the Extensions view is separate work (T2076, T2080).
+- **Releases v0.2.2 to v0.2.5 refuse an index that has a `plugins` key**, since
+  their reader refuses unknown keys. They keep the last index they cached, so
+  they get no newer grammars, and one with no cached index offers none. v0.3.0
+  and later read it.
 
 ## Known limits
 
