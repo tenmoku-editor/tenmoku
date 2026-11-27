@@ -1,0 +1,18 @@
+id = "tenmoku.grammar_luau"
+name = "Luau syntax"
+version = "0.3.0"
+license = "MIT"
+
+[engine]
+tenmoku = "1.0"
+
+[[contributes.grammars]]
+language = "luau"
+wasm = "tree-sitter-luau.wasm"
+extensions = ["luau"]
+highlights = "highlights.scm"
+injections = "injections.scm"
+earlier_patterns_win = false
+line_comment = "--"
+block_comment = ["--[[", "]]"]
+shebangs = ["luau"]

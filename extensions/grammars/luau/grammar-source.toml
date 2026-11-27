@@ -1,0 +1,9 @@
+# Not tree-sitter-grammars/tree-sitter-luau: it has no rule for an attribute
+# (`@native`), which is an ERROR there.
+git = "https://github.com/polychromatist/tree-sitter-luau"
+# The full 40-hex commit: main.
+rev = "71b03e66b2c8dd04e0133c9b998a54a58f239ca4"
+# The directory holding parser.c and scanner.c.
+src = "src"
+# The export tree_sitter_<grammar>.
+grammar = "luau"
