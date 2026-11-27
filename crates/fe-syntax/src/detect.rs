@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::language::{built_in_name, language_name_for_path, language_names};
 use crate::modeline::language_name_for_modeline;
-use crate::sniff::language_name_by_content;
+use crate::sniff::{language_name_by_content, language_name_for_m_file};
 
 /// Interpreter names and the language each one runs.
 const INTERPRETERS: &[(&str, &str)] = &[
@@ -198,7 +198,9 @@ pub fn detect_language_name(path: Option<&Path>, text_start: &str) -> Option<&'s
 }
 
 /// The language for a buffer: the one a [modeline](language_name_for_modeline)
-/// in `text_start` or `text_end` names, else the path's if it names one, else
+/// in `text_start` or `text_end` names, else the path's if it names one (but
+/// for a `.m` file the path gives `objc` or `matlab`, whichever of the two
+/// `text_start` looks like, `objc` when unsure, if that one is loaded), else
 /// the shebang or other first-line marker in `text_start`, else XML or JSON by
 /// how the text starts. A path with an extension no language claims, or none,
 /// leaves it to the content, as no path does. Pass the first few hundred
@@ -209,10 +211,40 @@ pub fn detect_language(
     text_end: &str,
 ) -> Option<&'static str> {
     language_name_for_modeline(text_start, text_end)
-        .or_else(|| path.and_then(language_name_for_path))
+        .or_else(|| {
+            let path = path?;
+            language_name_for_path(path).map(|by_path| m_file_language(path, by_path, text_start))
+        })
         .or_else(|| language_name_for_shebang(text_start))
         .or_else(|| language_name_for_first_line(text_start))
         .or_else(|| language_name_by_content(text_start))
+}
+
+/// The languages that both claim `.m`, which a file's content tells apart;
+/// the first is taken when it can't.
+const M_FILE_LANGUAGES: [&str; 2] = ["objc", "matlab"];
+
+/// The language for the file at `path`, which its path gives `by_path`: for a
+/// `.m` file (in any ASCII case) the path gives to Objective-C or MATLAB, the
+/// one of them [its start](language_name_for_m_file) says it is, or
+/// Objective-C when unsure (it wins the tie, user decision 11-26), if that
+/// one is compiled in or registered. Else `by_path`, as for a file a compound
+/// extension ending in `.m` (`special.m`) is claimed for: its owner keeps it.
+fn m_file_language(path: &Path, by_path: &'static str, text_start: &str) -> &'static str {
+    let is_m = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("m"));
+    if !is_m || !M_FILE_LANGUAGES.contains(&by_path) {
+        return by_path;
+    }
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    if file_name.is_none_or(|name| !crate::runtime::compound_owners(name).is_empty()) {
+        return by_path;
+    }
+    let wanted = language_name_for_m_file(text_start).unwrap_or(M_FILE_LANGUAGES[0]);
+    language_names()
+        .find(|&loaded| loaded == wanted)
+        .unwrap_or(by_path)
 }
 
 /// What an `env` option takes after it.

@@ -649,7 +649,8 @@ impl Catalog {
     /// else by the `#!` interpreter. None if a registered language already
     /// claims the file ([`fe_syntax::language_name_for_path`], or
     /// [`fe_syntax::language_name_for_shebang`] for the interpreter). When
-    /// several match equally, the lowest name is taken and the tie logged.
+    /// several match equally, the lowest name is taken, but for a tie
+    /// [`TIE_WINNERS`] settles (objc over matlab for `.m`), and the tie logged.
     pub(crate) fn language_for(
         &self,
         path: &Path,
@@ -669,7 +670,7 @@ impl Catalog {
         let by_name = candidates()
             .filter(|(_, entry)| entry.file_names.iter().any(|file| file == name))
             .map(|matched| (0, matched));
-        if let Some(found) = pick(path, by_name) {
+        if let Some(found) = pick(path, by_name, false) {
             return Some(found);
         }
         let by_extension = candidates().filter_map(|matched| {
@@ -682,7 +683,7 @@ impl Catalog {
                 .max()?;
             Some((usize::MAX - longest, matched))
         });
-        if let Some(found) = pick(path, by_extension) {
+        if let Some(found) = pick(path, by_extension, true) {
             return Some(found);
         }
         let first_line = first_line?;
@@ -698,7 +699,7 @@ impl Catalog {
                     .any(|interpreter| interpreter_matches(interpreter, &program))
             })
             .map(|matched| (0, matched));
-        pick(path, by_shebang)
+        pick(path, by_shebang, false)
     }
 
     /// The language the grammar prompt offers for `path`: as
@@ -728,7 +729,8 @@ impl Catalog {
                     (entry.file_names.iter()).any(|file| file.eq_ignore_ascii_case(name))
                 })
                 .map(|matched| (0, matched));
-            return pick(path, by_name).or_else(|| self.language_for(path, first_line, extensions));
+            return pick(path, by_name, false)
+                .or_else(|| self.language_for(path, first_line, extensions));
         }
         let taking = candidates().filter_map(|matched| {
             let longest = (matched.1.extensions.iter())
@@ -741,7 +743,7 @@ impl Catalog {
                 .max()?;
             Some((usize::MAX - longest, matched))
         });
-        pick(path, taking)
+        pick(path, taking, true)
     }
 
     /// The packs `language` is in, as its entry lists them: the first is its
@@ -765,11 +767,24 @@ impl Catalog {
     }
 }
 
+/// Ties [`pick`] settles by a decision rather than by the lower name: for a
+/// file with the extension, when exactly these languages tie on it as the
+/// longest extension each claims the file by, the first one. A tie on a
+/// compound extension ending in it (`special.m`), or on a file name, is no
+/// such tie.
+/// Objective-C and MATLAB both claim `.m`, which fe-syntax tells apart by the
+/// file's content once one is installed; with neither, Objective-C is offered
+/// (user decision 11-26).
+const TIE_WINNERS: &[(&str, [&str; 2])] = &[("m", ["objc", "matlab"])];
+
 /// The best of `matches`, each with a rank (lower is better), in the index's
-/// order: the lowest rank, and of those the lowest name. A tie is logged.
+/// order: the lowest rank, and of those the lowest name, unless
+/// [`TIE_WINNERS`] settles the tie, for `by_extension` matches. A tie is
+/// logged.
 fn pick<'a>(
     path: &Path,
     matches: impl Iterator<Item = (usize, (&'a String, &'a Language))>,
+    by_extension: bool,
 ) -> Option<Entry<'a>> {
     let mut best: Vec<(usize, &'a String, &'a Language)> = Vec::new();
     for (rank, (language, entry)) in matches {
@@ -779,7 +794,8 @@ fn pick<'a>(
             _ => best = vec![(rank, language, entry)],
         }
     }
-    let &(_, language, entry) = best.first()?;
+    let settled = by_extension.then(|| tie_winner(path, &best)).flatten();
+    let &(_, language, entry) = settled.or_else(|| best.first())?;
     if best.len() > 1 {
         let names: Vec<&str> = best.iter().map(|(_, name, _)| name.as_str()).collect();
         log::warn!(
@@ -790,6 +806,32 @@ fn pick<'a>(
         );
     }
     Some(Entry { language, entry })
+}
+
+/// The one of `best`, tied by extension, that [`TIE_WINNERS`] picks for
+/// `path`, if they are exactly a pair it lists for the path's extension, and
+/// that extension is the longest each claims the file by.
+fn tie_winner<'b, 'a>(
+    path: &Path,
+    best: &'b [(usize, &'a String, &'a Language)],
+) -> Option<&'b (usize, &'a String, &'a Language)> {
+    let name = path.file_name()?.to_str()?;
+    let &(extension, pair) = TIE_WINNERS
+        .iter()
+        .find(|(extension, _)| has_extension(name, extension))?;
+    let tied = |language: &str| best.iter().any(|(_, name, _)| name.as_str() == language);
+    if best.len() != pair.len() || !pair.iter().all(|language| tied(language)) {
+        return None;
+    }
+    let by_plain = |entry: &Language| {
+        (entry.extensions.iter())
+            .filter(|claim| has_extension(name, claim))
+            .all(|claim| claim.eq_ignore_ascii_case(extension))
+    };
+    if !best.iter().all(|(_, _, entry)| by_plain(entry)) {
+        return None;
+    }
+    best.iter().find(|(_, name, _)| name.as_str() == pair[0])
 }
 
 /// Whether the file `name` ends in `.extension`, ignoring ASCII case, with
@@ -878,5 +920,94 @@ mod cache_read_tests {
         assert_eq!(read.map(|index| index.serial), Some(5));
         writer.unwrap().join().unwrap();
         assert_eq!(cache.load(&public).map(|index| index.serial), Some(7));
+    }
+}
+
+/// [`pick`]'s ties: Objective-C wins the `.m` tie with MATLAB, and any other
+/// tie, a third claimant's included, goes to the lowest name as before.
+#[cfg(test)]
+mod tie_tests {
+    use std::path::Path;
+
+    use fe_registry::grammars::{CAPTURES, Engine, FileEntry, Language};
+
+    use super::pick;
+
+    fn language(name: &str, extensions: &[&str]) -> Language {
+        Language {
+            name: name.to_owned(),
+            version: "0.1.0".to_owned(),
+            tag: String::new(),
+            digest: String::new(),
+            extensions: extensions.iter().map(|&e| e.to_owned()).collect(),
+            file_names: Vec::new(),
+            shebangs: Vec::new(),
+            packs: Vec::new(),
+            license: "MIT".to_owned(),
+            engine: Engine {
+                tenmoku: "1.0".to_owned(),
+                abi: 15,
+                captures: CAPTURES,
+            },
+            files: vec![FileEntry::of("extension.toml", b"")],
+        }
+    }
+
+    /// What `pick` takes for `path` from `names`, all tied by extension, in
+    /// this order, each claiming `extensions`.
+    fn picked_claiming(path: &str, names: &[&str], extensions: &[&str]) -> String {
+        picked_by(path, names, extensions, true)
+    }
+
+    fn picked(path: &str, names: &[&str]) -> String {
+        picked_claiming(path, names, &["m"])
+    }
+
+    fn picked_by(path: &str, names: &[&str], extensions: &[&str], by_extension: bool) -> String {
+        let entries: Vec<(String, Language)> = names
+            .iter()
+            .map(|&name| (name.to_owned(), language(name, extensions)))
+            .collect();
+        let matches = entries.iter().map(|(name, entry)| (0, (name, entry)));
+        (pick(Path::new(path), matches, by_extension)
+            .unwrap()
+            .language)
+            .to_owned()
+    }
+
+    #[test]
+    fn objc_wins_the_m_tie_with_matlab() {
+        assert_eq!(picked("a.m", &["matlab", "objc"]), "objc");
+        assert_eq!(picked("dir/Foo.M", &["matlab", "objc"]), "objc");
+        assert_eq!(picked("a.m", &["objc", "matlab"]), "objc");
+    }
+
+    #[test]
+    fn other_ties_keep_the_lowest_name() {
+        // A third claimant of `.m` makes it no longer the decided pair.
+        assert_eq!(picked("a.m", &["matlab", "mercury", "objc"]), "matlab");
+        // The pair tied on another extension, or for no `.m` at all.
+        assert_eq!(picked("a.mm", &["matlab", "objc"]), "matlab");
+        assert_eq!(picked("a.mat", &["matlab", "objc"]), "matlab");
+        assert_eq!(picked(".m", &["matlab", "objc"]), "matlab");
+        // Another pair on `.m`.
+        assert_eq!(picked("a.m", &["mercury", "objc"]), "mercury");
+        assert_eq!(picked("a.m", &["matlab", "mercury"]), "matlab");
+        assert_eq!(picked("a.zz", &["alpha", "beta"]), "alpha");
+        // A tie on a compound extension ending in `.m`, or not by extension.
+        let both = ["m", "special.m"];
+        assert_eq!(
+            picked_claiming("a.special.m", &["matlab", "objc"], &both),
+            "matlab"
+        );
+        assert_eq!(
+            picked_claiming("a.special.m", &["matlab", "objc"], &["special.m"]),
+            "matlab"
+        );
+        assert_eq!(picked_claiming("a.m", &["matlab", "objc"], &both), "objc");
+        assert_eq!(
+            picked_by("a.m", &["matlab", "objc"], &["m"], false),
+            "matlab"
+        );
     }
 }

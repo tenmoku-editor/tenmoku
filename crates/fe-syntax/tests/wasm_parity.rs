@@ -886,7 +886,8 @@ fn check_manifest(
 /// sets it as `injection.language`. No two
 /// directories, nor a directory and a built-in language other than its own,
 /// are for the same file: by extension, by name, or a name with the other's
-/// extension, ignoring case. A language with no built-in has no capture in
+/// extension, ignoring case, but for the languages [`SNIFFED_EXTENSIONS`] lets
+/// share an extension. A language with no built-in has no capture in
 /// its `highlights.scm` that no highlight takes, but those starting with
 /// `_`; a built-in's are its queries verbatim, which the
 /// `*_extension_is_as_built_in` tests check.
@@ -1001,7 +1002,7 @@ fn problems(root: &Path) -> Vec<String> {
     }
     for (prefix, map) in [("*.", &extensions), ("", &file_names)] {
         for (claim, claimants) in map {
-            if claimants.len() > 1 {
+            if claimants.len() > 1 && !(prefix == "*." && is_sniffed(claim, claimants)) {
                 problems.push(format!(
                     "extensions/grammars: {} are each for {prefix}{claim}",
                     claimants.join(" and ")
@@ -1050,6 +1051,25 @@ fn built_in_claiming(extension: &str) -> Option<&'static str> {
         Err(GrammarError::Read { .. }) => None,
         other => panic!("probing {extension:?}: {other:?}"),
     }
+}
+
+/// Extensions more than one directory may claim, each with exactly the
+/// languages that may share it: fe-syntax picks between them by a file's
+/// content (`language_name_for_m_file` in `src/sniff.rs`, wired in by
+/// `detect_language`), and the install offer settles their tie
+/// (`TIE_WINNERS` in `crates/fastedit/src/grammar_registry.rs`).
+const SNIFFED_EXTENSIONS: &[(&str, [&str; 2])] = &[("m", ["objc", "matlab"])];
+
+/// Whether `claimants`, the directories each for `*.extension`, are just the
+/// languages [`SNIFFED_EXTENSIONS`] lets share it.
+fn is_sniffed(extension: &str, claimants: &[&str]) -> bool {
+    SNIFFED_EXTENSIONS.iter().any(|(sniffed, languages)| {
+        *sniffed == extension
+            && claimants.len() == languages.len()
+            && languages
+                .iter()
+                .all(|language| claimants.contains(language))
+    })
 }
 
 #[test]
@@ -1389,6 +1409,48 @@ fn another_directorys_extension_is_a_problem() {
         "[\"yylang\", \"ZZlang\"]",
     );
     root.assert_problem("yylang and zzlang are each for *.zzlang");
+}
+
+/// `objc` and `matlab` may both claim `m`, as [`SNIFFED_EXTENSIONS`] says,
+/// but not with a third claimant, nor either with another language, nor
+/// another extension.
+#[test]
+fn only_objc_and_matlab_may_share_m() {
+    let root = Root::new("sniffed");
+    let claim = |language: &str, extensions: &str| {
+        edit(
+            &root.0.join(language).join("extension.toml"),
+            &format!("extensions = [\"{language}\"]"),
+            &format!("extensions = [\"{language}\", {extensions}]"),
+        );
+    };
+    root.add("objc", GIT_SOURCE);
+    root.add("matlab", CRATES_IO_SOURCE);
+    claim("objc", "\"m\"");
+    claim("matlab", "\"M\"");
+    assert_eq!(root.problems(), Vec::<String>::new());
+
+    // A third claimant of `m`.
+    root.add("mercury", GIT_SOURCE);
+    claim("mercury", "\"m\"");
+    root.assert_problem("matlab and mercury and objc are each for *.m");
+    fs::remove_dir_all(root.0.join("matlab")).unwrap();
+    root.assert_problem("mercury and objc are each for *.m");
+    fs::remove_dir_all(root.0.join("objc")).unwrap();
+    root.add("matlab", CRATES_IO_SOURCE);
+    claim("matlab", "\"m\"");
+    root.assert_problem("matlab and mercury are each for *.m");
+    fs::remove_dir_all(root.0.join("mercury")).unwrap();
+
+    // The pair on another extension.
+    root.add("objc", GIT_SOURCE);
+    claim("objc", "\"m\", \"mm\"");
+    edit(
+        &root.0.join("matlab/extension.toml"),
+        "\"m\"]",
+        "\"m\", \"mm\"]",
+    );
+    root.assert_problem("matlab and objc are each for *.mm");
 }
 
 #[test]
