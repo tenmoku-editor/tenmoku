@@ -2532,15 +2532,18 @@ fn no_replace_result(result: io::Result<()>) -> io::Result<()> {
 /// The system's rename that refuses to replace.
 #[cfg(target_os = "linux")]
 fn rename_exclusive(from_dir: &File, from: &CStr, to_dir: &File, to: &CStr) -> io::Result<()> {
+    // The system call itself, as glibc's wrapper (2.28+) makes it: the musl that Rust's static
+    // `*-linux-musl` builds link (tenmoku-server) has no `renameat2` symbol.
     // SAFETY: both descriptors are open and both names are NUL-terminated.
     check(unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             from_dir.as_raw_fd(),
             from.as_ptr(),
             to_dir.as_raw_fd(),
             to.as_ptr(),
             libc::RENAME_NOREPLACE,
-        )
+        ) as c_int
     })
 }
 

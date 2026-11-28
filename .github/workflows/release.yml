@@ -22,6 +22,15 @@ name: Release
 # body and the appcast's description are the tag's release-notes/<version>.md, which the version
 # job requires of a tag. See docs/release/macos-signing.md, "Releasing", and
 # docs/release/platforms.md.
+#
+# Every tag, stable and preview, also carries the remote development server, which no app bundle,
+# installer or Velopack package holds (docs/decisions/j8wvgszah0-remote-development.md § 4):
+# tenmoku-server-<v>-linux-x86_64.tar.gz and -linux-aarch64.tar.gz (static musl builds) and
+# -macos-arm64.tar.gz, one tenmoku-server job each (scripts/build-tenmoku-server.sh), and the
+# tenmoku-server-<v>-SHA256SUMS that lists them, signed into SHA256SUMS.sig with the Velopack
+# feeds' key (TENMOKU_UPDATE_PRIVATE_KEY, through the feed signer) by the tenmoku-server-sums job.
+# The client checks that signature with the public key the app builds in before it installs the
+# server on a host.
 
 on:
   push:
@@ -448,11 +457,123 @@ jobs:
           name: Tenmoku-${{ needs.version.outputs.version }}-linux-x86_64
           path: dist/
           if-no-files-found: error
+      # The feed signer, for the server sums job to sign with: building it there would build the
+      # whole app's dependencies again. Not a Tenmoku-* artifact, so never published.
+      - name: Upload the feed signer for the server sums job
+        uses: actions/upload-artifact@v7
+        with:
+          name: sign_update_feed-linux-x86_64
+          path: target/release/examples/sign_update_feed
+          if-no-files-found: error
+          retention-days: 1
+
+  # The remote development server, never in an app bundle or package (D § 4): one archive per host
+  # platform, tenmoku-server-<v>-<asset>.tar.gz with tenmoku-server at its root. The Linux builds
+  # are static musl ones, so any distro's libc runs them (build-tenmoku-server.sh refuses a
+  # dynamically linked one), each built natively on its own architecture's runner.
+  tenmoku-server:
+    needs: version
+    name: tenmoku-server-${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - asset: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - asset: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build and pack tenmoku-server
+        run: scripts/build-tenmoku-server.sh --target ${{ matrix.target }} --version "$VERSION" --out dist
+      # The client's handshake takes only a server of its own build, <version>+<commit>, which a
+      # -dirty build never is.
+      - name: Smoke test the packed binary
+        run: |
+          smoke="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke"
+          tar -xzf "dist/tenmoku-server-$VERSION-${{ matrix.asset }}.tar.gz" -C "$smoke"
+          file "$smoke/tenmoku-server"
+          got=$("$smoke/tenmoku-server" --version)
+          echo "$got"
+          want="tenmoku-server $VERSION+$(git rev-parse --short=12 HEAD)"
+          [ "$got" = "$want" ] || { echo "::error::--version printed '$got', not '$want'"; exit 1; }
+          echo "size: $(wc -c <"dist/tenmoku-server-$VERSION-${{ matrix.asset }}.tar.gz") bytes packed, $(wc -c <"$smoke/tenmoku-server") unpacked"
+      - name: Upload the archive as a workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tenmoku-server-${{ needs.version.outputs.version }}-${{ matrix.asset }}
+          path: dist/
+          if-no-files-found: error
+
+  # The three archives and the SHA256SUMS over them, signed with the Velopack feeds' key: a
+  # per-archive .sha256 would trust whoever controls the download, the signed sums only the key
+  # (D § 4). One Tenmoku-* artifact holds all five, so publish takes the archives and their sums
+  # together or not at all. Without the secret the sums are left unsigned, as the feeds are.
+  tenmoku-server-sums:
+    needs: [version, tenmoku-server, linux-x86_64]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download the tenmoku-server archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tenmoku-server-*
+          path: dist
+          merge-multiple: true
+      - name: Download the feed signer
+        uses: actions/download-artifact@v8
+        with:
+          name: sign_update_feed-linux-x86_64
+          path: ${{ runner.temp }}/signer
+      - name: Write and sign the tenmoku-server SHA256SUMS
+        env:
+          TENMOKU_UPDATE_PUBLIC_KEY: ${{ vars.TENMOKU_UPDATE_PUBLIC_KEY }}
+          TENMOKU_UPDATE_PRIVATE_KEY: ${{ secrets.TENMOKU_UPDATE_PRIVATE_KEY }}
+        run: |
+          # An artifact keeps no file mode.
+          signer="$RUNNER_TEMP/signer/sign_update_feed"
+          chmod 755 "$signer"
+          # A tag push publishes, stable or preview, and a published server is never unsigned: no
+          # client could install it. A manual run may leave the sums unsigned, with a warning.
+          set --
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_TYPE" = tag ]; then
+            set -- --require-signature
+          fi
+          scripts/build-tenmoku-server.sh --sums --signer "$signer" "$@" --version "$VERSION" --out dist
+          (cd dist && sha256sum -c "tenmoku-server-$VERSION-SHA256SUMS")
+          if [ ! -e "dist/tenmoku-server-$VERSION-SHA256SUMS.sig" ]; then
+            echo "::warning::tenmoku-server-$VERSION-SHA256SUMS is unsigned: no client installs this server until the update signing key secret is set"
+          fi
+          ls -l dist
+      - name: Upload the archives and signed sums as a workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Tenmoku-${{ needs.version.outputs.version }}-tenmoku-server
+          path: dist/
+          if-no-files-found: error
 
   publish:
     # Tag pushes only: a manual run leaves its files as the build jobs' artifacts.
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: [version, macos-arm64, windows, linux-x86_64]
+    needs: [version, macos-arm64, windows, linux-x86_64, tenmoku-server-sums]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -487,7 +608,7 @@ jobs:
             # A blank line between, whether or not the file ends in a newline.
             [ -z "$(tail -c 1 "$notes")" ] || echo
             echo
-            echo "Downloads: macOS on Apple Silicon (macos-arm64.zip); Windows on x64 or ARM64, an installer (windows-x64-Setup.exe, windows-arm64-Setup.exe) or a portable zip (windows-x64.zip, windows-arm64.zip); Linux on x86_64, an AppImage (linux-x86_64.AppImage) or a portable archive (linux-x86_64.tar.gz), both needing glibc $GLIBC or later. The releases.*.json and .nupkg files are the Windows and Linux update feeds. How to install, update and uninstall each, and to open a build the OS warns is unsigned: https://github.com/$GH_REPO/blob/$GITHUB_REF_NAME/docs/release/platforms.md"
+            echo "Downloads: macOS on Apple Silicon (macos-arm64.zip); Windows on x64 or ARM64, an installer (windows-x64-Setup.exe, windows-arm64-Setup.exe) or a portable zip (windows-x64.zip, windows-arm64.zip); Linux on x86_64, an AppImage (linux-x86_64.AppImage) or a portable archive (linux-x86_64.tar.gz), both needing glibc $GLIBC or later. The releases.*.json and .nupkg files are the Windows and Linux update feeds. The tenmoku-server archives are the remote development server for Linux (x86_64, aarch64) and macOS hosts, which Tenmoku installs on a host itself after checking them against the signed SHA256SUMS. How to install, update and uninstall each, and to open a build the OS warns is unsigned: https://github.com/$GH_REPO/blob/$GITHUB_REF_NAME/docs/release/platforms.md"
           } >"$body" || { echo "::error::could not write the release body to $body"; exit 1; }
           # A preview tag is a prerelease, never latest, on create and on a re-run:
           # releases/latest/download, where the stable feeds are read, must never serve it. It
@@ -514,9 +635,9 @@ jobs:
                 exit 1
               fi
             done
-            # The same for each Velopack feed, stable and preview: a new feed under the old .sig
-            # fails every check.
-            for sig in $(printf '%s\n' "$assets" | grep -x 'releases\..*\.json\.sig' || true); do
+            # The same for each Velopack feed, stable and preview, and tenmoku-server's sums: a new
+            # feed or sums file under the old .sig fails every check.
+            for sig in $(printf '%s\n' "$assets" | grep -x -e 'releases\..*\.json\.sig' -e 'tenmoku-server-.*-SHA256SUMS\.sig' || true); do
               if [ ! -e "dist/$sig" ]; then
                 echo "::error::$GITHUB_REF_NAME has $sig and this run made none: set TENMOKU_UPDATE_PRIVATE_KEY, or delete that asset first"
                 exit 1

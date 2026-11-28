@@ -13,7 +13,10 @@
 # preview tags (vX.Y.Z-preview.N): the preview appcast written for stable and preview versions,
 # no appcast.xml for a preview, the preview feeds baked in and packed, publish's --prerelease
 # --latest=false for a preview and --latest for a new stable, and the stale-feed guard over the
-# preview files.
+# preview files; and tenmoku-server: its three builds (static musl for Linux) and sums jobs, runs of
+# build-tenmoku-server.sh on fixture binaries (the five asset names, the signing with a fake signer,
+# its refusals), the stale-signature guard over SHA256SUMS.sig, and that no app job, packaging
+# script, bundle, archive or AppImage pack holds the server.
 # Prints one line per check and exits non-zero on the first failure. macOS only; needs
 # actionlint (brew install actionlint).
 set -eu
@@ -194,7 +197,7 @@ ok "contents: write only in the publish and preview-feed jobs' permissions; the 
 # checks that one). job NAME prints that job's lines.
 job() { awk -v j="  $1:" '/^jobs:$/ { in_jobs = 1 } in_jobs && $0 == j { on = 1; next } on && /^  [^ ]/ { exit } on' "$wf"; }
 jobs=$(awk '/^jobs:$/ { on = 1; next } on && /^  [A-Za-z0-9_-]+:$/' "$wf" | tr -d ' :' | tr '\n' ' ')
-[ "$jobs" = "version macos-arm64 windows linux-x86_64 publish preview-feed " ] || fail "the jobs are: $jobs"
+[ "$jobs" = "version macos-arm64 windows linux-x86_64 tenmoku-server tenmoku-server-sums publish preview-feed " ] || fail "the jobs are: $jobs"
 job_has() { job "$1" | grep -q -E -- "$2" || fail "job $1 lacks /$2/ ($3)"; }
 job_has macos-arm64 "^    runs-on: macos-latest$" "Apple Silicon runner"
 job_has windows "^    name: windows-\\\$\{\{ matrix.arch \}\}$" "a job per arch, named windows-<arch>"
@@ -292,14 +295,14 @@ done
 job linux-x86_64 | grep -q 'apt-get install -y squashfs-tools fuse3 libfuse2t64' || fail "the linux job lacks vpk's mksquashfs or FUSE"
 ok "windows and linux install vpk $pin, bake in the feed and key, pack, then install or launch the pack before uploading"
 
-# The feeds' signing secret reaches only the two pack steps, through env:.
-[ "$(grep -c 'secrets\.TENMOKU_UPDATE_PRIVATE_KEY' "$wf")" -eq 2 ] ||
-	fail "secrets.TENMOKU_UPDATE_PRIVATE_KEY appears other than in the two pack steps"
+# The feeds' signing secret reaches only the two pack steps and the server's sums step, through env:.
+[ "$(grep -c 'secrets\.TENMOKU_UPDATE_PRIVATE_KEY' "$wf")" -eq 3 ] ||
+	fail "secrets.TENMOKU_UPDATE_PRIVATE_KEY appears other than in the two pack steps and the sums step"
 if grep -n 'TENMOKU_UPDATE_PRIVATE_KEY' "$wf" | grep -v -E '^[0-9]+:          TENMOKU_UPDATE_PRIVATE_KEY: \$\{\{ secrets\.TENMOKU_UPDATE_PRIVATE_KEY \}\}$' |
 	grep -v -F 'set TENMOKU_UPDATE_PRIVATE_KEY, or delete that asset first' | grep -v -E '^[0-9]+: *#'; then
-	fail "the lines above read the feed signing key in the workflow; only the pack scripts may"
+	fail "the lines above read the feed signing key in the workflow; only the pack and sums scripts may"
 fi
-ok "TENMOKU_UPDATE_PRIVATE_KEY reaches the pack steps through env: only"
+ok "TENMOKU_UPDATE_PRIVATE_KEY reaches the pack steps and the server's sums step through env: only"
 
 # The channels: velopack-pack.sh and .ps1 pack on the ones the app reads (release_channel).
 rs="$root/crates/fastedit/src/velopack_update.rs"
@@ -344,12 +347,12 @@ ok "velopack-pack.sh --linux packs Tenmoku on linux-x86_64-stable and signs the 
 
 # Publish: after every build job, on tag pushes only, and the only job with gh release.
 publish_job=$(job publish)
-echo "$publish_job" | grep -q -x '    needs: \[version, macos-arm64, windows, linux-x86_64\]' || fail "publish does not need every build job"
+echo "$publish_job" | grep -q -x '    needs: \[version, macos-arm64, windows, linux-x86_64, tenmoku-server-sums\]' || fail "publish does not need every build job"
 echo "$publish_job" | grep -q -x "    if: github.event_name == 'push' && github.ref_type == 'tag'" ||
 	fail "publish is not limited to tag pushes"
 echo "$publish_job" | grep -q 'actions/download-artifact@v8' || fail "publish does not download the build jobs' files"
 echo "$publish_job" | grep -q -x '          merge-multiple: true' || fail "publish does not merge the artifacts into dist/"
-for j in version macos-arm64 windows linux-x86_64; do
+for j in version macos-arm64 windows linux-x86_64 tenmoku-server tenmoku-server-sums; do
 	job "$j" | grep -q 'gh release' && fail "$j runs gh release: only publish may"
 done
 # The body: the tag's notes file then the downloads text, as --notes-file on create and edit.
@@ -551,7 +554,7 @@ body_is_notes() {
 	[ -f "$t/gh.log.body" ] || fail "$1: gh got no --notes-file"
 	{
 		printf '%s\n\n' "$good"
-		echo "Downloads: macOS on Apple Silicon (macos-arm64.zip); Windows on x64 or ARM64, an installer (windows-x64-Setup.exe, windows-arm64-Setup.exe) or a portable zip (windows-x64.zip, windows-arm64.zip); Linux on x86_64, an AppImage (linux-x86_64.AppImage) or a portable archive (linux-x86_64.tar.gz), both needing glibc 2.39 or later. The releases.*.json and .nupkg files are the Windows and Linux update feeds. How to install, update and uninstall each, and to open a build the OS warns is unsigned: https://github.com/owner/repo/blob/v1.2.3/docs/release/platforms.md"
+		echo "Downloads: macOS on Apple Silicon (macos-arm64.zip); Windows on x64 or ARM64, an installer (windows-x64-Setup.exe, windows-arm64-Setup.exe) or a portable zip (windows-x64.zip, windows-arm64.zip); Linux on x86_64, an AppImage (linux-x86_64.AppImage) or a portable archive (linux-x86_64.tar.gz), both needing glibc 2.39 or later. The releases.*.json and .nupkg files are the Windows and Linux update feeds. The tenmoku-server archives are the remote development server for Linux (x86_64, aarch64) and macOS hosts, which Tenmoku installs on a host itself after checking them against the signed SHA256SUMS. How to install, update and uninstall each, and to open a build the OS warns is unsigned: https://github.com/owner/repo/blob/v1.2.3/docs/release/platforms.md"
 	} >"$t/body.expected"
 	cmp -s "$t/body.expected" "$t/gh.log.body" || fail "$1: the body is not the notes then the downloads: $(diff "$t/body.expected" "$t/gh.log.body")"
 }
@@ -886,4 +889,252 @@ for word in SPARKLE_ED_PRIVATE_KEY SPARKLE_ED_PUBLIC_KEY TENMOKU_FEED_URL DOWNLO
 	echo "$section" | grep -q -F -- "$word" || fail "the Releasing section does not name $word"
 done
 ok "the Releasing section names Sparkle's secret, variables and appcast, and what key loss means"
+# tenmoku-server (remote 4c; docs/decisions/j8wvgszah0-remote-development.md § 3, § 4): every tag,
+# stable and preview, builds three archives and a signed SHA256SUMS over them, and no app bundle,
+# installer or Velopack package holds the server.
+server=$(job tenmoku-server)
+printf '%s\n' "$server" | grep -q -x '    needs: version' || fail "tenmoku-server does not need the version job"
+printf '%s\n' "$server" | grep -q -x '    name: tenmoku-server-${{ matrix.asset }}' || fail "the tenmoku-server jobs are not named by asset"
+printf '%s\n' "$server" | grep -q -x '    runs-on: ${{ matrix.runner }}' || fail "tenmoku-server does not run on its asset's runner"
+rows=$(printf '%s\n' "$server" | awk '/- asset:/ { a = $3 } /runner:/ && a { r = $2 } /target:/ && a { print a, r, $2; a = "" }' | tr '\n' ';')
+[ "$rows" = "linux-x86_64 ubuntu-24.04 x86_64-unknown-linux-musl;linux-aarch64 ubuntu-24.04-arm aarch64-unknown-linux-musl;macos-arm64 macos-latest aarch64-apple-darwin;" ] ||
+	fail "the tenmoku-server matrix is not linux-x86_64 and linux-aarch64 on musl, natively, and macos-arm64: $rows"
+printf '%s\n' "$server" | grep -q 'if:' && fail "a tenmoku-server step is conditional: every tag and dispatch builds all three"
+step tenmoku-server "Install toolchain" | grep -q -x '          rustup target add ${{ matrix.target }}' || fail "tenmoku-server does not add its target"
+step tenmoku-server "Build and pack tenmoku-server" | grep -q -x -F \
+	'        run: scripts/build-tenmoku-server.sh --target ${{ matrix.target }} --version "$VERSION" --out dist' ||
+	fail "tenmoku-server does not build and pack through build-tenmoku-server.sh"
+server_smoke=$(step tenmoku-server "Smoke test the packed binary")
+for word in 'tar -xzf "dist/tenmoku-server-$VERSION-${{ matrix.asset }}.tar.gz"' '"$smoke/tenmoku-server" --version' \
+	'want="tenmoku-server $VERSION+$(git rev-parse --short=12 HEAD)"' '[ "$got" = "$want" ]'; do
+	printf '%s\n' "$server_smoke" | grep -q -F -- "$word" || fail "the tenmoku-server smoke step lacks $word"
+done
+printf '%s\n' "$server" | awk '/Build and pack/ && !b { b = NR } /Smoke test/ && !s { s = NR } /actions\/upload-artifact@/ && !u { u = NR }
+	END { exit !(b && s && u && b < s && s < u) }' || fail "tenmoku-server does not build, smoke-test, then upload"
+upload=$(step tenmoku-server "Upload the archive")
+printf '%s\n' "$upload" | grep -q -x '          name: tenmoku-server-${{ needs.version.outputs.version }}-${{ matrix.asset }}' &&
+	printf '%s\n' "$upload" | grep -q -x '          if-no-files-found: error' ||
+	fail "tenmoku-server's artifact is not tenmoku-server-<v>-<asset>, or allows no files"
+ok "tenmoku-server builds linux-x86_64 and linux-aarch64 (musl) and macos-arm64 on every run, checks --version is the commit's build, then uploads"
+
+sums=$(job tenmoku-server-sums)
+printf '%s\n' "$sums" | grep -q -x '    needs: \[version, tenmoku-server, linux-x86_64\]' || fail "tenmoku-server-sums does not need the archives and the signer"
+printf '%s\n' "$sums" | grep -q 'if:' && fail "a tenmoku-server-sums step is conditional"
+printf '%s\n' "$sums" | grep -q -x '          pattern: tenmoku-server-\*' || fail "tenmoku-server-sums does not download the archives"
+printf '%s\n' "$sums" | grep -q -x '          name: sign_update_feed-linux-x86_64' || fail "tenmoku-server-sums does not download the feed signer"
+step linux-x86_64 "Upload the feed signer" | grep -q -x '          path: target/release/examples/sign_update_feed' ||
+	fail "the linux job does not upload the feed signer it built"
+sums_step=$(step tenmoku-server-sums "Write and sign the tenmoku-server SHA256SUMS")
+for word in 'TENMOKU_UPDATE_PRIVATE_KEY: ${{ secrets.TENMOKU_UPDATE_PRIVATE_KEY }}' 'TENMOKU_UPDATE_PUBLIC_KEY: ${{ vars.TENMOKU_UPDATE_PUBLIC_KEY }}' \
+	'scripts/build-tenmoku-server.sh --sums --signer "$signer" "$@" --version "$VERSION" --out dist' \
+	'if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_TYPE" = tag ]; then' 'set -- --require-signature' \
+	'sha256sum -c "tenmoku-server-$VERSION-SHA256SUMS"'; do
+	printf '%s\n' "$sums_step" | grep -q -F -- "$word" || fail "the sums step lacks $word"
+done
+# Published only as one Tenmoku-* artifact (publish's download pattern), archives and sums together.
+printf '%s\n' "$sums" | grep -q -x '          name: Tenmoku-${{ needs.version.outputs.version }}-tenmoku-server' ||
+	fail "the archives and sums are not uploaded as a Tenmoku-* artifact for publish"
+[ "$(grep -c -x '          pattern: Tenmoku-\*' "$wf")" -eq 2 ] || fail "publish and preview-feed do not both download Tenmoku-* only"
+ok "tenmoku-server-sums writes and signs SHA256SUMS with the feed key and signer, and hands publish all five files at once"
+
+# build-tenmoku-server.sh on fixtures: a Mach-O arm64 binary for macOS, and ELF headers (only file(1)
+# reads them) for Linux, static and dynamic.
+le() { # le BYTES VALUE: VALUE little-endian
+	n=$1 v=$2
+	while [ "$n" -gt 0 ]; do
+		# shellcheck disable=SC2059 # the octal escape is the format
+		printf "\\$(printf %03o $((v & 255)))"
+		v=$((v >> 8)) n=$((n - 1))
+	done
+}
+# elf MACHINE PTYPE...: a 64-bit ELF executable header with one program header per PTYPE
+# (1 PT_LOAD, 2 PT_DYNAMIC, 3 PT_INTERP).
+elf() {
+	machine=$1
+	shift
+	printf '\177ELF\002\001\001'
+	le 9 0
+	le 2 2; le 2 "$machine"; le 4 1; le 8 4194304; le 8 64; le 8 0; le 4 0; le 2 64; le 2 56; le 2 $#; le 2 64; le 2 0; le 2 0
+	for p; do le 4 "$p"; le 4 5; le 8 0; le 8 4194304; le 8 4194304; le 8 120; le 8 120; le 8 4096; done
+}
+srv="$t/server"
+mkdir -p "$srv/bin"
+printf 'int main(void) { return 0; }\n' | cc -arch arm64 -x c - -o "$srv/bin/macos-arm64" || fail "cc could not build the macOS fixture"
+elf 62 1 >"$srv/bin/linux-x86_64"
+elf 183 1 >"$srv/bin/linux-aarch64"
+elf 62 1 2 3 >"$srv/bin/dynamic-x86_64"
+elf 183 1 2 >"$srv/bin/dynamic-aarch64"
+elf 62 1 3 >"$srv/bin/interp-x86_64"
+chmod 755 "$srv"/bin/*
+build_server() { # build_server TARGET BINARY: packs into $srv/dist, log in $srv/log
+	"$here/build-tenmoku-server.sh" --target "$1" --binary "$srv/bin/$2" --version 1.2.3 --out "$srv/dist" >"$srv/log" 2>&1
+}
+targets="x86_64-unknown-linux-musl:linux-x86_64 aarch64-unknown-linux-musl:linux-aarch64 aarch64-apple-darwin:macos-arm64"
+for row in $targets; do
+	target=${row%%:*} asset=${row#*:}
+	build_server "$target" "$asset" || { cat "$srv/log"; fail "build-tenmoku-server.sh --target $target refused its fixture"; }
+	archive="$srv/dist/tenmoku-server-1.2.3-$asset.tar.gz"
+	[ "$(tail -n 1 "$srv/log")" = "$archive" ] || fail "build-tenmoku-server.sh did not print $archive: $(cat "$srv/log")"
+	tar -tzf "$archive" | grep -v '^Licenses/' >"$srv/list" || true
+	[ "$(cat "$srv/list")" = tenmoku-server ] || fail "$asset's archive does not hold tenmoku-server at its root, alone: $(cat "$srv/list")"
+	tar -tvzf "$archive" tenmoku-server | grep -q '^-rwxr-xr-x' || fail "$asset's tenmoku-server is not mode 755"
+	for f in LICENSE NOTICE Apache-2.0.txt MIT.txt THIRD_PARTY.md; do
+		tar -tzf "$archive" | grep -q -x "Licenses/$f" || fail "$asset's archive lacks Licenses/$f"
+	done
+	mkdir -p "$srv/x/$asset"
+	tar -xzf "$archive" -C "$srv/x/$asset"
+	cmp -s "$srv/x/$asset/tenmoku-server" "$srv/bin/$asset" || fail "$asset's archive does not hold the binary it was given"
+done
+[ -z "$(find "$srv/dist" -name '*.sha256')" ] || fail "build-tenmoku-server.sh wrote a per-archive .sha256"
+ok "build-tenmoku-server.sh packs tenmoku-server-1.2.3-{linux-x86_64,linux-aarch64,macos-arm64}.tar.gz, tenmoku-server at the root"
+# refused_server TARGET BINARY WHY: the pack fails, naming WHY, and leaves no archive.
+refused_server() {
+	rm -rf "$srv/dist"
+	if build_server "$1" "$2"; then
+		fail "build-tenmoku-server.sh packed $2 for $1"
+	fi
+	grep -q -F -- "$3" "$srv/log" || fail "packing $2 for $1 did not say '$3': $(cat "$srv/log")"
+	[ -z "$(find "$srv/dist" -name '*.tar.gz' 2>/dev/null)" ] || fail "packing $2 for $1 left an archive"
+}
+refused_server x86_64-unknown-linux-musl dynamic-x86_64 "is not statically linked"
+refused_server aarch64-unknown-linux-musl dynamic-aarch64 "is not statically linked"
+refused_server x86_64-unknown-linux-musl interp-x86_64 "is not statically linked"
+refused_server x86_64-unknown-linux-musl linux-aarch64 "is not a x86_64-unknown-linux-musl binary"
+refused_server aarch64-unknown-linux-musl macos-arm64 "is not a aarch64-unknown-linux-musl binary"
+refused_server aarch64-apple-darwin linux-aarch64 "is not a aarch64-apple-darwin binary"
+refused_server x86_64-unknown-linux-gnu linux-x86_64 "no release asset for target x86_64-unknown-linux-gnu"
+ok "build-tenmoku-server.sh refuses a dynamically linked Linux binary, another target's binary and a target with no asset"
+
+# --sums over the three archives, with a fake signer that logs its argv and stdin.
+rm -rf "$srv/dist"
+for row in $targets; do
+	build_server "${row%%:*}" "${row#*:}" || { cat "$srv/log"; fail "could not pack ${row#*:} for the sums"; }
+done
+printf '%s\n' '#!/bin/sh' 'echo "$*" >"$SIGNER_ARGS"' 'cat >"$SIGNER_STDIN"' \
+	'echo "sig over $(wc -l <"$2" | tr -d " ") lines" >"$2.sig"' 'echo "${SIGNER_PUBLIC:-AbCd=}"' >"$srv/signer"
+chmod 755 "$srv/signer"
+sums_run() { # sums_run [ARG...]: --sums in $srv/dist, log in $srv/log
+	SIGNER_ARGS="$srv/signer.args" SIGNER_STDIN="$srv/signer.stdin" "$here/build-tenmoku-server.sh" --sums --version 1.2.3 \
+		--out "$srv/dist" "$@" >"$srv/log" 2>&1
+}
+sumsfile="$srv/dist/tenmoku-server-1.2.3-SHA256SUMS"
+TENMOKU_UPDATE_PRIVATE_KEY=secretseed TENMOKU_UPDATE_PUBLIC_KEY=AbCd= sums_run --signer "$srv/signer" ||
+	{ cat "$srv/log"; fail "--sums with a key failed"; }
+[ "$(tail -n 1 "$srv/log")" = "$sumsfile" ] || fail "--sums did not print the sums file: $(cat "$srv/log")"
+[ "$(awk '{ print $2 }' "$sumsfile" | tr '\n' ' ')" = "tenmoku-server-1.2.3-linux-x86_64.tar.gz tenmoku-server-1.2.3-linux-aarch64.tar.gz tenmoku-server-1.2.3-macos-arm64.tar.gz " ] ||
+	fail "the sums file does not list the three archives: $(cat "$sumsfile")"
+(cd "$srv/dist" && shasum -a 256 -c tenmoku-server-1.2.3-SHA256SUMS >/dev/null) || fail "the sums file does not check"
+[ "$(cat "$sumsfile.sig")" = "sig over 3 lines" ] || fail "the signer did not sign the sums file: $(cat "$sumsfile.sig" 2>&1)"
+[ "$(cat "$srv/signer.args")" = "sign $sumsfile" ] || fail "the signer's argv: $(cat "$srv/signer.args")"
+[ "$(cat "$srv/signer.stdin")" = secretseed ] || fail "the signer did not get the key on stdin"
+grep -q secretseed "$srv/log" && fail "build-tenmoku-server.sh printed the private key"
+[ "$(cd "$srv/dist" && printf '%s\n' * | LC_ALL=C sort | tr '\n' ' ')" = "tenmoku-server-1.2.3-SHA256SUMS tenmoku-server-1.2.3-SHA256SUMS.sig tenmoku-server-1.2.3-linux-aarch64.tar.gz tenmoku-server-1.2.3-linux-x86_64.tar.gz tenmoku-server-1.2.3-macos-arm64.tar.gz " ] ||
+	fail "the server's five files are not: $(cd "$srv/dist" && printf '%s ' *)"
+ok "--sums writes tenmoku-server-1.2.3-SHA256SUMS over the three archives and signs it into .sig, the key on stdin only"
+if (TENMOKU_UPDATE_PRIVATE_KEY=secretseed TENMOKU_UPDATE_PUBLIC_KEY=AbCd= SIGNER_PUBLIC=Other= sums_run --signer "$srv/signer"); then
+	fail "--sums kept a signature whose public half is not TENMOKU_UPDATE_PUBLIC_KEY"
+fi
+[ ! -e "$sumsfile.sig" ] || fail "a signature by another key was left"
+if TENMOKU_UPDATE_PRIVATE_KEY=secretseed TENMOKU_UPDATE_PUBLIC_KEY='' sums_run --signer "$srv/signer"; then
+	fail "--sums signed with no public key to check against"
+fi
+if TENMOKU_UPDATE_PRIVATE_KEY=secretseed TENMOKU_UPDATE_PUBLIC_KEY=AbCd= sums_run; then
+	fail "--sums with a key and no --signer passed"
+fi
+TENMOKU_UPDATE_PRIVATE_KEY='' sums_run --signer "$srv/signer" || { cat "$srv/log"; fail "--sums with no key failed"; }
+grep -q 'tenmoku-server-1.2.3-SHA256SUMS is left unsigned' "$srv/log" || fail "no unsigned line: $(cat "$srv/log")"
+[ -f "$sumsfile" ] && [ ! -e "$sumsfile.sig" ] || fail "--sums with no key left a .sig or no sums"
+mv "$srv/dist/tenmoku-server-1.2.3-linux-aarch64.tar.gz" "$srv/aside.tar.gz"
+if TENMOKU_UPDATE_PRIVATE_KEY='' sums_run; then
+	fail "--sums passed with an archive missing"
+fi
+grep -q 'no tenmoku-server-1.2.3-linux-aarch64.tar.gz in' "$srv/log" || fail "a missing archive is not named: $(cat "$srv/log")"
+[ ! -e "$sumsfile" ] || fail "--sums left a sums file without every archive"
+ok "--sums refuses another key's signature, a key with no public half or signer, and a missing archive; no key leaves it unsigned"
+mv "$srv/aside.tar.gz" "$srv/dist/tenmoku-server-1.2.3-linux-aarch64.tar.gz"
+
+# A failure hashing any archive, first, middle or last, leaves no sums file and no signature.
+mkdir -p "$srv/failhash"
+printf '%s\n' '#!/bin/sh' 'case "$1" in *"$FAIL_HASH"*) exit 1 ;; esac' 'exec shasum -a 256 "$@"' >"$srv/failhash/sha256sum"
+chmod 755 "$srv/failhash/sha256sum"
+for asset in linux-x86_64 linux-aarch64 macos-arm64; do
+	# A subshell: sh keeps a function call's prefix assignments after it returns.
+	if (FAIL_HASH=$asset PATH="$srv/failhash:$PATH" TENMOKU_UPDATE_PRIVATE_KEY=secretseed TENMOKU_UPDATE_PUBLIC_KEY=AbCd= \
+		sums_run --signer "$srv/signer"); then
+		fail "--sums passed when hashing the $asset archive failed"
+	fi
+	grep -q "hashing tenmoku-server-1.2.3-$asset.tar.gz failed" "$srv/log" || fail "a failed hash of $asset is not named: $(cat "$srv/log")"
+	[ ! -e "$sumsfile" ] && [ ! -e "$sumsfile.sig" ] || fail "a failed hash of $asset left a sums file or a signature"
+done
+ok "--sums fails on a failed hash of the first, middle or last archive, leaving no sums and no signature"
+
+# --require-signature: no key fails and writes nothing; a key signs as before.
+if TENMOKU_UPDATE_PRIVATE_KEY='' sums_run --signer "$srv/signer" --require-signature; then
+	fail "--sums --require-signature passed with no key"
+fi
+grep -q 'no TENMOKU_UPDATE_PRIVATE_KEY, and --require-signature' "$srv/log" || fail "no reason given: $(cat "$srv/log")"
+[ ! -e "$sumsfile" ] && [ ! -e "$sumsfile.sig" ] || fail "--require-signature with no key left a sums file or a signature"
+TENMOKU_UPDATE_PRIVATE_KEY=secretseed TENMOKU_UPDATE_PUBLIC_KEY=AbCd= sums_run --signer "$srv/signer" --require-signature ||
+	{ cat "$srv/log"; fail "--sums --require-signature with a key failed"; }
+[ -s "$sumsfile.sig" ] || fail "--require-signature with a key wrote no signature"
+ok "--sums --require-signature refuses to leave the sums unsigned"
+
+# The workflow's own sums step: a tag push, stable or preview, fails without the key (and so
+# publishes nothing, as publish needs this job); a manual run warns and goes on unsigned.
+step_body "Write and sign the tenmoku-server SHA256SUMS" >"$t/sums-step.sh"
+[ -s "$t/sums-step.sh" ] || fail "could not extract the sums step"
+sums_step() { # sums_step VERSION EVENT REF_TYPE KEY: the step in $srv/step, log in $srv/log
+	rm -rf "$srv/step"
+	mkdir -p "$srv/step/dist" "$srv/step/runner/signer"
+	ln -s "$here" "$srv/step/scripts"
+	for a in linux-x86_64 linux-aarch64 macos-arm64; do
+		cp "$srv/dist/tenmoku-server-1.2.3-$a.tar.gz" "$srv/step/dist/tenmoku-server-$1-$a.tar.gz"
+	done
+	cp "$srv/signer" "$srv/step/runner/signer/sign_update_feed"
+	chmod 644 "$srv/step/runner/signer/sign_update_feed"
+	(cd "$srv/step" && VERSION=$1 GITHUB_EVENT_NAME=$2 GITHUB_REF_TYPE=$3 RUNNER_TEMP="$srv/step/runner" \
+		TENMOKU_UPDATE_PRIVATE_KEY=$4 TENMOKU_UPDATE_PUBLIC_KEY=AbCd= \
+		SIGNER_ARGS="$srv/signer.args" SIGNER_STDIN="$srv/signer.stdin" bash -e "$t/sums-step.sh") >"$srv/log" 2>&1
+}
+for v in 1.2.3 1.2.3-preview.1; do
+	if sums_step "$v" push tag ''; then
+		fail "the sums step passed for the tag v$v with no signing key"
+	fi
+	grep -q 'no TENMOKU_UPDATE_PRIVATE_KEY, and --require-signature' "$srv/log" || fail "v$v: no reason given: $(cat "$srv/log")"
+	[ ! -e "$srv/step/dist/tenmoku-server-$v-SHA256SUMS" ] || fail "v$v: an unsigned sums file was left"
+	sums_step "$v" push tag secretseed || { cat "$srv/log"; fail "the sums step failed for the tag v$v with a key"; }
+	[ -s "$srv/step/dist/tenmoku-server-$v-SHA256SUMS.sig" ] || fail "v$v: the sums step wrote no signature"
+done
+sums_step 1.2.3 workflow_dispatch tag '' || { cat "$srv/log"; fail "a manual run with no key failed"; }
+grep -q '::warning::tenmoku-server-1.2.3-SHA256SUMS is unsigned' "$srv/log" || fail "a manual unsigned run did not warn: $(cat "$srv/log")"
+[ ! -e "$srv/step/dist/tenmoku-server-1.2.3-SHA256SUMS.sig" ] || fail "a manual run with no key left a signature"
+ok "the sums step fails a stable or preview tag push with no signing key and signs it with one; a manual run warns and stays unsigned"
+
+# publish's stale-signature guard covers the sums: a rerun with no new .sig over a signed one is
+# refused; with one it replaces it.
+tag=v1.2.3 FAKE_VIEW_RC=0 FAKE_ASSETS='tenmoku-server-1.2.3-SHA256SUMS
+tenmoku-server-1.2.3-SHA256SUMS.sig'
+if publish none tenmoku-server-1.2.3-SHA256SUMS; then
+	fail "a rerun with no sums signature over a release that has one was not refused"
+fi
+grep -q 'has tenmoku-server-1.2.3-SHA256SUMS.sig and this run made none' "$t/publish.log" || fail "no reason given: $(cat "$t/publish.log")"
+[ ! -s "$t/gh.log" ] || fail "the refused rerun still changed the release: $(cat "$t/gh.log")"
+publish none tenmoku-server-1.2.3-SHA256SUMS tenmoku-server-1.2.3-SHA256SUMS.sig || { cat "$t/publish.log"; fail "a signed sums rerun failed"; }
+grep -q '^release upload v1.2.3 .*dist/tenmoku-server-1.2.3-SHA256SUMS.sig .*--clobber' "$t/gh.log" || fail "the signed sums rerun: $(cat "$t/gh.log")"
+FAKE_ASSETS=''
+ok "a rerun with no SHA256SUMS.sig over a signed one is refused; a signed one replaces it"
+
+# No app bundle, installer or Velopack package holds tenmoku-server: the app jobs never build,
+# fetch or name it, the packaging scripts never name it, and what they pack has none.
+for j in macos-arm64 windows linux-x86_64; do
+	job "$j" | grep -n 'tenmoku-server\|download-artifact' && fail "$j names tenmoku-server or downloads an artifact (above): no app package may hold the server"
+done
+grep -n -e '--workspace' -e 'cargo build --release --locked$' -e 'cargo build --release$' "$wf" && fail "a build above is not of one package"
+for f in bundle-macos.sh sign-notarize-macos.sh package-linux.sh package-windows.ps1 velopack-pack.sh velopack-pack.ps1; do
+	grep -n 'tenmoku-server' "$here/$f" && fail "$f names tenmoku-server (above): no app package may hold the server"
+done
+[ -z "$(find "$app" -iname '*tenmoku-server*')" ] || fail "the fixture Tenmoku.app holds tenmoku-server"
+grep -q 'tenmoku-server' "$t/linux.list" && fail "the Linux app archive holds tenmoku-server"
+grep -q 'tenmoku-server' "$t/vpk.log" && fail "the AppImage pack names tenmoku-server"
+ok "no app job, packaging script, bundle, archive or AppImage pack holds tenmoku-server"
 echo ok
