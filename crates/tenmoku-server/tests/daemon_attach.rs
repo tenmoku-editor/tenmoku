@@ -82,16 +82,23 @@ fn stdio_starts_the_daemon_once_and_a_second_attach_reuses_it() {
 #[test]
 fn without_a_runtime_dir_the_daemon_listens_under_the_cache() {
     let host = Host::new();
-    let paths = Paths::new(BUILD, None, Some(&host.home)).unwrap();
+    // The socket's path under the cache holds the build id twice, and a
+    // preview's is long: only a home shorter than the host's own leaves room.
+    let home = tempfile::Builder::new()
+        .prefix("h")
+        .rand_bytes(3)
+        .tempdir_in("/tmp")
+        .unwrap();
+    let paths = Paths::new(BUILD, None, Some(home.path())).unwrap();
     assert_eq!(
         paths.dir,
-        host.home
+        home.path()
             .join(".cache/tenmoku-server")
             .join(BUILD)
             .join("run")
     );
     let mut stdio = host.stdio();
-    stdio.env_remove("XDG_RUNTIME_DIR");
+    stdio.env("HOME", home.path()).env_remove("XDG_RUNTIME_DIR");
     let (client, _) = handshake(Link::spawn(&mut stdio).unwrap(), client_config(), None).unwrap();
     let _kill = KillDaemon(paths.daemon_pid());
     assert!(exists(&paths.socket));
