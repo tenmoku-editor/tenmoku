@@ -30,7 +30,7 @@ use gpui::{
 use crate::{
     MarkdownStyle,
     inlines::{self, Base},
-    table,
+    mermaid, table,
     view::{LinkHandler, RenderCx, Sink},
 };
 
@@ -356,6 +356,19 @@ pub(crate) fn render(block: &Block, first: bool, cx: &mut RenderCx) -> AnyElemen
         } => {
             let id = cx.next_code();
             let element = element();
+            // Only the view draws diagrams: hovers, chat replies and other
+            // hosts keep the code.
+            let diagram = (element.is_none() && !cx.compact && mermaid::is_mermaid(info))
+                .then(|| mermaid::render(code, cx));
+            let note = match diagram {
+                Some(mermaid::Drawn::Diagram(diagram)) => {
+                    return (*diagram)
+                        .debug_selector(|| format!("md-diagram-{id}"))
+                        .into_any_element();
+                }
+                Some(mermaid::Drawn::Failed(why)) => Some(why),
+                Some(mermaid::Drawn::Code) | None => None,
+            };
             let header = (element.as_ref())
                 .and_then(|element| element.code_header.as_ref())
                 .map(|header| {
@@ -422,7 +435,7 @@ pub(crate) fn render(block: &Block, first: bool, cx: &mut RenderCx) -> AnyElemen
                         }
                     }
                 });
-            match (header, on_bounds) {
+            let drawn = match (header, on_bounds) {
                 (None, None) => block.into_any_element(),
                 (None, Some(on_bounds)) => div()
                     .w_full()
@@ -440,6 +453,20 @@ pub(crate) fn render(block: &Block, first: bool, cx: &mut RenderCx) -> AnyElemen
                     .child(header)
                     .child(block)
                     .into_any_element(),
+            };
+            match note {
+                Some(why) => div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .gap(px(4.))
+                    .child(drawn)
+                    .child(
+                        mermaid::note(why, style)
+                            .debug_selector(|| format!("md-diagram-{id}-error")),
+                    )
+                    .into_any_element(),
+                None => drawn,
             }
         }
         BlockKind::Table { align, head, rows } => {

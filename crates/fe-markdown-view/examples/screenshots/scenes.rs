@@ -13,6 +13,9 @@ use kiln_ui::{Theme, ThemeData, UiTheme};
 /// cuts the fixture off below the Rust fence, so the scenes are as tall as
 /// it needs to show every construct.
 const SCENE_SIZE: Size<Pixels> = size(px(800.), px(820.));
+/// The Mermaid scenes': as tall as their fixture, the broken fence's note
+/// and the paragraph under it included.
+const MERMAID_SCENE_SIZE: Size<Pixels> = size(px(800.), px(960.));
 
 /// Pinned so goldens don't depend on which fonts are installed (TESTING.md):
 /// the bundled code family, which [`main`] registers.
@@ -54,11 +57,44 @@ def greet(name): return f"hello, {name}"
 ![a local picture](picture.svg) ![a remote picture](https://example.com/picture.png)
 "#;
 
+/// Mermaid fences: a flowchart and a sequence diagram drawn as diagrams,
+/// and a broken one shown as code with its note.
+const MERMAID_FIXTURE: &str = r#"# Diagrams
+
+```mermaid
+flowchart LR
+    Edit[Edit the source] --> Parse{Parses?}
+    Parse -->|yes| Draw[Draw the diagram]
+    Parse -->|no| Code[Show the code]
+    Draw --> Done((Done))
+```
+
+```mermaid
+sequenceDiagram
+    participant Editor
+    participant Preview
+    participant Merman
+    Editor->>Preview: Document changed
+    Preview->>Merman: Render the fence
+    Merman-->>Preview: SVG
+    Note over Preview: Drawn in the theme
+```
+
+```mermaid
+flowchart TD
+    A --> (((
+```
+
+After the diagrams.
+"#;
+
 /// A small picture for the fixture's local image.
 const PICTURE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="40" viewBox="0 0 64 40"><rect width="64" height="40" rx="6" fill="#4f7cc8"/><circle cx="20" cy="20" r="10" fill="#f0c674"/></svg>"##;
 
 struct Scene {
     name: &'static str,
+    fixture: &'static str,
+    size: Size<Pixels>,
     palette: &'static EditorPalette,
     ui: UiTheme,
 }
@@ -74,25 +110,43 @@ fn scenes() -> Vec<Scene> {
     vec![
         Scene {
             name: "markdown_preview_dark",
+            fixture: FIXTURE,
+            size: SCENE_SIZE,
             palette: EditorPalette::fastedit_dark(),
             ui: ui_of(DEFAULT_DARK),
         },
         Scene {
             name: "markdown_preview_light",
+            fixture: FIXTURE,
+            size: SCENE_SIZE,
+            palette: EditorPalette::fastedit_light(),
+            ui: ui_of(DEFAULT_LIGHT),
+        },
+        Scene {
+            name: "markdown_mermaid_dark",
+            fixture: MERMAID_FIXTURE,
+            size: MERMAID_SCENE_SIZE,
+            palette: EditorPalette::fastedit_dark(),
+            ui: ui_of(DEFAULT_DARK),
+        },
+        Scene {
+            name: "markdown_mermaid_light",
+            fixture: MERMAID_FIXTURE,
+            size: MERMAID_SCENE_SIZE,
             palette: EditorPalette::fastedit_light(),
             ui: ui_of(DEFAULT_LIGHT),
         },
     ]
 }
 
-/// Renders the fixture in `scene`'s colours, off screen, once its images
-/// and highlights have landed.
+/// Renders `scene`'s fixture in its colours, off screen, once its images,
+/// diagrams and highlights have landed.
 fn capture(cx: &mut VisualTestAppContext, scene: &Scene) -> Result<RgbaImage> {
     let dir = tempfile::tempdir()?;
     std::fs::write(dir.path().join("picture.svg"), PICTURE)?;
     let doc_path = dir.path().join("README.md");
-    let document = Arc::new(fe_markdown::parse(FIXTURE));
-    let window = cx.open_offscreen_window(SCENE_SIZE, |_, cx| {
+    let document = Arc::new(fe_markdown::parse(scene.fixture));
+    let window = cx.open_offscreen_window(scene.size, |_, cx| {
         let editor = EditorTheme {
             font_family: FONT_FAMILY.into(),
             ..EditorTheme::from_palette(scene.palette, &EditorSettings::default(), cx)

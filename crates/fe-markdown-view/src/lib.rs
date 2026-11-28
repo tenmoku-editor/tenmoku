@@ -26,19 +26,29 @@
 //!   [`ElementOptions::default`] shows images as their alt text and has no
 //!   callbacks.
 //!
+//! With the `mermaid` feature, off by default, [`MarkdownView`] draws a
+//! ```` ```mermaid ```` fence as a diagram, a flowchart or a sequence
+//! diagram, through `mermaid_svg`; one it can't draw stays code, with a
+//! note saying why. Without the feature, and in [`markdown_element`] and
+//! [`document_element`], every fence is code. The feature builds merman
+//! and the MPL-2.0 CSS parser it needs (THIRD_PARTY.md).
+//!
 //! Test builds give elements `debug_selector`s: `md-block-<ix>` for each
 //! top-level block; `md-image-<n>` and `md-image-blocked-<n>` for the
 //! document's `n`th image, with `md-image-<n>-loading` and
 //! `md-image-<n>-failed` for the alt text shown in its place, and
 //! `md-image-alt-<n>` for [`Images::AltText`]'s; `md-task-<n>` for the
 //! `n`th task checkbox; and `md-code-<n>` for the `n`th code block, with
-//! `md-code-<n>-text` for its text, as wide as its longest line.
+//! `md-code-<n>-text` for its text, as wide as its longest line; a Mermaid
+//! fence drawn as a diagram is `md-diagram-<n>` instead, and one that
+//! can't be drawn has its note `md-diagram-<n>-error` under its code.
 
 mod blocks;
 mod compact;
 mod image;
 mod inlines;
 pub mod l10n;
+mod mermaid;
 mod style;
 mod table;
 mod view;
@@ -50,6 +60,8 @@ pub use blocks::{
     document_element,
 };
 pub use compact::markdown_element;
+#[cfg(feature = "mermaid")]
+pub use mermaid::{DiagramError, mermaid_svg};
 pub use style::MarkdownStyle;
 pub use view::LinkHandler;
 pub use view::{MarkdownView, MarkdownViewEvent};

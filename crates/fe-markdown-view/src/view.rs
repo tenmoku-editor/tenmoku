@@ -2,7 +2,7 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
@@ -16,7 +16,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, TextRun, WeakEntity, Window, div, relative,
 };
 
-use crate::{MarkdownStyle, blocks, image::Resolved, inlines::LinkTo};
+use crate::{MarkdownStyle, blocks, image::Resolved, inlines::LinkTo, mermaid};
 
 /// A Markdown document drawn as VS Code's preview draws it. It shows
 /// what it's given and acts on nothing: a link click is a
@@ -43,6 +43,8 @@ pub struct MarkdownView {
     /// Whether `reported_y` waits on the next frame, which applies a
     /// heading scroll, to settle.
     rebaseline: bool,
+    /// The diagrams the last frame drew, whose images GPUI caches.
+    diagrams: HashSet<mermaid::DiagramSource>,
 }
 
 /// A block, list item or table row in the last frame: the source lines it
@@ -65,6 +67,8 @@ pub(crate) struct Tracked {
     regions: Layout,
     /// Whether `regions` are of the document and style being shown.
     fresh: bool,
+    /// The Mermaid diagrams drawn, in document order.
+    pub(crate) diagrams: Vec<mermaid::DiagramSource>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,6 +109,7 @@ impl MarkdownView {
             pending_line: None,
             reported_y: 0.,
             rebaseline: false,
+            diagrams: HashSet::new(),
         }
     }
 
@@ -262,6 +267,23 @@ impl MarkdownView {
             cx.notify();
         }
     }
+}
+
+/// Drops from GPUI's cache the diagrams drawn before this frame, `before`,
+/// and not in it, as when `set_document` or `set_style` replaced them, so
+/// editing a diagram doesn't grow the cache; `before` becomes this frame's.
+fn forget_diagrams(
+    before: &mut HashSet<mermaid::DiagramSource>,
+    tracked: &RefCell<Tracked>,
+    cx: &mut App,
+) {
+    let drawn: HashSet<_> = std::mem::take(&mut tracked.borrow_mut().diagrams)
+        .into_iter()
+        .collect();
+    for gone in before.difference(&drawn) {
+        mermaid::forget(gone, cx);
+    }
+    *before = drawn;
 }
 
 impl Focusable for MarkdownView {
@@ -568,6 +590,7 @@ impl Render for MarkdownView {
         {
             let mut tracked = self.tracked.borrow_mut();
             tracked.raw.clear();
+            tracked.diagrams.clear();
             tracked.fresh = false;
         }
         let mut rcx = RenderCx {
@@ -599,6 +622,7 @@ impl Render for MarkdownView {
                     .child(blocks::render(block, ix == 0, &mut rcx))
             })
             .collect();
+        forget_diagrams(&mut self.diagrams, &self.tracked, cx);
         let lines: Vec<_> = self
             .document
             .blocks

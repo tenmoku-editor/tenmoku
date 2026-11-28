@@ -38,7 +38,8 @@ fe-keymap.workspace = true
 fe-lsp.workspace = true
 # The Markdown preview's document and its view.
 fe-markdown.workspace = true
-fe-markdown-view.workspace = true
+# With ```mermaid fences drawn as diagrams.
+fe-markdown-view = { workspace = true, features = ["mermaid"] }
 fe-nav.workspace = true
 fe-project.workspace = true
 # Test runs' output read into test events, and each test's history.

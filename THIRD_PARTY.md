@@ -460,8 +460,12 @@ MPL-2.0 requires telling recipients where to get the source of these crates.
 |---|---|---|---|
 | dwrote | 0.11.5 | https://crates.io/crates/dwrote | zed-font-kit (Windows only) |
 | option-ext | 0.2.0 | https://crates.io/crates/option-ext | dirs-sys via zed-font-kit |
+| cssparser | 0.38.0 | https://crates.io/crates/cssparser | merman (Mermaid diagrams in the Markdown preview) |
+| dtoa-short | 0.3.5 | https://crates.io/crates/dtoa-short | cssparser via merman |
 
 `cbindgen` (MPL-2.0) is a build-time tool only and is not distributed.
+
+`cssparser-macros` (MPL-2.0), cssparser's procedural macros, runs at build time only and is not distributed.
 
 ## Shipped CDLA-Permissive-2.0 data
 

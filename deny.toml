@@ -40,6 +40,13 @@ exceptions = [
     { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
     # dirs-sys helper via zed-font-kit; unmodified.
     { allow = ["MPL-2.0"], crate = "option-ext" },
+    # Servo's CSS parser, which merman (Mermaid diagrams in the Markdown
+    # preview, fe-markdown-view) needs; unmodified, allowed by the user
+    # 2026-11-27 (docs/decisions/5pbqt7wr2t-merman-mpl.md). cssparser-macros
+    # is its proc macros, build-time only.
+    { allow = ["MPL-2.0"], crate = "cssparser" },
+    { allow = ["MPL-2.0"], crate = "cssparser-macros" },
+    { allow = ["MPL-2.0"], crate = "dtoa-short" },
 ]
 
 # Our own crates are Apache-2.0 and unpublished.

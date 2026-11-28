@@ -137,6 +137,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # read with the XML parser GPUI's SVG parser reads it with (already in the
 # lock through gpui).
 usvg = { version = "0.46", default-features = false }
+# Drawing ```mermaid fences in the Markdown preview (fe-markdown-view's
+# `mermaid` feature): merman (MIT OR Apache-2.0), Mermaid in pure Rust, to
+# SVG. Flowcharts and sequence diagrams only, with no layout engine feature:
+# both lay out through dugong, which merman always builds. Never
+# `layout-elk`, which is ported EPL-2.0 code. merman needs Servo's MPL-2.0
+# cssparser (deny.toml, THIRD_PARTY.md).
+merman = { version = "0.11", default-features = false, features = ["svg", "diagram-flowchart", "diagram-sequence"] }
 # Installing an extension from a .zip or a .tar.gz (fe-workbench): deflate
 # only, through flate2's zlib-rs backend (already in the lock).
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }

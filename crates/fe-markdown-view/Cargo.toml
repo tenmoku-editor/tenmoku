@@ -17,9 +17,23 @@ gpui.workspace = true
 image.workspace = true
 kiln-l10n.workspace = true
 kiln-ui.workspace = true
+# ```mermaid fences, drawn as diagrams: the `mermaid` feature.
+merman = { workspace = true, optional = true }
+# The diagrams' theme, as merman's site configuration.
+serde_json = { workspace = true, optional = true }
 usvg.workspace = true
 
+[features]
+# Draws ```mermaid fences as diagrams through merman, which brings Servo's
+# MPL-2.0 cssparser (THIRD_PARTY.md): off unless a host asks, so a crate
+# embedding the preview gets no MPL code by default. Without it, a Mermaid
+# fence is code.
+mermaid = ["dep:merman", "dep:serde_json"]
+
 [dev-dependencies]
+# The tests and the screenshots example draw diagrams: this crate with its
+# `mermaid` feature.
+fe-markdown-view = { path = ".", features = ["mermaid"] }
 kiln-l10n = { workspace = true, features = ["lint"] }
 # The bundled fonts, which the screenshots example (and fe-gpui's font tests)
 # register and pin, as Tenmoku does.
@@ -34,6 +48,10 @@ gpui_platform = { workspace = true, features = ["test-support"] }
 # The screenshots example's harness: settling, comparison and goldens.
 kiln-platform = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+
+[[test]]
+name = "mermaid"
+required-features = ["mermaid"]
 
 [lints]
 workspace = true
