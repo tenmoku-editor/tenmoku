@@ -1,0 +1,7 @@
+# The built-in bash grammar as WebAssembly, for crates/fe-syntax/benches/wasm.rs:
+# the crate source Cargo.lock pins, which fe-syntax links natively.
+# scripts/build-grammar-wasm.sh checks the version against Cargo.lock.
+crate = "tree-sitter-bash"
+version = "0.25.1"
+grammar = "bash"
+src = "src"

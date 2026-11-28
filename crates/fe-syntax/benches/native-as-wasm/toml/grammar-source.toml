@@ -1,0 +1,7 @@
+# The built-in toml grammar as WebAssembly, for crates/fe-syntax/benches/wasm.rs:
+# the crate source Cargo.lock pins, which fe-syntax links natively.
+# scripts/build-grammar-wasm.sh checks the version against Cargo.lock.
+crate = "tree-sitter-toml-ng"
+version = "0.7.0"
+grammar = "toml"
+src = "src"

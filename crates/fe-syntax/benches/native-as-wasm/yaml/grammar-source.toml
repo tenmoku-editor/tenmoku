@@ -1,0 +1,5 @@
+# The built-in yaml grammar as WebAssembly, for crates/fe-syntax/benches/wasm.rs:
+# the patched source Cargo.toml's [patch.crates-io] points fe-syntax at.
+path = "vendor/tree-sitter-yaml"
+grammar = "yaml"
+src = "src"

@@ -9,9 +9,15 @@
 #   GRAMMAR_LANGUAGES=kotlin,scala scripts/build-grammar-wasm.sh   # the same
 #   UPDATE_GOLDEN=1 scripts/build-grammar-wasm.sh dart  # writes test/*.golden
 #   WASI_SDK=/path/to/wasi-sdk scripts/build-grammar-wasm.sh
+#   GRAMMAR_ROOT=crates/fe-syntax/benches/native-as-wasm scripts/build-grammar-wasm.sh
 #
+# - GRAMMAR_ROOT, when set to other than extensions/grammars, is another
+#   directory of <language>/grammar-source.toml: the built-in grammars benched
+#   as WebAssembly (crates/fe-syntax/benches/wasm.rs). Their modules go to
+#   target/grammar-wasm-native/ instead, and the wasm_parity check, which
+#   reads only extensions/grammars, doesn't run.
 # - Each language's grammar-source.toml says where its source is, in one of
-#   three forms (extensions/grammars/README.md):
+#   four forms (extensions/grammars/README.md has the first three):
 #   - crate + version: the crate source Cargo.lock pins, from the cargo
 #     registry, so the wasm is the grammar fe-syntax links natively;
 #   - git + rev: that commit of a GitHub repository, fetched whole into
@@ -19,6 +25,8 @@
 #   - registry = "crates.io" + crate + version + sha256: that .crate from
 #     static.crates.io, checked against the hash before it's unpacked into
 #     target/grammar-src/.
+#   - path: a directory of this repository under vendor/, the patched or
+#     vendored crate Cargo.toml points at, so the wasm is that source too.
 #   Its parity_needs, other first-party languages its sample injects, are
 #   built too.
 # - The flags are those of `tree-sitter build --wasm` (tree-sitter-loader 0.27),
@@ -53,6 +61,12 @@ wasi_sdk_sha256() {
 
 grammars=extensions/grammars
 out=target/grammar-wasm
+parity=1
+if [ -n "${GRAMMAR_ROOT:-}" ] && [ "${GRAMMAR_ROOT%/}" != "$grammars" ]; then
+  grammars=${GRAMMAR_ROOT%/}
+  out=target/grammar-wasm-native
+  parity=0
+fi
 fetched=target/grammar-src
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 PATH="$cargo_home/bin:$PATH"
@@ -208,6 +222,15 @@ source_dir() {
     root=$(fetch_git "$language" "$url" "$rev")
     echo "$root/$src"
     echo "$url $rev"
+  elif has "$source" path; then
+    root=$(field "$source" path)
+    case $root in
+    vendor/*) inside "$root" || die "$source's path $root isn't a path inside the repository" ;;
+    *) die "$source's path $root isn't under vendor/" ;;
+    esac
+    [ -d "$root" ] || die "$source's path $root isn't a directory"
+    echo "$PWD/$root/$src"
+    echo "$root"
   elif has "$source" registry; then
     [ "$(field "$source" registry)" = crates.io ] ||
       die "$source's registry isn't \"crates.io\""
@@ -337,6 +360,9 @@ for pid in "${pids[@]}"; do
   wait "$pid" || failed=1
 done
 [ "$failed" -eq 0 ] || die "a grammar failed to build"
+
+# The built-ins benched as WebAssembly have no extension to check.
+[ "$parity" -eq 1 ] || exit 0
 
 # The test reads which languages to check; every one when it's empty.
 if [ "$whole" -eq 1 ]; then

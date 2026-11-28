@@ -1,0 +1,5 @@
+# The built-in just grammar as WebAssembly, for crates/fe-syntax/benches/wasm.rs:
+# the vendored source Cargo.toml points fe-syntax at.
+path = "vendor/tree-sitter-just"
+grammar = "just"
+src = "src"

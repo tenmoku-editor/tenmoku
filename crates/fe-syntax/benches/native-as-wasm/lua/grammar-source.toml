@@ -1,0 +1,7 @@
+# The built-in lua grammar as WebAssembly, for crates/fe-syntax/benches/wasm.rs:
+# the crate source Cargo.lock pins, which fe-syntax links natively.
+# scripts/build-grammar-wasm.sh checks the version against Cargo.lock.
+crate = "tree-sitter-lua"
+version = "0.5.0"
+grammar = "lua"
+src = "src"

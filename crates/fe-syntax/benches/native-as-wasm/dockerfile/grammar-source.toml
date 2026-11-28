@@ -1,0 +1,7 @@
+# The built-in dockerfile grammar as WebAssembly, for crates/fe-syntax/benches/wasm.rs:
+# the crate source Cargo.lock pins, which fe-syntax links natively.
+# scripts/build-grammar-wasm.sh checks the version against Cargo.lock.
+crate = "tree-sitter-containerfile"
+version = "0.9.2"
+grammar = "containerfile"
+src = "src"

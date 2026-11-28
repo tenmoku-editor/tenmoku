@@ -1884,6 +1884,91 @@ To rerun: `scripts/build-grammar-wasm.sh kotlin`, then
 `cargo bench -p fe-syntax --bench wasm`, on a quiet machine if possible; the
 bench exits naming the script if the module is missing.
 
+### Built-in grammars with a C scanner, as WebAssembly (T2173)
+
+The 16 built-ins in the `default` features whose grammar has a hand-written C
+external scanner, each against the same grammar as WebAssembly. Each module
+is built from the source the app links (the `Cargo.lock` crate, or `vendor/`
+for just and yaml) by `GRAMMAR_ROOT=crates/fe-syntax/benches/native-as-wasm
+scripts/build-grammar-wasm.sh`, into `target/grammar-wasm-native/`. It's
+registered as `<language>_wasm` with the built-in's own highlight and
+injection queries. The cases and settings are Kotlin's above, on each
+language's golden sample (`tests/golden/<language>.*`) and that sample
+repeated to about 5,000 lines. Later copies leave out a leading `#!` line;
+XML repeats its root element's content inside the one root. No 5k corpus
+parses with errors. Before timing, the bench checks that each language's wasm
+highlights of its golden sample equal the built-in's. All 16 did, and all 16
+loaded, so none was left out.
+
+`markdown_inline` is measured on the text the block grammar hands it: each
+`inline` node of `tests/golden/markdown.md`, joined by blank lines (751 B, 45
+lines), repeated to 4,995 lines.
+
+**Quiet Mac, runs E and F** (the M3 Max of runs C and D, its other lanes
+held, release build, commit 3f6dd3ad8). The 1-minute load (`uptime`) was 3.10
+at the start of run E and 2.89 at its end, then 2.74 at the start of run F
+and 3.84 at its end. Kotlin ran first in both, as a check against runs C and
+D. It gave 1.46× and 1.48× on the golden sample, 1.52× and 1.50× on 5k
+lines, and a 125 and 126 ms load, in line with C and D.
+
+Parse ratios (wasm/native, medians) and the wasm load, with the verdict under
+the Thresholds above. A verdict takes the worse of the two runs.
+
+| Language | Parse, golden E | Parse, golden F | Parse, 5k E | Parse, 5k F | Load E | Load F | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| bash | 1.59× | 1.62× | 1.64× | 1.64× | 106 ms | 106 ms | acceptable |
+| css | 1.52× | 1.57× | 1.50× | 1.50× | 44 ms | 44 ms | acceptable |
+| dockerfile | 1.78× | 1.80× | 1.74× | 1.79× | 34 ms | 35 ms | acceptable |
+| html | 2.10× | 2.09× | 2.14× | 2.03× | 14 ms | 14 ms | **warning** (parse 2–3×) |
+| javascript | 1.80× | 1.85× | 1.81× | 1.83× | 34 ms | 35 ms | acceptable |
+| just | 1.64× | 1.61× | 1.57× | 1.57× | 16 ms | 15 ms | acceptable |
+| lua | 1.46× | 1.51× | 1.54× | 1.51× | 15 ms | 15 ms | acceptable |
+| markdown | 1.42× | 1.38× | 1.40× | 1.42× | 73 ms | 72 ms | acceptable |
+| markdown_inline | 1.33× | 1.28× | 1.32× | 1.31× | 75 ms | 75 ms | acceptable |
+| python | 1.56× | 1.58× | 1.59× | 1.60× | 32 ms | 31 ms | acceptable |
+| rust | 1.61× | 1.57× | 1.50× | 1.57× | 51 ms | 51 ms | acceptable |
+| toml | 1.48× | 1.45× | 1.50× | 1.42× | 16 ms | 16 ms | acceptable |
+| typescript | 1.78× | 1.79× | 1.82× | 1.79× | 47 ms | 47 ms | acceptable |
+| tsx | 1.80× | 1.83× | 1.80× | 1.81× | 52 ms | 53 ms | acceptable |
+| xml | 1.49× | 1.47× | 1.53× | 1.40× | 21 ms | 20 ms | acceptable |
+| yaml | 1.44× | 1.38× | 1.44× | 1.40× | 31 ms | 31 ms | acceptable |
+
+The 5k-line times behind those ratios, and the cases without a threshold:
+
+| Language | Parse 5k, native E / F | Parse 5k, wasm E / F | Highlight 5k, wasm/native E / F | Reparse one character, wasm/native E / F |
+| --- | --- | --- | --- | --- |
+| bash | 10.6 / 10.6 ms | 17.4 / 17.3 ms | 0.99× / 0.97× | 1.25× / 1.29× |
+| css | 6.18 / 6.14 ms | 9.29 / 9.21 ms | 1.00× / 1.00× | 1.02× / 1.00× |
+| dockerfile | 5.96 / 5.96 ms | 10.4 / 10.7 ms | 1.00× / 1.03× | 1.01× / 1.00× |
+| html | 8.94 / 9.09 ms | 19.1 / 18.4 ms | 0.99× / 0.98× | 1.12× / 1.18× |
+| javascript | 9.49 / 9.44 ms | 17.1 / 17.3 ms | 1.00× / 0.99× | 1.15× / 1.13× |
+| just | 6.30 / 6.29 ms | 9.90 / 9.88 ms | 1.00× / 1.02× | 1.17× / 1.20× |
+| lua | 10.0 / 10.3 ms | 15.4 / 15.5 ms | 0.99× / 0.99× | 1.10× / 1.13× |
+| markdown | 12.7 / 12.7 ms | 17.8 / 18.0 ms | 0.99× / 1.01× | 1.04× / 1.08× |
+| markdown_inline | 29.4 / 29.7 ms | 38.7 / 38.8 ms | 1.00× / 0.99× | 1.29× / 1.34× |
+| python | 13.7 / 13.7 ms | 21.9 / 22.0 ms | 1.00× / 1.02× | 1.43× / 1.40× |
+| rust | 12.8 / 12.3 ms | 19.3 / 19.3 ms | 1.01× / 0.98× | 1.02× / 1.02× |
+| toml | 5.46 / 5.56 ms | 8.19 / 7.91 ms | 1.00× / 0.99× | 1.03× / 1.05× |
+| typescript | 10.5 / 10.5 ms | 19.2 / 18.8 ms | 1.00× / 1.00× | 1.47× / 1.43× |
+| tsx | 10.3 / 10.3 ms | 18.6 / 18.5 ms | 1.01× / 1.00× | 1.01× / 1.02× |
+| xml | 10.8 / 11.2 ms | 16.5 / 15.7 ms | 1.00× / 1.01× | 0.99× / 1.03× |
+| yaml | 7.13 / 7.07 ms | 10.3 / 9.89 ms | 1.02× / 0.99× | 1.22× / 1.21× |
+
+Every grammar meets the load threshold, with 14–106 ms against 500 ms. Every
+one except HTML meets the parse threshold. HTML's 2.03–2.14× is a warning:
+note it, don't block on it. The two runs agree to within 0.1× on every ratio,
+and highlight stays near 1×, as it does for Kotlin. The decision these numbers
+feed, migrate or stay native for each grammar, is
+`docs/decisions/mmtvcy52fr-native-grammars-as-wasm.md`.
+
+To rerun: `GRAMMAR_ROOT=crates/fe-syntax/benches/native-as-wasm
+scripts/build-grammar-wasm.sh` and `scripts/build-grammar-wasm.sh kotlin`,
+then `cargo bench -p fe-syntax --bench wasm --features kotlin`. Kotlin's
+built-in needs that feature, and without it the bench leaves Kotlin out.
+`WASM_BENCH_LANGUAGES=html,yaml` runs only those. A language whose module is
+missing, won't load, or doesn't highlight as the built-in does is reported and
+not timed.
+
 ## Italic and bold spans (`cargo bench -p fe-gpui --bench styled_shape`)
 
 Spans the theme sets in a face of their own (`[syntax_style]`: Yohen's and
